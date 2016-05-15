@@ -409,6 +409,19 @@ struct OS_INPUT_SYSTEM
     OS_GAMEPAD_LIST     GamepadBuffer [2];      /// Identifier and state information for gamepad devices.
 };
 
+/// @summary Defines the data associated with a display output.
+struct OS_DISPLAY
+{
+    DWORD               Ordinal;                /// The unique display ordinal number.
+    HMONITOR            Monitor;                /// The operating system monitor handle.
+    int                 DisplayX;               /// The x-coordinate of the upper-left corner of the display, in virtual display coordinates.
+    int                 DisplayY;               /// The y-coordinate of the upper-left corner of the display, in virtual display coordinates.
+    int                 DisplayWidth;           /// The width of the display, in pixels.
+    int                 DisplayHeight;          /// The height of the display, in pixels.
+    DEVMODE             DisplayMode;            /// The active display settings.
+    DISPLAY_DEVICE      DisplayInfo;            /// Information uniquely identifying the display to the operating system.
+};
+
 /// @summary Define constants for specifying worker thread stack sizes.
 enum OS_WORKER_THREAD_STACK_SIZE     : size_t
 {
@@ -429,6 +442,13 @@ enum OS_WORKER_THREAD_WAKE_REASON    : int
     OS_WORKER_THREAD_WAKE_FOR_SIGNAL = 1,      /// The thread was woken because of a general signal.
     OS_WORKER_THREAD_WAKE_FOR_RUN    = 2,      /// The thread was woken because an explicit work wakeup signal was sent.
     OS_WORKER_THREAD_WAKE_FOR_ERROR  = 3,      /// The thread was woken because of an error in GetQueuedCompletionStatus.
+};
+
+/// @summary Define the set of display orientations.
+enum OS_DISPLAY_ORIENTATION          : int
+{
+    OS_DISPLAY_ORIENTATION_LANDSCAPE = 0,      /// The display orientation is landscape.
+    OS_DISPLAY_ORIENTATION_PORTRAIT  = 1,      /// The display orientation is portrait.
 };
 
 /// @summary Define flags indicating how to interpret WIN32_POINTER_STATE::Relative.
@@ -3151,6 +3171,148 @@ OsConsumeInputEvents
     OsForwardKeyboardBuffer(&system->KeyboardBuffer[prev_buffer], &system->KeyboardBuffer[curr_buffer]);
     OsForwardPointerBuffer (&system->PointerBuffer [prev_buffer], &system->PointerBuffer [curr_buffer]);
     OsForwardGamepadBuffer (&system->GamepadBuffer [prev_buffer], &system->GamepadBuffer [curr_buffer]);
+}
+
+/// @summary Enumerate the displays attached to the system that have an attached desktop.
+/// @param arena The memory arena from which to allocate the display list.
+/// @param display_count On return, the number of attached displays is stored in this location.
+/// @return A list of information about the displays attached to the system.
+public_function OS_DISPLAY*
+OsEnumerateAttachedDisplays
+(
+    OS_MEMORY_ARENA *arena, 
+    size_t  &display_count
+)
+{
+    DEVMODE     dm; dm.dmSize = sizeof(DEVMODE);
+    DISPLAY_DEVICE  dd; dd.cb = sizeof(DISPLAY_DEVICE);
+    OS_DISPLAY *display_list  = NULL;
+    size_t      num_displays  = 0;
+    DWORD         req_fields  = DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT;
+    RECT                  rc  = {};
+    
+    // count the number of displays attached to the system.
+    for (DWORD ordinal = 0; EnumDisplayDevices(NULL, ordinal, &dd, 0); ++ordinal)
+    {   // ignore pseudo-displays and displays not attached to a desktop.
+        if ((dd.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER) != 0)
+            continue;
+        if ((dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) == 0)
+            continue;
+        num_displays++;
+    }
+    if ((display_list = OsMemoryArenaAllocateArray<OS_DISPLAY>(num_displays)) == NULL)
+    {
+        OsLayerError("ERROR: %S: Insufficient memory to allocate display list.\n", __FUNCTION__);
+        display_count = num_displays;
+        return NULL;
+    }
+    OsZeroMemory(display_list, num_displays * sizeof(OS_DISPLAY));
+    display_count = 0;
+
+    // retrieve display properties.
+    for (DWORD ordinal = 0; EnumDisplayDevices(NULL, ordinal, &dd, 0) && display_count < num_displays; ++ordinal)
+    {   // ignore pseudo-displays and displays not attached to a desktop.
+        if ((dd.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER) != 0)
+            continue;
+        if ((dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) == 0)
+            continue;
+
+        if (!EnumDisplaySettingsEx(dd.DeviceName, ENUM_CURRENT_SETTINGS, &dm, 0))
+        {   // try for the settings saved in the registry instead.
+            if (!EnumDisplaySettingsEx(dd.DeviceName, ENUM_REGISTRY_SETTINGS, &dm, 0))
+            {   // unable to retrieve the diplay settings. skip the display.
+                continue;
+            }
+        }
+        if ((dm.dmFields & req_fields) != req_fields)
+        {   // the DEVMODE doesn't report the required fields.
+            continue;
+        }
+
+        rc.left    = dm.dmPosition.x;
+        rc.top     = dm.dmPosition.y;
+        rc.right   = dm.dmPosition.x + dm.dmPelsWidth;
+        rc.bottom  = dm.dmPosition.y + dm.dmPelsHeight;
+        display_list[display_count].Ordinal       = ordinal;
+        display_list[display_count].Monitor       = MonitorFromRect(&rc, MONITOR_DEFAULTTONEAREST);
+        display_list[display_count].DisplayX      = dm.dmPosition.x;
+        display_list[display_count].DisplayY      = dm.dmPosition.y;
+        display_list[display_count].DisplayWidth  = dm.dmPelsWidth;
+        display_list[display_count].DisplayHeight = dm.dmPelsHeight;
+        OsCopyMemory(&display_list[display_count].DisplayMode, &dm, sizeof(DEVMODE));
+        OsCopyMemory(&display_list[display_count].DisplayInfo, &dd, sizeof(DISPLAY_DEVICE));
+        display_count++;
+    }
+    return display_list;
+}
+
+/// @summary Determine if a display is the current primary display attached to the system.
+/// @param display The display object to check.
+/// @return true if the specified display is the primary display.
+public_function bool
+OsIsPrimaryDisplay
+(
+    OS_DISPLAY const *display
+)
+{
+    return (display->DisplayInfo.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) != 0;
+}
+
+/// @summary Search a display list to locate the OS_DISPLAY representing the primary display.
+/// @param display_list The list of display information to search.
+/// @param display_count The number of displays in the display list.
+/// @return A pointer to the primary display, or NULL.
+public_function OS_DISPLAY*
+OsPrimaryDisplay
+(
+    OS_DISPLAY  *display_list, 
+    size_t const display_count
+)
+{
+    for (size_t i = 0; i < display_count; ++i)
+    {
+        if (display_list[i].DisplayInfo.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE)
+            return &display_list[i];
+    }
+    return NULL;
+}
+
+/// @summary Query a display for its current orientation.
+/// @param display The display object to query.
+/// @return One of OS_DISPLAY_ORIENTATION_PORTRAIT or OS_DISPLAY_ORIENTATION_LANDSCAPE.
+public_function int
+OsDisplayOrientation
+(
+    OS_DISPLAY const *display
+)
+{
+    if (display->DisplayWidth >= display->DisplayHeight)
+        return OS_DISPLAY_ORIENTATION_LANDSCAPE;
+    else
+        return OS_DISPLAY_ORIENTATION_PORTRAIT;
+}
+
+/// @summary Return the current refresh rate of a given display.
+/// @param display The display to query.
+/// @return The display refresh rate, in Hz.
+public_function float
+OsDisplayRefreshRate
+(
+    OS_DISPLAY const *display
+)
+{
+    if (display->DisplayMode.dmDisplayFrequency == 0 || 
+        display->DisplayMode.dmDisplayFrequency == 1)
+    {   // a value of 0 or 1 indicates the 'default' refresh rate.
+        HDC dc = GetDC(NULL);
+        int hz = GetDeviceCaps(dc, VREFRESH);
+        ReleaseDC(NULL, dc);
+        return (float)  hz;
+    }
+    else
+    {   // return the display frequency specified in the DEVMODE structure.
+        return (float) display->DisplayMode.dmDisplayFrequency;
+    }
 }
 
 // TODO(rlk): Fix thread startup to use ThreadInit/ThreadMain.
