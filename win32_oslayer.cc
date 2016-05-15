@@ -145,8 +145,27 @@
 //   Includes   //
 ////////////////*/
 #ifndef OS_LAYER_NO_INCLUDES
-#include <windows.h>
+#include <type_traits>
+
+#include <stddef.h>
+#include <stdint.h> 
+#include <stdarg.h>
+#include <assert.h>
+#include <inttypes.h>
+
+#include <process.h>
+#include <conio.h>
+#include <fcntl.h>
+#include <io.h>
+
+#include <tchar.h>
+#include <Windows.h>
+#include <Shellapi.h>
 #include <strsafe.h>
+#include <XInput.h>
+#include <intrin.h>
+
+#include <vulkan/vulkan.h>
 #endif
 
 #ifndef OS_LAYER_NO_TASK_PROFILER
@@ -167,150 +186,277 @@ struct OS_THREAD_POOL;
 /// The memory arena is not safe for concurrent access by multiple threads.
 struct OS_MEMORY_ARENA
 {
-    size_t            NextOffset;         /// The offset, in bytes relative to BaseAddress, of the next available byte.
-    size_t            BytesCommitted;     /// The number of bytes committed for the arena.
-    size_t            BytesReserved;      /// The number of bytes reserved for the arena.
-    uint8_t          *BaseAddress;        /// The base address of the reserved segment of process virtual address space.
-    size_t            ReserveAlignBytes;  /// The number of alignment-overhead bytes for the current user reservation.
-    size_t            ReserveTotalBytes;  /// The total size of the current user reservation, in bytes.
-    DWORD             PageSize;           /// The operating system page size.
-    DWORD             Granularity;        /// The operating system allocation granularity.
+    size_t              NextOffset;             /// The offset, in bytes relative to BaseAddress, of the next available byte.
+    size_t              BytesCommitted;         /// The number of bytes committed for the arena.
+    size_t              BytesReserved;          /// The number of bytes reserved for the arena.
+    uint8_t            *BaseAddress;            /// The base address of the reserved segment of process virtual address space.
+    size_t              ReserveAlignBytes;      /// The number of alignment-overhead bytes for the current user reservation.
+    size_t              ReserveTotalBytes;      /// The total size of the current user reservation, in bytes.
+    DWORD               PageSize;               /// The operating system page size.
+    DWORD               Granularity;            /// The operating system allocation granularity.
 };
 
 /// @summary Alias type for a marker within a memory arena.
-typedef uintptr_t     os_arena_marker_t;  /// The marker stores the value of the OS_MEMORY_ARENA::NextOffset field at a given point in time.
+typedef uintptr_t       os_arena_marker_t;      /// The marker stores the value of the OS_MEMORY_ARENA::NextOffset field at a given point in time.
 
 /// @summary Define the CPU topology information for the local system.
 struct OS_CPU_INFO
 {
-    size_t            NumaNodes;          /// The number of NUMA nodes in the system.
-    size_t            PhysicalCPUs;       /// The number of physical CPUs installed in the system.
-    size_t            PhysicalCores;      /// The total number of physical cores in all CPUs.
-    size_t            HardwareThreads;    /// The total number of hardware threads in all CPUs.
-    size_t            ThreadsPerCore;     /// The number of hardware threads per physical core.
-    char              VendorName[13];     /// The CPUID vendor string.
-    char              PreferAMD;          /// Set to 1 if AMD OpenCL implementations are preferred.
-    char              PreferIntel;        /// Set to 1 if Intel OpenCL implementations are preferred.
-    char              IsVirtualMachine;   /// Set to 1 if the process is running in a virtual machine.
+    size_t              NumaNodes;              /// The number of NUMA nodes in the system.
+    size_t              PhysicalCPUs;           /// The number of physical CPUs installed in the system.
+    size_t              PhysicalCores;          /// The total number of physical cores in all CPUs.
+    size_t              HardwareThreads;        /// The total number of hardware threads in all CPUs.
+    size_t              ThreadsPerCore;         /// The number of hardware threads per physical core.
+    char                VendorName[13];         /// The CPUID vendor string.
+    char                PreferAMD;              /// Set to 1 if AMD OpenCL implementations are preferred.
+    char                PreferIntel;            /// Set to 1 if Intel OpenCL implementations are preferred.
+    char                IsVirtualMachine;       /// Set to 1 if the process is running in a virtual machine.
 };
 
 /// @summary Define the data available to an application callback executing on a worker thread.
 struct OS_WORKER_THREAD
 {
-    OS_THREAD_POOL   *ThreadPool;         /// The thread pool that manages the worker.
-    OS_MEMORY_ARENA  *ThreadArena;        /// The thread-local memory arena.
-    void             *WorkerData;         /// The internal OS_WORKER_DATA associated with the worker thread.
-    void             *PoolContext;        /// The opaque, application-specific data passed through to the thread.
-    void             *ThreadContext;      /// The opaque, application-specific data created by the OS_WORKER_INIT callback for the thread.
-    size_t            ArenaSize;          /// The size of the thread-local memory arena, in bytes.
-    unsigned int      ThreadId;           /// The operating system identifier for the thread.
-};
-
-/// @summary Define the internal data passed associated with a worker thread. This data is passed through the OS_WORKER_THREAD::WorkerData field.
-/// The application generally should not need to access any of this data.
-struct OS_WORKER_DATA
-{
-    HANDLE            CompletionPort;     /// The I/O completion port used to wait and wake the thread.
+    OS_THREAD_POOL     *ThreadPool;             /// The thread pool that manages the worker.
+    OS_MEMORY_ARENA    *ThreadArena;            /// The thread-local memory arena.
+    HANDLE              CompletionPort;         /// The I/O completion port used to wait and wake the thread.
+    void               *PoolContext;            /// The opaque, application-specific data passed through to the thread.
+    void               *ThreadContext;          /// The opaque, application-specific data created by the OS_WORKER_INIT callback for the thread.
+    size_t              ArenaSize;              /// The size of the thread-local memory arena, in bytes.
+    unsigned int        ThreadId;               /// The operating system identifier for the thread.
 };
 
 /// @summary Define the signature for the callback invoked during worker thread initialization to allow the application to create any per-thread resources.
 /// @param thread_args An OS_WORKER_THREAD instance specifying worker thread data. The callback should set the ThreadContext field to its private data.
 /// @return Zero if initialization was successful, or -1 to terminate the worker thread.
-typedef int         (*OS_WORKER_INIT)(OS_WORKER_THREAD *thread_args);
+typedef int           (*OS_WORKER_INIT)(OS_WORKER_THREAD *thread_args);
 
 /// @summary Define the signature for the callback representing the application entry point on a worker thread.
 /// @param thread_args An OS_WORKER_THREAD instance, valid until the OS_WORKER_ENTRY returns, specifying per-thread data.
 /// @param signal_arg An application-defined value specified with the wake notification.
 /// @param wake_reason One of OS_WORKER_THREAD_WAKE_REASON indicating the reason the thread was woken.
-typedef void        (*OS_WORKER_ENTRY)(OS_WORKER_THREAD *thread_args, uintptr_t signal_arg, int wake_reason);
+typedef void          (*OS_WORKER_ENTRY)(OS_WORKER_THREAD *thread_args, uintptr_t signal_arg, int wake_reason);
 
 /// @summary Define the data package passed to OsWorkerThreadMain during thread pool creation.
 struct OS_WORKER_THREAD_INIT
 {
-    OS_THREAD_POOL   *ThreadPool;         /// The thread pool that manages the worker thread.
-    HANDLE            ReadySignal;        /// The manual-reset event to be signaled by the worker when it has successfully completed initialization and is ready-to-run.
-    HANDLE            ErrorSignal;        /// The manual-reset event to be signaled by the worker if it encounters a fatal error during initialization.
-    HANDLE            LaunchSignal;       /// The manual-reset event to be signaled by the pool when all worker threads should begin running.
-    HANDLE            TerminateSignal;    /// The manual-reset event to be signaled by the pool when all worker threads should terminate.
-    HANDLE            CompletionPort;     /// The I/O completion port signaled when the worker thread should wake up.
-    OS_WORKER_INIT    ThreadInit;         /// The callback function to run during thread launch to allow the application to allocate or initialize any per-thread data.
-    OS_WORKER_ENTRY   ThreadMain;         /// The callback function to run when a message is received by the worker thread.
-    void             *PoolContext;        /// Opaque application-supplied data to pass through to AppThreadMain.
-    size_t            StackSize;          /// The stack size of the worker thread, in bytes, or OS_WORKER_THREAD_STACK_DEFAULT.
-    size_t            ArenaSize;          /// The size of the thread-local memory arena, in bytes.
-    uint32_t          NUMAGroup;          /// The zero-based index of the NUMA processor group on which the worker thread will be scheduled.
+    OS_THREAD_POOL     *ThreadPool;             /// The thread pool that manages the worker thread.
+    HANDLE              ReadySignal;            /// The manual-reset event to be signaled by the worker when it has successfully completed initialization and is ready-to-run.
+    HANDLE              ErrorSignal;            /// The manual-reset event to be signaled by the worker if it encounters a fatal error during initialization.
+    HANDLE              LaunchSignal;           /// The manual-reset event to be signaled by the pool when all worker threads should begin running.
+    HANDLE              TerminateSignal;        /// The manual-reset event to be signaled by the pool when all worker threads should terminate.
+    HANDLE              CompletionPort;         /// The I/O completion port signaled when the worker thread should wake up.
+    OS_WORKER_INIT      ThreadInit;             /// The callback function to run during thread launch to allow the application to allocate or initialize any per-thread data.
+    OS_WORKER_ENTRY     ThreadMain;             /// The callback function to run when a message is received by the worker thread.
+    void               *PoolContext;            /// Opaque application-supplied data to pass through to AppThreadMain.
+    size_t              StackSize;              /// The stack size of the worker thread, in bytes, or OS_WORKER_THREAD_STACK_DEFAULT.
+    size_t              ArenaSize;              /// The size of the thread-local memory arena, in bytes.
+    uint32_t            NUMAGroup;              /// The zero-based index of the NUMA processor group on which the worker thread will be scheduled.
 };
 
 /// @summary Define the data maintained by a pool of worker threads.
 struct OS_THREAD_POOL
 {
-    size_t            ActiveThreads;      /// The number of currently active threads in the pool.
-    unsigned int     *OSThreadIds;        /// The operating system thread identifier for each active worker thread.
-    HANDLE           *OSThreadHandle;     /// The operating system thread handle for each active worker thread.
-    HANDLE           *WorkerReady;        /// The manual-reset event signaled by each active worker to indicate that it is ready to run.
-    HANDLE           *WorkerError;        /// The manual-reset event signaled by each active worker to indicate a fatal error has occurred.
-    HANDLE            CompletionPort;     /// The I/O completion port used to wait and wake worker threads in the pool.
-    HANDLE            LaunchSignal;       /// The manual-reset event used to launch all threads in the pool.
-    HANDLE            TerminateSignal;    /// The manual-reset event used to notify all threads that they should terminate.
+    size_t              ActiveThreads;          /// The number of currently active threads in the pool.
+    unsigned int       *OSThreadIds;            /// The operating system thread identifier for each active worker thread.
+    HANDLE             *OSThreadHandle;         /// The operating system thread handle for each active worker thread.
+    HANDLE             *WorkerReady;            /// The manual-reset event signaled by each active worker to indicate that it is ready to run.
+    HANDLE             *WorkerError;            /// The manual-reset event signaled by each active worker to indicate a fatal error has occurred.
+    HANDLE              CompletionPort;         /// The I/O completion port used to wait and wake worker threads in the pool.
+    HANDLE              LaunchSignal;           /// The manual-reset event used to launch all threads in the pool.
+    HANDLE              TerminateSignal;        /// The manual-reset event used to notify all threads that they should terminate.
 };
 
 /// @summary Define the parameters used to configure a thread pool.
 struct OS_THREAD_POOL_INIT
 {
-    OS_WORKER_INIT    ThreadInit;         /// The callback function to run during launch for each worker thread to initialize thread-local resources.
-    OS_WORKER_ENTRY   ThreadMain;         /// The callback function to run on the worker thread(s) when a signal is received.
-    void             *PoolContext;        /// Opaque application-supplied data to be passed to OS_WORKER_INIT for each worker thread.
-    size_t            ThreadCount;        /// The number of worker threads to create.
-    size_t            StackSize;          /// The stack size for each worker thread, in bytes, or OS_WORKER_THREAD_STACK_DEFAULT.
-    size_t            ArenaSize;          /// The size of the per-thread memory arena, in bytes.
-    uint32_t          NUMAGroup;          /// The zero-based index of the NUMA processor group on which the worker threads will be scheduled. Set to 0.
-};
-
-/// @summary Define constants for specifying worker thread stack sizes.
-enum OS_WORKER_THREAD_STACK_SIZE  : size_t
-{
-    OS_WORKER_THREAD_STACK_DEFAULT   = 0, /// Use the default stack size for each worker thread.
-};
-
-/// @summary Define the set of return codes expected from the OS_WORKER_INIT callback.
-enum OS_WORKER_THREAD_INIT_RESULT : int
-{
-    OS_WORKER_THREAD_INIT_SUCCESS    = 0, /// The worker thread initialized successfully.
-    OS_WORKER_THREAD_INIT_FAILED     =-1, /// The worker thread failed to initialize and the thread should be terminated.
-};
-
-/// @summary Define the set of reasons for waking a sleeping worker thread and invoking the worker callback.
-enum OS_WORKER_THREAD_WAKE_REASON : int
-{
-    OS_WORKER_THREAD_WAKE_FOR_EXIT   = 0, /// The thread was woken because the thread pool is being terminated.
-    OS_WORKER_THREAD_WAKE_FOR_SIGNAL = 1, /// The thread was woken because of a general signal.
-    OS_WORKER_THREAD_WAKE_FOR_RUN    = 2, /// The thread was woken because an explicit work wakeup signal was sent.
-    OS_WORKER_THREAD_WAKE_FOR_ERROR  = 3, /// The thread was woken because of an error in GetQueuedCompletionStatus.
+    OS_WORKER_INIT      ThreadInit;             /// The callback function to run during launch for each worker thread to initialize thread-local resources.
+    OS_WORKER_ENTRY     ThreadMain;             /// The callback function to run on the worker thread(s) when a signal is received.
+    void               *PoolContext;            /// Opaque application-supplied data to be passed to OS_WORKER_INIT for each worker thread.
+    size_t              ThreadCount;            /// The number of worker threads to create.
+    size_t              StackSize;              /// The stack size for each worker thread, in bytes, or OS_WORKER_THREAD_STACK_DEFAULT.
+    size_t              ArenaSize;              /// The size of the per-thread memory arena, in bytes.
+    uint32_t            NUMAGroup;              /// The zero-based index of the NUMA processor group on which the worker threads will be scheduled. Set to 0.
 };
 
 /// @summary Define the data associated with keyboard state.
 struct OS_KEYBOARD_STATE
 {
-    uint32_t          KeyState[8];        /// A bitvector (256 bits) mapping scan code to key state (1 = key down.)
+    uint32_t            KeyState[8];            /// A bitvector (256 bits) mapping scan code to key state (1 = key down.)
 };
-
-/// @summary Define a macro for easy static initialization of keyboard state data.
-#define OS_KEYBOARD_STATE_STATIC_INIT                                          \
-    {                                                                          \
-        { 0, 0, 0, 0, 0, 0, 0, 0 } /* KeyState */                              \
-    }
 
 /// @summary Define the data associated with gamepad state (Xbox controller.)
 struct OS_GAMEPAD_STATE
 {
-    uint32_t          LTrigger;           /// The left trigger value, in [0, 255].
-    uint32_t          RTrigger;           /// The right trigger value, in [0, 255].
-    uint32_t          Buttons;            /// A bitvector storing up to 32 button states (1 = button down.)
-    float             LStick[4];          /// The left analog stick X, Y, magnitude and normalized magnitude values, after deadzone logic is applied.
-    float             RStick[4];          /// The right analog stick X, Y, magnitude and normalized magnitude values, after deadzone logic is applied.
+    uint32_t            LTrigger;               /// The left trigger value, in [0, 255].
+    uint32_t            RTrigger;               /// The right trigger value, in [0, 255].
+    uint32_t            Buttons;                /// A bitvector storing up to 32 button states (1 = button down.)
+    float               LStick[4];              /// The left analog stick X, Y, magnitude and normalized magnitude values, after deadzone logic is applied.
+    float               RStick[4];              /// The right analog stick X, Y, magnitude and normalized magnitude values, after deadzone logic is applied.
 };
 
+/// @summary Define the data associated with a pointing device (like a mouse.)
+struct OS_POINTER_STATE
+{
+    int32_t             Pointer[2];             /// The absolute X and Y coordinates of the pointer, in virtual display space.
+    int32_t             Relative[3];            /// The high definition relative X, Y and Z (wheel) values of the pointer. X and Y are specified in mickeys.
+    uint32_t            Buttons;                /// A bitvector storing up to 32 button states (0 = left, 1 = right, 2 = middle) (1 = button down.)
+    uint32_t            Flags;                  /// Bitflags indicating postprocessing that needs to be performed.
+};
+
+/// @summary Define the data associated with a list of user input devices of the same type.
+template <typename T>
+struct OS_INPUT_DEVICE_LIST
+{
+    static size_t const MAX_DEVICES = 4;        /// The maximum number of attached devices.
+    static size_t const N = MAX_DEVICES;        /// An alias for MAX_DEVICES used for array sizing.
+    size_t              DeviceCount;            /// The number of attached devices.
+    HANDLE              DeviceHandle[N];        /// The OS device handle for each device.
+    T                   DeviceState [N];        /// The current state for each device.
+};
+typedef OS_INPUT_DEVICE_LIST<OS_KEYBOARD_STATE> OS_KEYBOARD_LIST;
+typedef OS_INPUT_DEVICE_LIST<OS_GAMEPAD_STATE>  OS_GAMEPAD_LIST;
+typedef OS_INPUT_DEVICE_LIST<OS_POINTER_STATE>  OS_POINTER_LIST;
+
+/// @summary Defines the data associated with a Raw Input device membership set computed from two device list snapshots.
+struct OS_INPUT_DEVICE_SET
+{   static size_t const MAX_DEVICES     = 4;
+    static size_t const N = MAX_DEVICES * 2;    /// The maximum device set size is 2 * the maximum number of devices in a device list.
+    size_t              DeviceCount;            /// The number of devices in the device set.
+    HANDLE              DeviceIds[N];           /// The Win32 device identifiers. There are no duplicates in the list.
+    uint32_t            Membership[N];          /// The OS_INPUT_DEVICE_SET_MEMBERSHIP values for each device.
+    uint8_t             PrevIndex[N];           /// The zero-based indices of the device in the previous device list.
+    uint8_t             CurrIndex[N];           /// The zero-based indices of the device in the current device list.
+};
+
+/// @summary Define the data used to report events generated by a keyboard device between two state snapshots.
+struct OS_KEYBOARD_EVENTS
+{   static size_t const MAX_KEYS = 8;           /// The maximum number of key events reported.
+    size_t              DownCount;              /// The number of keys currently in the down state.
+    size_t              PressedCount;           /// The number of keys just pressed.
+    size_t              ReleasedCount;          /// The number of keys just released.
+    uint8_t             Down[MAX_KEYS];         /// The virtual key codes for all keys currently down.
+    uint8_t             Pressed[MAX_KEYS];      /// The virtual key codes for all keys just pressed.
+    uint8_t             Released[MAX_KEYS];     /// The virtual key codes for all keys just released.
+};
+
+/// @summary Define the data used to report events generated by a pointer device between two state snapshots.
+struct OS_POINTER_EVENTS
+{   static size_t const MAX_BUTTONS = 8;        /// The maximum number of button events reported.
+    int32_t             Cursor[2];              /// The absolute position of the cursor in virtual display space.
+    int32_t             Mickeys[2];             /// The relative movement of the pointer from the last update, in mickeys.
+    int32_t             WheelDelta;             /// The mouse wheel delta from the last update.
+    size_t              DownCount;              /// The number of buttons currently in the pressed state.
+    size_t              PressedCount;           /// The number of buttons just pressed.
+    size_t              ReleasedCount;          /// The number of buttons just released.
+    uint16_t            Down[MAX_BUTTONS];      /// The MK_nBUTTON identifiers for all buttons in the down state.
+    uint16_t            Pressed[MAX_BUTTONS];   /// The MK_nBUTTON identifiers for all buttons that were just pressed.
+    uint16_t            Released[MAX_BUTTONS];  /// The MK_nBUTTON identifiers for all buttons that were just released.
+};
+
+/// @summary Define the data used to report events generated by an XInput gamepad device between two state snapshots.
+struct OS_GAMEPAD_EVENTS
+{   static size_t const MAX_BUTTONS = 8;        /// The maximum number of button events reported.
+    float               LeftTrigger;            /// The left trigger value, in [0, 255].
+    float               RightTrigger;           /// The right trigger value, in [0, 255].
+    float               LeftStick[2];           /// The left analog stick normalized X and Y.
+    float               LeftStickMagnitude;     /// The normalized magnitude of the left stick vector.
+    float               RightStick[2];          /// The right analog stick normalized X and Y.
+    float               RightStickMagnitude;    /// The normalized magnitude of the right stick vector.
+    size_t              DownCount;              /// The number of buttons currently in the pressed state.
+    size_t              PressedCount;           /// The number of buttons just pressed.
+    size_t              ReleasedCount;          /// The number of buttons just released.
+    uint16_t            Down[MAX_BUTTONS];      /// The XINPUT_GAMEPAD_x identifiers for all buttons in the down state.
+    uint16_t            Pressed[MAX_BUTTONS];   /// The XINPUT_GAMEPAD_x identifiers for all buttons that were just pressed.
+    uint16_t            Released[MAX_BUTTONS];  /// The XINPUT_GAMEPAD_x identifiers for all buttons that were just released.
+};
+
+/// @summary Define the data used to report input events for all input devices attached to the system at a given point in time.
+struct OS_INPUT_EVENTS
+{   static size_t const MAX_DEVICES = 4;        /// The maximum number of devices of each type that can be recognized simultaneously.
+    static size_t const N = MAX_DEVICES;        /// Alias for MAX_DEVICES used to define internal array sizes.
+    size_t              KeyboardAttachCount;    /// The number of keyboard devices newly attached during the tick.
+    HANDLE              KeyboardAttach[N];      /// The system device identifiers of the newly attached keyboard devices.
+    size_t              KeyboardRemoveCount;    /// The number of keyboard devices newly removed during the tick.
+    HANDLE              KeyboardRemove[N];      /// The system device identifiers of the newly removed keyboard devices.
+    size_t              KeyboardCount;          /// The number of keyboard devices for which input events are reported.
+    HANDLE              KeyboardIds[N];         /// The system device identifiers of the keyboards for which input events are reported.
+    OS_KEYBOARD_EVENTS  KeyboardEvents[N];      /// The input event data for keyboard devices.
+    size_t              PointerAttachCount;     /// The number of pointer devices newly attached during the tick.
+    HANDLE              PointerAttach[N];       /// The system device identifiers of the newly attached pointer devices.
+    size_t              PointerRemoveCount;     /// The number of pointer devices newly removed during the tick.
+    HANDLE              PointerRemove[N];       /// The system device identifiers of the newly removed pointer devices.
+    size_t              PointerCount;           /// The number of pointer devices for which input events are reported.
+    HANDLE              PointerIds[N];          /// The system device identifiers of the pointer devices for which input events are reported.
+    OS_POINTER_EVENTS   PointerEvents[N];       /// The input event data for pointer devices.
+    size_t              GamepadAttachCount;     /// The number of gamepad devices newly attached during the tick.
+    DWORD               GamepadAttach[N];       /// The gamepad port indices of the newly attached gamepad devices.
+    size_t              GamepadRemoveCount;     /// The number of gamepad devices newly removed during the tick.
+    DWORD               GamepadRemove[N];       /// The gamepad port indices of the newly removed gamepad devices.
+    size_t              GamepadCount;           /// The number of gamepad devices for which input events are reported.
+    DWORD               GamepadIds[N];          /// The gamepad port indices of the gamepad devices for which input events are reported.
+    OS_GAMEPAD_EVENTS   GamepadEvents[N];       /// The input event data for gamepad devices.
+};
+
+/// @summary Define the data associated with the low-level input system.
+struct OS_INPUT_SYSTEM
+{
+    uint64_t            LastPollTime;           /// The timestamp value at the last poll of all gamepad ports.
+    uint32_t            PrevPortIds;            /// Bitvector for gamepad ports connected on the previous tick.
+    uint32_t            CurrPortIds;            /// Bitvector for gamepad ports connected on the current tick.
+    size_t              BufferIndex;            /// Used to identify the "current" device state buffer.
+    OS_KEYBOARD_LIST    KeyboardBuffer[2];      /// Identifier and state information for keyboard devices.
+    OS_POINTER_LIST     PointerBuffer [2];      /// Identifier and state information for pointer devices.
+    OS_GAMEPAD_LIST     GamepadBuffer [2];      /// Identifier and state information for gamepad devices.
+};
+
+/// @summary Define constants for specifying worker thread stack sizes.
+enum OS_WORKER_THREAD_STACK_SIZE     : size_t
+{
+    OS_WORKER_THREAD_STACK_DEFAULT   = 0,       /// Use the default stack size for each worker thread.
+};
+
+/// @summary Define the set of return codes expected from the OS_WORKER_INIT callback.
+enum OS_WORKER_THREAD_INIT_RESULT    : int
+{
+    OS_WORKER_THREAD_INIT_SUCCESS    = 0,      /// The worker thread initialized successfully.
+    OS_WORKER_THREAD_INIT_FAILED     =-1,      /// The worker thread failed to initialize and the thread should be terminated.
+};
+
+/// @summary Define the set of reasons for waking a sleeping worker thread and invoking the worker callback.
+enum OS_WORKER_THREAD_WAKE_REASON    : int
+{
+    OS_WORKER_THREAD_WAKE_FOR_EXIT   = 0,      /// The thread was woken because the thread pool is being terminated.
+    OS_WORKER_THREAD_WAKE_FOR_SIGNAL = 1,      /// The thread was woken because of a general signal.
+    OS_WORKER_THREAD_WAKE_FOR_RUN    = 2,      /// The thread was woken because an explicit work wakeup signal was sent.
+    OS_WORKER_THREAD_WAKE_FOR_ERROR  = 3,      /// The thread was woken because of an error in GetQueuedCompletionStatus.
+};
+
+/// @summary Define flags indicating how to interpret WIN32_POINTER_STATE::Relative.
+enum OS_POINTER_FLAGS                : uint32_t
+{
+    OS_POINTER_FLAGS_NONE            = (0 << 0),   /// No special flags are specified with the pointer data.
+    OS_POINTER_FLAGS_ABSOLUTE        = (1 << 0),   /// Only absolute position was specified.
+};
+
+/// @summary Define the possible values for membership in a Raw Input device set.
+enum OS_INPUT_DEVICE_SET_MEMBERSHIP  : uint32_t
+{
+    OS_INPUT_DEVICE_MEMBERSHIP_NONE  = (0 << 0),   /// The Raw Input device is not in either the current or previous snapshot.
+    OS_INPUT_DEVICE_MEMBERSHIP_PREV  = (1 << 0),   /// The Raw Input device is in the previous state snapshot.
+    OS_INPUT_DEVICE_MEMBERSHIP_CURR  = (1 << 1),   /// The Raw Input device is in the current state snapshot.
+    OS_INPUT_DEVICE_MEMBERSHIP_BOTH  = OS_INPUT_DEVICE_MEMBERSHIP_PREV | OS_INPUT_DEVICE_MEMBERSHIP_CURR
+};
+
+/// @summary Define a macro for easy static initialization of keyboard state data.
+#ifndef OS_KEYBOARD_STATE_STATIC_INIT
+#define OS_KEYBOARD_STATE_STATIC_INIT                                          \
+    {                                                                          \
+        { 0, 0, 0, 0, 0, 0, 0, 0 } /* KeyState */                              \
+    }
+#endif
+
 /// @summary Define a macro for easy static initialization of gamepad state data.
+#ifndef OS_GAMEPAD_STATE_STATIC_INIT
 #define OS_GAMEPAD_STATE_STATIC_INIT                                           \
     {                                                                          \
         0,            /* LTrigger */                                           \
@@ -319,45 +465,20 @@ struct OS_GAMEPAD_STATE
       { 0, 0, 0, 0 }, /* LStick[X,Y,M,N] */                                    \
       { 0, 0, 0, 0 }  /* RStick[X,Y,M,N] */                                    \
     }
-
-/// @summary Define flags indicating how to interpret WIN32_POINTER_STATE::Relative.
-enum OS_POINTER_FLAGS : uint32_t
-{
-    OS_POINTER_FLAGS_NONE     = (0 << 0), /// No special flags are specified with the pointer data.
-    OS_POINTER_FLAGS_ABSOLUTE = (1 << 0), /// Only absolute position was specified.
-};
-
-/// @summary Define the data associated with a pointing device (like a mouse.)
-struct OS_POINTER_STATE
-{
-    int32_t           Pointer[2];         /// The absolute X and Y coordinates of the pointer, in virtual display space.
-    int32_t           Relative[3];        /// The high definition relative X, Y and Z (wheel) values of the pointer. X and Y are specified in mickeys.
-    uint32_t          Buttons;            /// A bitvector storing up to 32 button states (0 = left, 1 = right, 2 = middle) (1 = button down.)
-    uint32_t          Flags;              /// Bitflags indicating postprocessing that needs to be performed.
-};
+#endif
 
 // @summary Define a macro for easy static initialization of pointer state data.
+#ifndef OS_POINTER_STATE_STATIC_INIT
 #define OS_POINTER_STATE_STATIC_INIT                                           \
     {                                                                          \
       { 0, 0 }   , /* Pointer[X,Y] */                                          \
       { 0, 0, 0 }, /* Relative[X,Y,Z] */                                       \
         0          /* Buttons */                                               \
     }
-
-/// @summary Define the data associated with a list of user input devices of the same type.
-template <typename T>
-struct OS_INPUT_DEVICE_LIST
-{   static size_t const MAX_DEVICES = 4;  /// The maximum number of attached devices.
-    static size_t const N = MAX_DEVICES;  /// An alias for MAX_DEVICES used for array sizing.
-    size_t            DeviceCount;        /// The number of attached devices.
-    HANDLE            DeviceHandle[N];    /// The OS device handle for each device.
-    T                 DeviceState [N];    /// The current state for each device.
-};
-typedef OS_INPUT_DEVICE_LIST<OS_KEYBOARD_STATE> OS_KEYBOARD_LIST;
-typedef OS_INPUT_DEVICE_LIST<OS_GAMEPAD_STATE>  OS_GAMEPAD_LIST;
-typedef OS_INPUT_DEVICE_LIST<OS_POINTER_STATE>  OS_POINTER_LIST;
+#endif
 
 /// @summary Define a macro for easy static initialization of a keyboard device list.
+#ifndef OS_KEYBOARD_LIST_STATIC_INIT
 #define OS_KEYBOARD_LIST_STATIC_INIT                                           \
     {                                                                          \
         0, /* DeviceCount */                                                   \
@@ -372,8 +493,10 @@ typedef OS_INPUT_DEVICE_LIST<OS_POINTER_STATE>  OS_POINTER_LIST;
         OS_KEYBOARD_STATE_STATIC_INIT                                          \
       }    /* DeviceState */                                                   \
     }
+#endif
 
 /// @summary Define a macro for easy static initialzation of a gamepad device list.
+#ifndef OS_GAMEPAD_LIST_STATIC_INIT
 #define OS_GAMEPAD_LIST_STATIC_INIT                                            \
     {                                                                          \
         0, /* DeviceCount */                                                   \
@@ -388,8 +511,10 @@ typedef OS_INPUT_DEVICE_LIST<OS_POINTER_STATE>  OS_POINTER_LIST;
         OS_GAMEPAD_STATE_STATIC_INIT                                           \
       }    /* DeviceState */                                                   \
     }
+#endif
 
 /// @summary Define a macro for easy static initialization of a pointing device list.
+#ifndef OS_POINTER_LIST_STATIC_INIT
 #define OS_POINTER_LIST_STATIC_INIT                                            \
     {                                                                          \
         0, /* DeviceCount */                                                   \
@@ -404,28 +529,10 @@ typedef OS_INPUT_DEVICE_LIST<OS_POINTER_STATE>  OS_POINTER_LIST;
         OS_POINTER_STATE_STATIC_INIT                                           \
       }    /* DeviceState */                                                   \
     }
-
-/// @summary Define the possible values for membership in a Raw Input device set.
-enum OS_INPUT_DEVICE_SET_MEMBERSHIP  : uint32_t
-{
-    OS_INPUT_DEVICE_MEMBERSHIP_NONE  = (0 << 0),  /// The Raw Input device is not in either the current or previous snapshot.
-    OS_INPUT_DEVICE_MEMBERSHIP_PREV  = (1 << 0),  /// The Raw Input device is in the previous state snapshot.
-    OS_INPUT_DEVICE_MEMBERSHIP_CURR  = (1 << 1),  /// The Raw Input device is in the current state snapshot.
-    OS_INPUT_DEVICE_MEMBERSHIP_BOTH  = OS_INPUT_DEVICE_MEMBERSHIP_PREV | OS_INPUT_DEVICE_MEMBERSHIP_CURR
-};
-
-/// @summary Defines the data associated with a Raw Input device membership set computed from two device list snapshots.
-struct OS_INPUT_DEVICE_SET
-{   static size_t const MAX_DEVICES     = 4;
-    static size_t const N = MAX_DEVICES * 2;      /// The maximum device set size is 2 * the maximum number of devices in a device list.
-    size_t              DeviceCount;              /// The number of devices in the device set.
-    HANDLE              DeviceIds[N];             /// The Win32 device identifiers. There are no duplicates in the list.
-    uint32_t            Membership[N];            /// The WIN32_INPUT_DEVICE_SET_MEMBERSHIP values for each device.
-    uint8_t             PrevIndex[N];             /// The zero-based indices of the device in the previous device list.
-    uint8_t             CurrIndex[N];             /// The zero-based indices of the device in the current device list.
-};
+#endif
 
 /// @summary Define a macro for easy initialization of a device set to empty.
+#ifndef OS_INPUT_DEVICE_SET_STATIC_INIT
 #define OS_INPUT_DEVICE_SET_STATIC_INIT                                        \
     {                                                                          \
         0, /* DeviceCount */                                                   \
@@ -454,94 +561,14 @@ struct OS_INPUT_DEVICE_SET
           0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF                       \
         }  /* CurrIndex */                                                     \
     }
-
-/// @summary Define the data used to report events generated by a keyboard device between two state snapshots.
-struct OS_KEYBOARD_EVENTS
-{   static size_t const MAX_KEYS = 8;             /// The maximum number of key events reported.
-    size_t              DownCount;                /// The number of keys currently in the down state.
-    size_t              PressedCount;             /// The number of keys just pressed.
-    size_t              ReleasedCount;            /// The number of keys just released.
-    uint8_t             Down[MAX_KEYS];           /// The virtual key codes for all keys currently down.
-    uint8_t             Pressed[MAX_KEYS];        /// The virtual key codes for all keys just pressed.
-    uint8_t             Released[MAX_KEYS];       /// The virtual key codes for all keys just released.
-};
-
-/// @summary Define the data used to report events generated by a pointer device between two state snapshots.
-struct OS_POINTER_EVENTS
-{   static size_t const MAX_BUTTONS = 8;          /// The maximum number of button events reported.
-    int32_t             Cursor[2];                /// The absolute position of the cursor in virtual display space.
-    int32_t             Mickeys[2];               /// The relative movement of the pointer from the last update, in mickeys.
-    int32_t             WheelDelta;               /// The mouse wheel delta from the last update.
-    size_t              DownCount;                /// The number of buttons currently in the pressed state.
-    size_t              PressedCount;             /// The number of buttons just pressed.
-    size_t              ReleasedCount;            /// The number of buttons just released.
-    uint16_t            Down[MAX_BUTTONS];        /// The MK_nBUTTON identifiers for all buttons in the down state.
-    uint16_t            Pressed[MAX_BUTTONS];     /// The MK_nBUTTON identifiers for all buttons that were just pressed.
-    uint16_t            Released[MAX_BUTTONS];    /// The MK_nBUTTON identifiers for all buttons that were just released.
-};
-
-/// @summary Define the data used to report events generated by an XInput gamepad device between two state snapshots.
-struct OS_GAMEPAD_EVENTS
-{   static size_t const MAX_BUTTONS = 8;          /// The maximum number of button events reported.
-    float               LeftTrigger;              /// The left trigger value, in [0, 255].
-    float               RightTrigger;             /// The right trigger value, in [0, 255].
-    float               LeftStick[2];             /// The left analog stick normalized X and Y.
-    float               LeftStickMagnitude;       /// The normalized magnitude of the left stick vector.
-    float               RightStick[2];            /// The right analog stick normalized X and Y.
-    float               RightStickMagnitude;      /// The normalized magnitude of the right stick vector.
-    size_t              DownCount;                /// The number of buttons currently in the pressed state.
-    size_t              PressedCount;             /// The number of buttons just pressed.
-    size_t              ReleasedCount;            /// The number of buttons just released.
-    uint16_t            Down[MAX_BUTTONS];        /// The XINPUT_GAMEPAD_x identifiers for all buttons in the down state.
-    uint16_t            Pressed[MAX_BUTTONS];     /// The XINPUT_GAMEPAD_x identifiers for all buttons that were just pressed.
-    uint16_t            Released[MAX_BUTTONS];    /// The XINPUT_GAMEPAD_x identifiers for all buttons that were just released.
-};
-
-/// @summary Define the data used to report input events for all input devices attached to the system at a given point in time.
-struct OS_INPUT_EVENTS
-{   static size_t const MAX_DEVICES = 4;          /// The maximum number of devices of each type that can be recognized simultaneously.
-    static size_t const N = MAX_DEVICES;          /// Alias for MAX_DEVICES used to define internal array sizes.
-    size_t              KeyboardAttachCount;      /// The number of keyboard devices newly attached during the tick.
-    HANDLE              KeyboardAttach[N];        /// The system device identifiers of the newly attached keyboard devices.
-    size_t              KeyboardRemoveCount;      /// The number of keyboard devices newly removed during the tick.
-    HANDLE              KeyboardRemove[N];        /// The system device identifiers of the newly removed keyboard devices.
-    size_t              KeyboardCount;            /// The number of keyboard devices for which input events are reported.
-    HANDLE              KeyboardIds[N];           /// The system device identifiers of the keyboards for which input events are reported.
-    OS_KEYBOARD_EVENTS  KeyboardEvents[N];        /// The input event data for keyboard devices.
-    size_t              PointerAttachCount;       /// The number of pointer devices newly attached during the tick.
-    HANDLE              PointerAttach[N];         /// The system device identifiers of the newly attached pointer devices.
-    size_t              PointerRemoveCount;       /// The number of pointer devices newly removed during the tick.
-    HANDLE              PointerRemove[N];         /// The system device identifiers of the newly removed pointer devices.
-    size_t              PointerCount;             /// The number of pointer devices for which input events are reported.
-    HANDLE              PointerIds[N];            /// The system device identifiers of the pointer devices for which input events are reported.
-    OS_POINTER_EVENTS   PointerEvents[N];         /// The input event data for pointer devices.
-    size_t              GamepadAttachCount;       /// The number of gamepad devices newly attached during the tick.
-    DWORD               GamepadAttach[N];         /// The gamepad port indices of the newly attached gamepad devices.
-    size_t              GamepadRemoveCount;       /// The number of gamepad devices newly removed during the tick.
-    DWORD               GamepadRemove[N];         /// The gamepad port indices of the newly removed gamepad devices.
-    size_t              GamepadCount;             /// The number of gamepad devices for which input events are reported.
-    DWORD               GamepadIds[N];            /// The gamepad port indices of the gamepad devices for which input events are reported.
-    OS_GAMEPAD_EVENTS   GamepadEvents[N];         /// The input event data for gamepad devices.
-};
-
-/// @summary Define the data associated with the low-level input system.
-struct OS_INPUT_SYSTEM
-{
-    uint64_t            LastPollTime;             /// The timestamp value at the last poll of all gamepad ports.
-    uint32_t            PrevPortIds;              /// Bitvector for gamepad ports connected on the previous tick.
-    uint32_t            CurrPortIds;              /// Bitvector for gamepad ports connected on the current tick.
-    size_t              BufferIndex;              /// Used to identify the "current" device state buffer.
-    OS_KEYBOARD_LIST    KeyboardBuffer[2];        /// Identifier and state information for keyboard devices.
-    OS_POINTER_LIST     PointerBuffer [2];        /// Identifier and state information for pointer devices.
-    OS_GAMEPAD_LIST     GamepadBuffer [2];        /// Identifier and state information for gamepad devices.
-};
+#endif
 
 /// @summary The set of functions resolved at runtime. Do not link to the corresponding input library; the functions are defined in this module.
 OS_LAYER_DECLARE_RUNTIME_FUNCTION(void , WINAPI, XInputEnable               , BOOL);                                      // XInput1_4.dll
 OS_LAYER_DECLARE_RUNTIME_FUNCTION(DWORD, WINAPI, XInputGetState             , DWORD, XINPUT_STATE*);                      // XInput1_4.dll
 OS_LAYER_DECLARE_RUNTIME_FUNCTION(DWORD, WINAPI, XInputSetState             , DWORD, XINPUT_VIBRATION*);                  // XInput1_4.dll
 OS_LAYER_DECLARE_RUNTIME_FUNCTION(DWORD, WINAPI, XInputGetCapabilities      , DWORD, DWORD, XINPUT_CAPABILITIES*);        // XInput1_4.dll
-OS_LAYER_DECLARE_RUNTIME_FUNCTION(DWORD, WINAPI, XInputGetBatteryInformation, DWORD, BYTE , XINPUT_BATTERY_INFORMATION*); // XInput1_4.dll
+//OS_LAYER_DECLARE_RUNTIME_FUNCTION(DWORD, WINAPI, XInputGetBatteryInformation, DWORD, BYTE , XINPUT_BATTERY_INFORMATION*); // XInput1_4.dll
 
 /*///////////////
 //   Globals   //
@@ -551,7 +578,7 @@ OS_LAYER_DEFINE_RUNTIME_FUNCTION(XInputEnable);
 OS_LAYER_DEFINE_RUNTIME_FUNCTION(XInputGetState);
 OS_LAYER_DEFINE_RUNTIME_FUNCTION(XInputSetState);
 OS_LAYER_DEFINE_RUNTIME_FUNCTION(XInputGetCapabilities);
-OS_LAYER_DEFINE_RUNTIME_FUNCTION(XInputGetBatteryInformation);
+//OS_LAYER_DEFINE_RUNTIME_FUNCTION(XInputGetBatteryInformation);
 
 /// @summary The module load address of the XInput DLL.
 global_variable HMODULE XInputDll = NULL;
@@ -567,7 +594,7 @@ XInputEnable_Stub
     BOOL enable
 )
 {
-    UNUSED_ARG(enable);
+    UNREFERENCED_PARAMETER(enable);
 }
 
 /// @summary No-op stub function for XInputGetState.
@@ -581,8 +608,8 @@ XInputGetState_Stub
     XINPUT_STATE     *pState
 )
 {
-    UNUSED_ARG(dwUserIndex);
-    UNUSED_ARG(pState);
+    UNREFERENCED_PARAMETER(dwUserIndex);
+    UNREFERENCED_PARAMETER(pState);
     return ERROR_DEVICE_NOT_CONNECTED;
 }
 
@@ -597,8 +624,8 @@ XInputSetState_Stub
     XINPUT_VIBRATION *pVibration
 )
 {
-    UNUSED_ARG(dwUserIndex);
-    UNUSED_ARG(pVibration);
+    UNREFERENCED_PARAMETER(dwUserIndex);
+    UNREFERENCED_PARAMETER(pVibration);
     return ERROR_DEVICE_NOT_CONNECTED;
 }
 
@@ -615,9 +642,9 @@ XInputGetCapabilities_Stub
     XINPUT_CAPABILITIES *pCapabilities
 )
 {
-    UNUSED_ARG(dwUserIndex);
-    UNUSED_ARG(dwFlags);
-    UNUSED_ARG(pCapabilities);
+    UNREFERENCED_PARAMETER(dwUserIndex);
+    UNREFERENCED_PARAMETER(dwFlags);
+    UNREFERENCED_PARAMETER(pCapabilities);
     return ERROR_DEVICE_NOT_CONNECTED;
 }
 
@@ -626,7 +653,7 @@ XInputGetCapabilities_Stub
 /// @param devType Specifies which device associated with this user index should be queried. One of BATTERY_DEVTYPE_GAMEPAD or BATTERY_DEVTYPE_HEADSET.
 /// @param Pointer to an XINPUT_BATTERY_INFORMATION structure that receives the battery information.
 /// @return ERROR_SUCCESS or ERROR_DEVICE_NOT_CONNECTED.
-internal_function DWORD WINAPI
+/*internal_function DWORD WINAPI
 XInputGetBatteryInformation_Stub
 (
     DWORD                               dwUserIndex, 
@@ -634,11 +661,11 @@ XInputGetBatteryInformation_Stub
     XINPUT_BATTERY_INFORMATION *pBatteryInformation
 )
 {
-    UNUSED_ARG(dwUserIndex);
-    UNUSED_ARG(devType);
-    UNUSED_ARG(pBatteryInformation);
+    UNREFERENCED_PARAMETER(dwUserIndex);
+    UNREFERENCED_PARAMETER(devType);
+    UNREFERENCED_PARAMETER(pBatteryInformation);
     return ERROR_DEVICE_NOT_CONNECTED;
-}
+}*/
 
 /// @summary Enable or disable a process privilege.
 /// @param token The privilege token of the process to modify.
@@ -715,14 +742,14 @@ OsLoadXInput
     OS_LAYER_RESOLVE_RUNTIME_FUNCTION(xinput_dll, XInputGetState);
     OS_LAYER_RESOLVE_RUNTIME_FUNCTION(xinput_dll, XInputSetState);
     OS_LAYER_RESOLVE_RUNTIME_FUNCTION(xinput_dll, XInputGetCapabilities);
-    OS_LAYER_RESOLVE_RUNTIME_FUNCTION(xinput_dll, XInputGetBatteryInformation);
+    //OS_LAYER_RESOLVE_RUNTIME_FUNCTION(xinput_dll, XInputGetBatteryInformation);
 
     // check for any entry points that got set to their stub functions.
     if (OS_LAYER_RUNTIME_STUB(XInputEnable))                goto missing_entry_point;
     if (OS_LAYER_RUNTIME_STUB(XInputGetState))              goto missing_entry_point;
     if (OS_LAYER_RUNTIME_STUB(XInputSetState))              goto missing_entry_point;
     if (OS_LAYER_RUNTIME_STUB(XInputGetCapabilities))       goto missing_entry_point;
-    if (OS_LAYER_RUNTIME_STUB(XInputGetBatteryInformation)) goto missing_entry_point;
+    //if (OS_LAYER_RUNTIME_STUB(XInputGetBatteryInformation)) goto missing_entry_point;
 
     // save the DLL handle.
     XInputDll = xinput_dll;
@@ -1547,20 +1574,20 @@ OsForwardKeyboardBuffer
     OS_KEYBOARD_LIST *src
 )
 {   // copy over the device list and key state.
-    OsCopyMemory(dst, src, sizeof(OS_KEYBOARD_LIST));
+    CopyMemory(dst, src, sizeof(OS_KEYBOARD_LIST));
 }
 
 /// @summary Copy pointer devices and state from the current 'current' buffer to the next 'current' buffer.
 /// @param dst The 'current' buffer for the next tick.
 /// @param src The 'current' buffer for the current tick.
 internal_function void
-OSForwardPointerBuffer
+OsForwardPointerBuffer
 (
     OS_POINTER_LIST *dst, 
     OS_POINTER_LIST *src
 )
 {   // copy over the device list, but zero out the relative fields of the state.
-    OsCopyMemory(dst, src, sizeof(OS_POINTER_LIST));
+    CopyMemory(dst, src, sizeof(OS_POINTER_LIST));
     for (size_t i = 0, n = dst->DeviceCount; i < n; ++i)
     {
         dst->DeviceState[i].Relative[0] = 0;
@@ -1657,126 +1684,6 @@ OsWorkerThreadWaitForWakeup
     {   // the call to GetQueuedCompletionStatus failed.
         OsLayerError("ERROR: %S(%u): GetQueuedCompletionStatus failed with result 0x%08X.\n", __FUNCTION__, tid, GetLastError());
         return OS_WORKER_THREAD_WAKE_FOR_ERROR;
-    }
-}
-
-/// @summary Implement the internal entry point of a worker thread.
-/// @param argp Pointer to an OS_WORKER_THREAD_INIT instance specific to this thread.
-/// @return Zero if the thread terminated normally, or non-zero for abnormal termination.
-internal_function unsigned int __cdecl
-OsWorkerThreadMain
-(
-    void *argp
-)
-{
-    OS_WORKER_THREAD_INIT  init = {};
-    OS_WORKER_THREAD       args = {};
-    OS_WORKER_DATA         data = {};
-    OS_MEMORY_ARENA       arena = {};
-    uintptr_t        signal_arg = 0;
-    const DWORD          LAUNCH = 0;
-    const DWORD       TERMINATE = 1;
-    const DWORD      WAIT_COUNT = 2;
-    HANDLE   waitset[WAIT_COUNT]= {};
-    DWORD                   tid = GetCurrentThreadId();
-    DWORD                waitrc = 0;
-    bool           keep_running = true;
-    int             wait_reason = OS_WORKER_THREAD_WAKE_FOR_EXIT;
-    unsigned int      exit_code = 1;
-
-    // copy the initialization data into local stack memory.
-    // argp may have been allocated on the stack of the caller 
-    // and is only guaranteed to remain valid until the ReadySignal is set.
-    CopyMemory(&init, argp, sizeof(OS_WORKER_THREAD_INIT));
-
-    // spit out a message just prior to initialization:
-    OsLayerOutput("START: %S(%u): Worker thread starting on pool 0x%p.\n", __FUNCTION__, tid, init.ThreadPool);
-
-    // create a thread-local memory arena to be used by the callback executing on the worker.
-    if (OsCreateMemoryArena(&arena, init.ArenaSize, false, true) < 0)
-    {   // OsCreateMemoryArena outputs its own error information.
-        SetEvent(init.ErrorSignal);
-        return 1;
-    }
-
-    // set up the data to be passed through to the application executing on the worker.
-    args.ThreadPool     = init.ThreadPool;
-    args.ThreadArena    = &arena;
-    args.WorkerData     = &data;
-    args.AppContext     = init.AppContext;
-    args.ArenaSize      = OsMemoryArenaBytesReserved(&arena);
-    args.ThreadId       = tid;
-
-    // private data passed through, but opaque to the application.
-    data.CompletionPort = init.CompletionPort;
-
-    // signal the main thread that this thread is ready to run.
-    SetEvent(init.ReadySignal);
-
-    // enter a wait state until the thread pool launches all of the workers.
-    waitset[LAUNCH]     = init.LaunchSignal;
-    waitset[TERMINATE]  = init.TerminateSignal;
-    switch ((waitrc = WaitForMultipleObjects(WAIT_COUNT, waitset, FALSE, INFINITE)))
-    {
-        case WAIT_OBJECT_0 + LAUNCH:
-            {   // enter the main wait loop.
-                keep_running = true;
-            } break;
-        case WAIT_OBJECT_0 + TERMINATE:
-            {   // do not enter the main wait loop.
-                keep_running = false;
-                exit_code = 0;
-            } break; 
-        default: 
-            {   // do not enter the main wait loop.
-                OsLayerError("ERROR: %S(%u): Unexpected result 0x%08X while waiting for launch signal.\n", __FUNCTION__, tid, waitrc);
-                keep_running = false;
-                exit_code = 1;
-            } break;
-    }
-
-    __try
-    {
-        while (keep_running)
-        {   // once launched by the thread pool, enter the main wait loop.
-            switch ((wake_reason = OsWorkerThreadWaitForWakeup(init.CompletionPort, init.TerminateSignal, tid, signal_arg)))
-            {
-                case OS_WORKER_THREAD_WAKE_FOR_EXIT:
-                    {   // allow the application to clean up any thread-local resources.
-                        init.AppThreadMain(&args, signal_arg, wake_reason);
-                        keep_running = false;
-                        exit_code = 0;
-                    } break;
-                case OS_WORKER_THREAD_WAKE_FOR_SIGNAL:
-                case OS_WORKER_THREAD_WAKE_FOR_RUN:
-                    {   // allow the application to execute the signal handler or work item.
-                        init.AppThreadMain(&args, signal_arg, wake_reason);
-                    } break;
-                case OS_WORKER_THREAD_WAKE_FOR_ERROR:
-                    {   // OsWorkerThreadWaitForWakeup output error information already.
-                        OsLayerError("ERROR: %S(%u): Worker terminating due to previous error(s).\n", __FUNCTION__, tid);
-                        keep_running = false;
-                        exit_code = 1;
-                    } break;
-                default:
-                    {   // spit out an error if we get an unexpected return value.
-                        assert(false && __FUNCTION__ ": Unexpected wake_reason.");
-                        OsLayerError("ERROR: %S(%u): Worker terminating due to unexpected wake reason.\n", __FUNCTION__, tid);
-                        keep_running = false;
-                        exit_code = 1;
-                    } break;
-            }
-            // reset the wake signal to 0/NULL for the next iteration.
-            signal_arg = 0;
-        }
-    }
-    __finally
-    {   // the worker is terminating - clean up thread-local resources.
-        // the AppThreadMain will not be called again by this thread.
-        OsDeleteMemoryArena(&arena);
-        // spit out a message just prior to termination.
-        OsLayerOutput("DEATH: %S(%u): Worker terminating in pool 0x%p.\n", __FUNCTION__, tid, init.ThreadPool);
-        return exit_code;
     }
 }
 
@@ -2102,7 +2009,7 @@ OsMemoryArenaCanSatisfyAllocation
     size_t    base_address = size_t(arena->BaseAddress) + arena->NextOffset;
     size_t aligned_address = OsAlignUp(base_address, alloc_alignment);
     size_t     alloc_bytes = alloc_size + (aligned_address - base_address);
-    if ((arena->Nextoffset + alloc_bytes) > arena->BytesReserved)
+    if ((arena->NextOffset + alloc_bytes) > arena->BytesReserved)
     {   // there's not enough space to satisfy the allocation request.
         return false;
     }
@@ -2285,7 +2192,7 @@ OsMemoryArenaCommit
     }
     else
     {   // the commit size is not valid, so cancel the outstanding reservation.
-        OsLayerError("ERROR: %S: Invalid commit size %Iu (expected <= %Iu); cancelling reservation.\n", __FUNCTION, commit_size, arena->ReserveTotalBytes-arena->ReserveAlignBytes);
+        OsLayerError("ERROR: %S: Invalid commit size %Iu (expected <= %Iu); cancelling reservation.\n", __FUNCTION__, commit_size, arena->ReserveTotalBytes-arena->ReserveAlignBytes);
         arena->ReserveAlignBytes = 0;
         arena->ReserveTotalBytes = 0;
         return -1;
@@ -2517,7 +2424,7 @@ OsQueryHostCpuLayout
     int          regs[4] ={0, 0, 0, 0};
 
     // zero out the CPU information returned to the caller.
-    ZeroMemory(cpu_info, sizeof(WIN32_CPU_INFO));
+    ZeroMemory(cpu_info, sizeof(OS_CPU_INFO));
     
     // retrieve the CPU vendor string using the __cpuid intrinsic.
     __cpuid(regs  , 0); // CPUID function 0
@@ -2603,6 +2510,134 @@ OsQueryHostCpuLayout
     return true;
 }
 
+/// @summary Implement the internal entry point of a worker thread.
+/// @param argp Pointer to an OS_WORKER_THREAD_INIT instance specific to this thread.
+/// @return Zero if the thread terminated normally, or non-zero for abnormal termination.
+public_function unsigned int __cdecl
+OsWorkerThreadMain
+(
+    void *argp
+)
+{
+    OS_WORKER_THREAD_INIT  init = {};
+    OS_WORKER_THREAD       args = {};
+    OS_MEMORY_ARENA       arena = {};
+    uintptr_t        signal_arg = 0;
+    const DWORD          LAUNCH = 0;
+    const DWORD       TERMINATE = 1;
+    const DWORD      WAIT_COUNT = 2;
+    HANDLE   waitset[WAIT_COUNT]= {};
+    DWORD                   tid = GetCurrentThreadId();
+    DWORD                waitrc = 0;
+    bool           keep_running = true;
+    int             wake_reason = OS_WORKER_THREAD_WAKE_FOR_EXIT;
+    unsigned int      exit_code = 1;
+
+    // copy the initialization data into local stack memory.
+    // argp may have been allocated on the stack of the caller 
+    // and is only guaranteed to remain valid until the ReadySignal is set.
+    CopyMemory(&init, argp, sizeof(OS_WORKER_THREAD_INIT));
+
+    // spit out a message just prior to initialization:
+    OsLayerOutput("START: %S(%u): Worker thread starting on pool 0x%p.\n", __FUNCTION__, tid, init.ThreadPool);
+
+    // create a thread-local memory arena to be used by the callback executing on the worker.
+    if (OsCreateMemoryArena(&arena, init.ArenaSize, false, true) < 0)
+    {   // OsCreateMemoryArena outputs its own error information.
+        OsLayerError("DEATH: %S(%u): Worker terminating in pool 0x%p.\n", __FUNCTION__, tid, init.ThreadPool);
+        SetEvent(init.ErrorSignal);
+        return 1;
+    }
+
+    // set up the data to be passed through to the application executing on the worker.
+    args.ThreadPool     = init.ThreadPool;
+    args.ThreadArena    = &arena;
+    args.CompletionPort = init.CompletionPort;
+    args.PoolContext    = init.PoolContext;
+    args.ThreadContext  = NULL;
+    args.ArenaSize      = OsMemoryArenaBytesReserved(&arena);
+    args.ThreadId       = tid;
+
+    // allow the application to perform per-thread setup.
+    if (init.ThreadInit(&args) < 0)
+    {
+        OsLayerError("ERROR: %S(%u): Application thread initialization failed on pool 0x%p.\n", __FUNCTION__, tid, init.ThreadPool);
+        OsLayerError("DEATH: %S(%u): Worker terminating in pool 0x%p.\n", __FUNCTION__, tid, init.ThreadPool);
+        OsDeleteMemoryArena(&arena);
+        SetEvent(init.ErrorSignal);
+        return 2;
+    }
+
+    // signal the main thread that this thread is ready to run.
+    SetEvent(init.ReadySignal);
+
+    // enter a wait state until the thread pool launches all of the workers.
+    waitset[LAUNCH]     = init.LaunchSignal;
+    waitset[TERMINATE]  = init.TerminateSignal;
+    switch ((waitrc = WaitForMultipleObjects(WAIT_COUNT, waitset, FALSE, INFINITE)))
+    {
+        case WAIT_OBJECT_0 + LAUNCH:
+            {   // enter the main wait loop.
+                keep_running = true;
+            } break;
+        case WAIT_OBJECT_0 + TERMINATE:
+            {   // do not enter the main wait loop.
+                keep_running = false;
+                exit_code = 0;
+            } break; 
+        default: 
+            {   // do not enter the main wait loop.
+                OsLayerError("ERROR: %S(%u): Unexpected result 0x%08X while waiting for launch signal.\n", __FUNCTION__, tid, waitrc);
+                keep_running = false;
+                exit_code = 1;
+            } break;
+    }
+
+    __try
+    {
+        while (keep_running)
+        {   // once launched by the thread pool, enter the main wait loop.
+            switch ((wake_reason = OsWorkerThreadWaitForWakeup(init.CompletionPort, init.TerminateSignal, tid, signal_arg)))
+            {
+                case OS_WORKER_THREAD_WAKE_FOR_EXIT:
+                    {   // allow the application to clean up any thread-local resources.
+                        init.ThreadMain(&args, signal_arg, wake_reason);
+                        keep_running = false;
+                        exit_code = 0;
+                    } break;
+                case OS_WORKER_THREAD_WAKE_FOR_SIGNAL:
+                case OS_WORKER_THREAD_WAKE_FOR_RUN:
+                    {   // allow the application to execute the signal handler or work item.
+                        init.ThreadMain(&args, signal_arg, wake_reason);
+                    } break;
+                case OS_WORKER_THREAD_WAKE_FOR_ERROR:
+                    {   // OsWorkerThreadWaitForWakeup output error information already.
+                        OsLayerError("ERROR: %S(%u): Worker terminating due to previous error(s).\n", __FUNCTION__, tid);
+                        keep_running = false;
+                        exit_code = 1;
+                    } break;
+                default:
+                    {   // spit out an error if we get an unexpected return value.
+                        assert(false && __FUNCTION__ ": Unexpected wake_reason.");
+                        OsLayerError("ERROR: %S(%u): Worker terminating due to unexpected wake reason.\n", __FUNCTION__, tid);
+                        keep_running = false;
+                        exit_code = 1;
+                    } break;
+            }
+            // reset the wake signal to 0/NULL for the next iteration.
+            signal_arg = 0;
+        }
+    }
+    __finally
+    {   // the worker is terminating - clean up thread-local resources.
+        // the AppThreadMain will not be called again by this thread.
+        OsDeleteMemoryArena(&arena);
+        // spit out a message just prior to termination.
+        OsLayerOutput("DEATH: %S(%u): Worker terminating in pool 0x%p.\n", __FUNCTION__, tid, init.ThreadPool);
+        return exit_code;
+    }
+}
+
 /// @summary Calculate the amount of memory required to create an OS thread pool.
 /// @param thread_count The number of threads in the thread pool.
 /// @return The number of bytes required to create an OS_THREAD_POOL with the specified number of worker threads. This value does not include the thread-local memory or thread stack memory.
@@ -2613,10 +2648,10 @@ OsCalculateMemoryForThreadPool
 )
 {
     size_t size_in_bytes = 0;
-    size_in_bytes += OsAllocationSizeForArray<unsigned int>(max_threads);
-    size_in_bytes += OsAllocationSizeForArray<HANDLE>(max_threads);
-    size_in_bytes += OsAllocationSizeForArray<HANDLE>(max_threads);
-    size_in_bytes += OsAllocationSizeForArray<HANDLE>(max_threads);
+    size_in_bytes += OsAllocationSizeForArray<unsigned int>(thread_count);
+    size_in_bytes += OsAllocationSizeForArray<HANDLE>(thread_count);
+    size_in_bytes += OsAllocationSizeForArray<HANDLE>(thread_count);
+    size_in_bytes += OsAllocationSizeForArray<HANDLE>(thread_count);
     return size_in_bytes;
 }
 
@@ -2633,7 +2668,6 @@ OsCreateThreadPool
     OS_MEMORY_ARENA    *arena
 )
 {
-    OS_WORKER_THREAD_INIT  winit = {};
     HANDLE                  iocp = NULL;
     HANDLE            evt_launch = NULL;
     HANDLE         evt_terminate = NULL;
@@ -2688,8 +2722,8 @@ OsCreateThreadPool
         HANDLE               wready = NULL;
         HANDLE               werror = NULL;
         unsigned int      thread_id = 0;
-        const DWORD           READY = 0;
-        const DWORD           ERROR = 1;
+        const DWORD    THREAD_READY = 0;
+        const DWORD    THREAD_ERROR = 1;
         const DWORD      WAIT_COUNT = 2;
         HANDLE      wset[WAIT_COUNT]={};
         DWORD                waitrc = 0;
@@ -2738,8 +2772,9 @@ OsCreateThreadPool
         pool->ActiveThreads++;
 
         // wait for the thread to become ready.
-        wset[READY] = wready; wset[ERROR] = werror;
-        if ((waitrc = WaitForMultipleObjects(WAIT_COUNT, wset, FALSE, INFINITE)) != (WAIT_OBJECT_0+READY))
+        wset[THREAD_READY] = wready; 
+        wset[THREAD_ERROR] = werror;
+        if ((waitrc = WaitForMultipleObjects(WAIT_COUNT, wset, FALSE, INFINITE)) != (WAIT_OBJECT_0+THREAD_READY))
         {   // thread initialization failed, or the wait failed.
             // events are already in the OS_THREAD_POOL arrays, so don't clean up here.
             OsLayerError("ERROR: %S(%u): Failed to initialize worker %Iu of %Iu (0x%08X).\n", __FUNCTION__, tid, i, n, waitrc);
@@ -2771,7 +2806,7 @@ cleanup_and_fail:
     if (evt_launch) CloseHandle(evt_launch);
     if (iocp) CloseHandle(iocp);
     // reset the memory arena back to its initial state.
-    OsMemoryArenaResetToMarker(mem_marker);
+    OsMemoryArenaResetToMarker(arena, mem_marker);
     // zero out the OS_THREAD_POOL prior to returning to the caller.
     OsZeroMemory(pool, sizeof(OS_THREAD_POOL));
     return -1;
@@ -2785,9 +2820,9 @@ OsLaunchThreadPool
     OS_THREAD_POOL *pool
 )
 {
-    if (pool->LaunchEvent != NULL)
+    if (pool->LaunchSignal != NULL)
     {
-        SetEvent(pool->LaunchEvent);
+        SetEvent(pool->LaunchSignal);
     }
 }
 
@@ -2803,11 +2838,11 @@ OsTerminateThreadPool
     {
         DWORD last_error = ERROR_SUCCESS;
         // signal the termination event prior to waking any waiting threads.
-        SetEvent(pool->TerminateEvent);
+        SetEvent(pool->TerminateSignal);
         // signal all worker threads in the pool. any active processing will complete before this signal is received.
         OsSignalWorkerThreads(pool->CompletionPort, 0, pool->ActiveThreads, last_error);
         // signal the launch event, in case no threads have been launched yet.
-        SetEvent(pool->LaunchEvent);
+        SetEvent(pool->LaunchSignal);
     }
 }
 
@@ -2823,11 +2858,11 @@ OsDestroyThreadPool
     {   
         DWORD last_error = ERROR_SUCCESS;
         // signal the termination event prior to waking any waiting threads.
-        SetEvent(pool->TerminateEvent);
+        SetEvent(pool->TerminateSignal);
         // signal all worker threads in the pool. any active processing will complete before this signal is received.
         OsSignalWorkerThreads(pool->CompletionPort, 0, pool->ActiveThreads, last_error);
         // signal the launch event, in case no threads have been launched yet.
-        SetEvent(pool->LaunchEvent);
+        SetEvent(pool->LaunchSignal);
         // finally, wait for all threads to terminate gracefully.
         WaitForMultipleObjects((DWORD) pool->ActiveThreads, pool->OSThreadHandle, TRUE, INFINITE);
         // now that all threads have exited, close their handles.
@@ -2837,7 +2872,7 @@ OsDestroyThreadPool
             CloseHandle(pool->WorkerReady[i]);
             CloseHandle(pool->WorkerError[i]);
         }
-        OsZeroMemory(pool->OSThreadId    , pool->ActiveThreads * sizeof(unsigned int));
+        OsZeroMemory(pool->OSThreadIds   , pool->ActiveThreads * sizeof(unsigned int));
         OsZeroMemory(pool->OSThreadHandle, pool->ActiveThreads * sizeof(HANDLE));
         OsZeroMemory(pool->WorkerReady   , pool->ActiveThreads * sizeof(HANDLE));
         OsZeroMemory(pool->WorkerError   , pool->ActiveThreads * sizeof(HANDLE));
@@ -2873,9 +2908,8 @@ OsSignalWorkerThreads
     size_t      thread_count 
 )
 {
-    OS_WORKER_DATA *worker_data = (OS_WORKER_DATA*) sender->WorkerData;
     DWORD last_error = ERROR_SUCCESS;
-    if  (!OsSignalWorkerThreads(worker_data->CompletionPort, signal_arg, thread_count, last_error))
+    if  (!OsSignalWorkerThreads(sender->CompletionPort, signal_arg, thread_count, last_error))
     {
         OsLayerError("ERROR: %S(%u): Signaling worker threads failed with result 0x%08X.\n", __FUNCTION__, sender->ThreadId, last_error);
         return false;
