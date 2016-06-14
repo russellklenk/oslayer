@@ -5,6 +5,7 @@
 /// - Thread pool (CPU resource management)
 /// - Disk I/O (Asynchronous storage resource management)
 /// - HID I/O (User input device management)
+/// - Low-latency audio (audio input and output device management)
 /// - Vulkan WSI (Vulkan Window system interface and swap chain management)
 ///////////////////////////////////////////////////////////////////////////80*/
 
@@ -218,6 +219,35 @@ struct OS_CPU_INFO
     char                IsVirtualMachine;            /// Set to 1 if the process is running in a virtual machine.
 };
 
+#ifndef OS_LAYER_NO_TASK_PROFILER
+    /// @summary Define the data associated with the system task profiler. The task profiler can be used to emit:
+    /// Events: Used for point-in-time events such as worker thread startup and shutdown or task submission.
+    /// Spans : Used to represent a range of time such as the time between task submission and execution, or task start and finish.
+    struct OS_TASK_PROFILER
+    {
+        CV_PROVIDER        *Provider;                /// The Win32 OS Layer provider.
+        CV_MARKERSERIES    *MarkerSeries;            /// The marker series. Each profiler instance has a separate marker series.
+    };
+
+    /// @summary Defines the data associated with a task profiler object used to track a time range.
+    struct OS_TASK_PROFILER_SPAN
+    {
+        CV_SPAN            *CvSpan;                  /// The Concurrency Visualizer SDK object representing the time span.
+    };
+    #define OsThreadEvent(pool, format, ...)         CvWriteAlertW((pool)->TaskProfiler.MarkerSeries, _T(format), __VA_ARGS__)
+    #define OsThreadSpanEnter(pool, format, ...)     CvEnterSpanW((pool)->TaskProfiler.MarkerSeries, _T(format), __VA_ARGS__)
+    #define OsThreadSpanLeave(pool)                  CvLeaveSpan((pool)->TaskProfiler.MarkerSeries)
+#else
+    /// @summary Defines the data associated with a task profiler object used to track a time range.
+    struct OS_TASK_PROFILER_SPAN
+    {
+        void               *CvSpan;                  /// An unused placeholder field of the same size as a CV_SPAN*.
+    };
+    #define OsThreadEvent(pool, format, ...)     
+    #define OsThreadSpanEnter(pool, format, ...) 
+    #define OsThreadSpanLeave(pool)                
+#endif
+
 /// @summary Define the data available to an application callback executing on a worker thread.
 struct OS_WORKER_THREAD
 {
@@ -269,6 +299,9 @@ struct OS_THREAD_POOL
     HANDLE              CompletionPort;              /// The I/O completion port used to wait and wake worker threads in the pool.
     HANDLE              LaunchSignal;                /// The manual-reset event used to launch all threads in the pool.
     HANDLE              TerminateSignal;             /// The manual-reset event used to notify all threads that they should terminate.
+#ifndef OS_LAYER_NO_TASK_PROFILER
+    OS_TASK_PROFILER    TaskProfiler;                /// The task profiler associated with the thread pool.
+#endif
 };
 
 /// @summary Define the parameters used to configure a thread pool.
@@ -602,7 +635,12 @@ OS_LAYER_DEFINE_RUNTIME_FUNCTION(XInputGetCapabilities);
 //OS_LAYER_DEFINE_RUNTIME_FUNCTION(XInputGetBatteryInformation);
 
 /// @summary The module load address of the XInput DLL.
-global_variable HMODULE XInputDll = NULL;
+global_variable HMODULE    XInputDll = NULL;
+
+#ifndef OS_LAYER_NO_TASK_PROFILER
+/// @summary The GUID of the Win32 OS Layer task profiler provider {349CE0E9-6DF5-4C25-AC5B-C84F529BC0CE}.
+global_variable GUID const TaskProfilerGUID = { 0x349ce0e9, 0x6df5, 0x4c25, { 0xac, 0x5b, 0xc8, 0x4f, 0x52, 0x9b, 0xc0, 0xce } };
+#endif
 
 /*//////////////////////////
 //   Internal Functions   //
@@ -2561,6 +2599,7 @@ OsWorkerThreadMain
 
     // spit out a message just prior to initialization:
     OsLayerOutput("START: %S(%u): Worker thread starting on pool 0x%p.\n", __FUNCTION__, tid, init.ThreadPool);
+    OsThreadEvent(init.ThreadPool, "Worker thread %u starting", tid);
 
     // create a thread-local memory arena to be used by the callback executing on the worker.
     if (OsCreateMemoryArena(&arena, init.ArenaSize, false, true) < 0)
@@ -2680,13 +2719,15 @@ OsCalculateMemoryForThreadPool
 /// @param pool The OS_THREAD_POOL instance to initialize.
 /// @param init An OS_THREAD_POOL_INIT object describing the thread pool configuration.
 /// @param arena The memory arena from which thread pool storage will be allocated.
+/// @param name A zero-terminated string constant specifying a human-readable name for the thread pool, or NULL. This name is used for task profiler display.
 /// @return Zero if the thread pool is created successfully and worker threads are ready-to-run, or -1 if an error occurs.
 public_function int
 OsCreateThreadPool
 (
     OS_THREAD_POOL      *pool, 
     OS_THREAD_POOL_INIT *init,
-    OS_MEMORY_ARENA    *arena
+    OS_MEMORY_ARENA    *arena, 
+    char const          *name=NULL
 )
 {
     HANDLE                  iocp = NULL;
@@ -2697,29 +2738,68 @@ OsCreateThreadPool
     size_t        bytes_required = OsCalculateMemoryForThreadPool(init->ThreadCount);
     size_t        align_required = std::alignment_of<HANDLE>::value;
 
+#ifndef OS_LAYER_NO_TASK_PROFILER
+    CV_PROVIDER     *cv_provider = NULL;
+    CV_MARKERSERIES   *cv_series = NULL;
+    HRESULT            cv_result = S_OK;
+    char             cv_name[64] = {};
+#endif
+
     if (!OsMemoryArenaCanSatisfyAllocation(arena, bytes_required, align_required))
     {
         OsLayerError("ERROR: %S(%u): Insufficient memory to create thread pool.\n", __FUNCTION__, tid);
+        OsZeroMemory(pool, sizeof(OS_THREAD_POOL));
         return -1;
     }
     if ((evt_launch = CreateEvent(NULL, TRUE, FALSE, NULL)) == NULL)
     {   // without the launch event, there's no way to synchronize worker launch.
         OsLayerError("ERROR: %S(%u): Unable to create pool launch event (0x%08X).\n", __FUNCTION__, tid, GetLastError());
+        OsZeroMemory(pool, sizeof(OS_THREAD_POOL));
         return -1;
     }
     if ((evt_terminate = CreateEvent(NULL, TRUE, FALSE, NULL)) == NULL)
     {   // without the termination event, there's no way to synchronize worker shutdown.
         OsLayerError("ERROR: %S(%u): Unable to create pool termination event (0x%08X).\n", __FUNCTION__, tid, GetLastError());
+        OsZeroMemory(pool, sizeof(OS_THREAD_POOL));
         CloseHandle(evt_launch);
         return -1;
     }
     if ((iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, (DWORD) init->ThreadCount+1)) == NULL)
     {   // without the completion port, there's no way to synchronize worker execution.
         OsLayerError("ERROR: %S(%u): Unable to create pool I/O completion port (0x%08X).\n", __FUNCTION__, tid, GetLastError());
+        OsZeroMemory(pool, sizeof(OS_THREAD_POOL));
         CloseHandle(evt_terminate);
         CloseHandle(evt_launch);
         return -1;
     }
+
+#ifndef OS_LAYER_NO_TASK_PROFILER
+    if (name == NULL)
+    {   // Concurrency Visualizer SDK requires a non-NULL string.
+        sprintf_s(cv_name, "Unnamed pool 0x%p", pool);
+    }
+    if (!SUCCEEDED((cv_result = CvInitProvider(&TaskProfilerGUID, &cv_provider))))
+    {
+        OsLayerError("ERROR: %S(%u): Unable to initialize task profiler provider (HRESULT 0x%08X).\n", __FUNCTION__, tid, cv_result);
+        OsZeroMemory(pool, sizeof(OS_THREAD_POOL));
+        CloseHandle(evt_terminate);
+        CloseHandle(evt_launch);
+        CloseHandle(iocp);
+        return -1;
+    }
+    if (!SUCCEEDED((cv_result = CvCreateMarkerSeriesA(cv_provider, name, &cv_series))))
+    {
+        OsLayerError("ERROR: %S(%u): Unable to create task profiler marker series (HRESULT 0x%08X).\n", __FUNCTION__, tid, cv_result);
+        OsZeroMemory(pool, sizeof(OS_THREAD_POOL));
+        CvReleaseProvider(cv_provider);
+        CloseHandle(evt_terminate);
+        CloseHandle(evt_launch);
+        CloseHandle(iocp);
+        return -1;
+    }
+#else
+    UNREFERENCED_PARAMETER(name);
+#endif
 
     // initialize the thread pool fields and allocate memory for per-thread arrays.
     pool->ActiveThreads   = 0;
@@ -2730,6 +2810,10 @@ OsCreateThreadPool
     pool->CompletionPort  = iocp;
     pool->LaunchSignal    = evt_launch;
     pool->TerminateSignal = evt_terminate;
+#ifndef OS_LAYER_NO_TASK_PROFILER
+    pool->TaskProfiler.Provider      = cv_provider;
+    pool->TaskProfiler.MarkerSeries  = cv_series;
+#endif
     OsZeroMemory(pool->OSThreadIds   , init->ThreadCount * sizeof(unsigned int));
     OsZeroMemory(pool->OSThreadHandle, init->ThreadCount * sizeof(HANDLE));
     OsZeroMemory(pool->WorkerReady   , init->ThreadCount * sizeof(HANDLE));
@@ -2822,6 +2906,11 @@ cleanup_and_fail:
             if (pool->WorkerError != NULL) CloseHandle(pool->WorkerError[i]);
         }
     }
+#ifndef OS_LAYER_NO_TASK_PROFILER
+    // clean up the task profiler objects.
+    if (cv_series) CvReleaseMarkerSeries(cv_series);
+    if (cv_provider) CvReleaseProvider(cv_provider);
+#endif
     // clean up the I/O completion port and synchronization objects.
     if (evt_terminate) CloseHandle(evt_terminate);
     if (evt_launch) CloseHandle(evt_launch);
@@ -2899,6 +2988,19 @@ OsDestroyThreadPool
         OsZeroMemory(pool->WorkerError   , pool->ActiveThreads * sizeof(HANDLE));
         pool->ActiveThreads = 0;
     }
+#ifndef OS_LAYER_NO_TASK_PROFILER
+    // clean up the task provider objects from the Concurrency Visualizer SDK.
+    if (pool->TaskProfiler.MarkerSeries != NULL)
+    {
+        CvReleaseMarkerSeries(pool->TaskProfiler.MarkerSeries);
+        pool->TaskProfiler.MarkerSeries = NULL;
+    }
+    if (pool->TaskProfiler.Provider != NULL)
+    {
+        CvReleaseProvider(pool->TaskProfiler.Provider);
+        pool->TaskProfiler.Provider = NULL;
+    }
+#endif
     if (pool->LaunchSignal != NULL)
     {
         CloseHandle(pool->LaunchSignal);
