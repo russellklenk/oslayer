@@ -110,6 +110,17 @@
     #endif
 #endif
 
+/// @summary Helper macros to emit task profiler events and span markers.
+#ifndef OS_LAYER_NO_TASK_PROFILER
+    #define OsThreadEvent(pool, fmt, ...)           CvWriteAlertW((pool)->TaskProfiler.MarkerSeries, _T(fmt), __VA_ARGS__)
+    #define OsThreadSpanEnter(pool, span, fmt, ...) CvEnterSpanW((pool)->TaskProfiler.MarkerSeries, &(span).CvSpan, _T(fmt), __VA_ARGS__)
+    #define OsThreadSpanLeave(pool, span)           CvLeaveSpan((span).CvSpan)
+#else
+    #define OsThreadEvent(pool, format, ...)        
+    #define OsThreadSpanEnter(pool, format, ...)    
+    #define OsThreadSpanLeave(pool)                 
+#endif
+
 /// @summary Macro used to declare a function resolved at runtime.
 #ifndef OS_LAYER_DECLARE_RUNTIME_FUNCTION
 #define OS_LAYER_DECLARE_RUNTIME_FUNCTION(retval, callconv, name, ...) \
@@ -151,33 +162,35 @@
 //   Includes   //
 ////////////////*/
 #ifndef OS_LAYER_NO_INCLUDES
-#include <type_traits>
+    #include <type_traits>
 
-#include <stddef.h>
-#include <stdint.h> 
-#include <stdarg.h>
-#include <assert.h>
-#include <inttypes.h>
+    #include <stddef.h>
+    #include <stdint.h> 
+    #include <stdarg.h>
+    #include <assert.h>
+    #include <inttypes.h>
 
-#include <process.h>
-#include <conio.h>
-#include <fcntl.h>
-#include <io.h>
+    #include <process.h>
+    #include <conio.h>
+    #include <fcntl.h>
+    #include <io.h>
 
-#include <tchar.h>
-#include <Windows.h>
-#include <Shellapi.h>
-#include <strsafe.h>
-#include <XInput.h>
-#include <intrin.h>
+    #include <tchar.h>
+    #include <Windows.h>
+    #include <Shellapi.h>
+    #include <strsafe.h>
+    #include <XInput.h>
+    #include <intrin.h>
 
-#include <vulkan/vulkan.h>
-#endif
+    // distributed as part of the LunarG Vulkan SDK.
+    // https://lunarg.com/vulkan-sdk/
+    #include <vulkan/vulkan.h>
 
-#ifndef OS_LAYER_NO_TASK_PROFILER
-// part of the Microsoft Concurrency Visualizer SDK.
-// https://msdn.microsoft.com/en-us/library/hh543789.aspx
-#include "cvmarkers.h"
+    #ifndef OS_LAYER_NO_TASK_PROFILER
+        // part of the Microsoft Concurrency Visualizer SDK.
+        // https://msdn.microsoft.com/en-us/library/hh543789.aspx
+        #include "cvmarkers.h"
+    #endif
 #endif
 
 /*//////////////////
@@ -220,32 +233,20 @@ struct OS_CPU_INFO
 };
 
 #ifndef OS_LAYER_NO_TASK_PROFILER
-    /// @summary Define the data associated with the system task profiler. The task profiler can be used to emit:
-    /// Events: Used for point-in-time events such as worker thread startup and shutdown or task submission.
-    /// Spans : Used to represent a range of time such as the time between task submission and execution, or task start and finish.
-    struct OS_TASK_PROFILER
-    {
-        CV_PROVIDER        *Provider;                /// The Win32 OS Layer provider.
-        CV_MARKERSERIES    *MarkerSeries;            /// The marker series. Each profiler instance has a separate marker series.
-    };
+/// @summary Define the data associated with the system task profiler. The task profiler can be used to emit:
+/// Events: Used for point-in-time events such as worker thread startup and shutdown or task submission.
+/// Spans : Used to represent a range of time such as the time between task submission and execution, or task start and finish.
+struct OS_TASK_PROFILER
+{
+    CV_PROVIDER        *Provider;                    /// The Win32 OS Layer provider.
+    CV_MARKERSERIES    *MarkerSeries;                /// The marker series. Each profiler instance has a separate marker series.
+};
 
-    /// @summary Defines the data associated with a task profiler object used to track a time range.
-    struct OS_TASK_PROFILER_SPAN
-    {
-        CV_SPAN            *CvSpan;                  /// The Concurrency Visualizer SDK object representing the time span.
-    };
-    #define OsThreadEvent(pool, format, ...)         CvWriteAlertW((pool)->TaskProfiler.MarkerSeries, _T(format), __VA_ARGS__)
-    #define OsThreadSpanEnter(pool, format, ...)     CvEnterSpanW((pool)->TaskProfiler.MarkerSeries, _T(format), __VA_ARGS__)
-    #define OsThreadSpanLeave(pool)                  CvLeaveSpan((pool)->TaskProfiler.MarkerSeries)
-#else
-    /// @summary Defines the data associated with a task profiler object used to track a time range.
-    struct OS_TASK_PROFILER_SPAN
-    {
-        void               *CvSpan;                  /// An unused placeholder field of the same size as a CV_SPAN*.
-    };
-    #define OsThreadEvent(pool, format, ...)     
-    #define OsThreadSpanEnter(pool, format, ...) 
-    #define OsThreadSpanLeave(pool)                
+/// @summary Defines the data associated with a task profiler object used to track a time range.
+struct OS_TASK_PROFILER_SPAN
+{
+    CV_SPAN            *CvSpan;                      /// The Concurrency Visualizer SDK object representing the time span.
+};
 #endif
 
 /// @summary Define the data available to an application callback executing on a worker thread.
