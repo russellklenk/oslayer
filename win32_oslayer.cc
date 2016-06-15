@@ -111,15 +111,9 @@
 #endif
 
 /// @summary Helper macros to emit task profiler events and span markers.
-#ifndef OS_LAYER_NO_TASK_PROFILER
-    #define OsThreadEvent(pool, fmt, ...)           CvWriteAlertW((pool)->TaskProfiler.MarkerSeries, _T(fmt), __VA_ARGS__)
-    #define OsThreadSpanEnter(pool, span, fmt, ...) CvEnterSpanW((pool)->TaskProfiler.MarkerSeries, &(span).CvSpan, _T(fmt), __VA_ARGS__)
-    #define OsThreadSpanLeave(pool, span)           CvLeaveSpan((span).CvSpan)
-#else
-    #define OsThreadEvent(pool, format, ...)        
-    #define OsThreadSpanEnter(pool, format, ...)    
-    #define OsThreadSpanLeave(pool)                 
-#endif
+#define OsThreadEvent(pool, fmt, ...)               CvWriteAlertW((pool)->TaskProfiler.MarkerSeries, _T(fmt), __VA_ARGS__)
+#define OsThreadSpanEnter(pool, span, fmt, ...)     CvEnterSpanW((pool)->TaskProfiler.MarkerSeries, &(span).CvSpan, _T(fmt), __VA_ARGS__)
+#define OsThreadSpanLeave(pool, span)               CvLeaveSpan((span).CvSpan)
 
 /// @summary Macro used to declare a function resolved at runtime.
 #ifndef OS_LAYER_DECLARE_RUNTIME_FUNCTION
@@ -158,6 +152,99 @@
         name##_Func == name##_Stub
 #endif
 
+/// @summary Used to declare a pointer to a function exported by the Vulkan ICD.
+/// These functions are directly loadable using OS-provided dynamic loading mechanisms like GetProcAddress.
+#ifndef OS_LAYER_VULKAN_ICD_FUNCTION
+#define OS_LAYER_VULKAN_ICD_FUNCTION(fname) \
+    PFN_##fname fname
+#endif
+
+/// @summary Helper macro used by OsVulkanLoaderResolveIcdFunctions to resolve a Vulkan ICD entry point using GetProcAddress.
+/// @param vkloader The OS_VULKAN_LOADER maintaining the function pointer to the entry point.
+/// @param fname The entry point to resolve.
+#ifndef OS_LAYER_RESOLVE_VULKAN_ICD_FUNCTION
+#define OS_LAYER_RESOLVE_VULKAN_ICD_FUNCTION(vkloader, fname) \
+        do {                                                                   \
+            if (((vkloader)->fname = (PFN_##fname) GetProcAddress((vkloader)->LoaderHandle, #fname)) == NULL) { \
+                OsLayerError("ERROR: %S(%u): Unable to resolve Vulkan ICD entry point \"%S\".\n" , __FUNCTION__, GetCurrentThreadId(), #fname); \
+                return false;                                                  \
+            }                                                                  \
+        __pragma(warning(push));                                               \
+        __pragma(warning(disable:4127));                                       \
+        } while (0);                                                           \
+        __pragma(warning(pop))
+#endif
+
+/// @summary Used to declare the pointer to a global-level function, used to create a VkInstance or enumerate extensions and layers.
+/// Global-level functions must be resolved using vkGetInstanceProcAddr, but specify NULL for the VkInstance argument.
+#ifndef OS_LAYER_VULKAN_GLOBAL_FUNCTION
+#define OS_LAYER_VULKAN_GLOBAL_FUNCTION(fname) \
+    PFN_##fname fname
+#endif
+
+/// @summary Helper macro used by OsVulkanLoaderResolveGlobalFunctions to resolve a global-level function.
+/// @param vkloader The OS_VULKAN_LOADER maintaining the function pointer to the entry point.
+/// @param fname The entry point to resolve.
+#ifndef OS_LAYER_RESOLVE_VULKAN_GLOBAL_FUNCTION
+    #define OS_LAYER_RESOLVE_VULKAN_GLOBAL_FUNCTION(vkloader, fname)           \
+        do {                                                                   \
+            if (((vkloader)->fname = (PFN_##fname) (vkloader)->vkGetInstanceProcAddr(NULL, #fname)) == NULL) { \
+                OsLayerError("ERROR: %S(%u): Unable to resolve Vulkan global entry point \"%S\".\n", __FUNCTION__, GetCurrentThreadId(), #fname); \
+                return false;                                                  \
+            }                                                                  \
+        __pragma(warning(push));                                               \
+        __pragma(warning(disable:4127));                                       \
+        } while (0);                                                           \
+        __pragma(warning(pop))
+#endif
+
+/// @summary Used to declare the pointer to an instance-level function, used to query hardware features.
+/// Instance-level functions must be resolved using vkGetInstanceProcAddr and require a valid VkInstance.
+#ifndef OS_LAYER_VULKAN_INSTANCE_FUNCTION
+#define OS_LAYER_VULKAN_INSTANCE_FUNCTION(fname) \
+    PFN_##fname fname
+#endif
+
+/// @summary Helper macro used by OsVulkanLoaderResolveInstanceFunctions to resolve an instance-level function.
+/// @param vkinstance The OS_VULKAN_INSTANCE maintaining the function pointer to the entry point.
+/// @param vkloader The OS_VULKAN_LOADER maintaining the function pointer to the vkGetInstanceProcAddr entry point.
+/// @param fname The entry point to resolve.
+#ifndef OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION
+    #define OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(vkinstance, vkloader, fname) \
+        do {                                                                   \
+            if (((vkinstance)->fname = (PFN_##fname)(vkloader)->vkGetInstanceProcAddr((vkinstance)->InstanceHandle, #fname)) == NULL) { \
+                OsLayerError("ERROR: %S(%u): Unable to resolve Vuklan instance entry point \"%S\".\n", __FUNCTION__, GetCurrentThreadId(), #fname); \
+                return false;                                                  \
+            }                                                                  \
+        __pragma(warning(push));                                               \
+        __pragma(warning(disable:4127));                                       \
+        } while (0);                                                           \
+        __pragma(warning(pop))
+#endif
+
+/// @summary Used to declare the pointer to a device-level function, used to perform operations and submit commands on a logical device.
+/// Device-level functions must be resolved using vkGetDeviceProcAddr.
+#ifndef OS_LAYER_VULKAN_DEVICE_FUNCTION
+#define OS_LAYER_VULKAN_DEVICE_FUNCTION(fname) \
+    PFN_##fname fname
+#endif
+
+/// @summary Helper macro used by VkLoaderResolveDeviceFunctions to resolve a device-level function.
+/// @param fn The Vulkan API function to resolve.
+/// @param device_obj The VK_DEVICE maintaining the function pointer to set.
+#ifndef OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION
+    #define OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(vkdevice, vkinstance, fname) \
+        do {                                                                   \
+            if (((vkdevice)->fname = (PFN_##fname) (vkinstance)->vkGetDeviceProcAddr((vkdevice)->LogicalDevice, #fname)) == NULL) { \
+                OsLayerError("ERROR: %S(%u): Unable to resolve Vulkan device entry point \"%S\".\n", __FUNCTION__, GetCurrentThreadId(), #fname); \
+                return false;                                                  \
+            }                                                                  \
+        __pragma(warning(push));                                               \
+        __pragma(warning(disable:4127));                                       \
+        } while (0);                                                           \
+        __pragma(warning(pop))
+#endif
+
 /*////////////////
 //   Includes   //
 ////////////////*/
@@ -182,24 +269,34 @@
     #include <XInput.h>
     #include <intrin.h>
 
-    // distributed as part of the LunarG Vulkan SDK.
-    // https://lunarg.com/vulkan-sdk/
     #include <vulkan/vulkan.h>
 
-    #ifndef OS_LAYER_NO_TASK_PROFILER
-        // part of the Microsoft Concurrency Visualizer SDK.
-        // https://msdn.microsoft.com/en-us/library/hh543789.aspx
-        #include "cvmarkers.h"
-    #endif
+    #include "cvmarkers.h"
 #endif
 
 /*//////////////////
 //   Data Types   //
 //////////////////*/
-/// @summary Forward-declare several types.
+/// @summary Forward-declare several public types.
+struct OS_CPU_INFO;
 struct OS_MEMORY_ARENA;
 struct OS_WORKER_THREAD;
 struct OS_THREAD_POOL;
+struct OS_THREAD_POOL_INIT;
+struct OS_KEYBOARD_EVENTS;
+struct OS_POINTER_EVENTS;
+struct OS_GAMEPAD_EVENTS;
+struct OS_INPUT_EVENTS;
+struct OS_INPUT_SYSTEM;
+struct OS_DISPLAY;
+
+struct OS_TASK_PROFILER;
+struct OS_TASK_PROFILER_SPAN;
+
+struct OS_VULKAN_LOADER;
+struct OS_VULKAN_DEVICE;
+struct OS_VULKAN_INSTANCE;
+struct OS_VULKAN_PHYSICAL_DEVICE;
 
 /// @summary Define the data associated with an operating system arena allocator. 
 /// The memory arena is not safe for concurrent access by multiple threads.
@@ -232,7 +329,6 @@ struct OS_CPU_INFO
     char                IsVirtualMachine;            /// Set to 1 if the process is running in a virtual machine.
 };
 
-#ifndef OS_LAYER_NO_TASK_PROFILER
 /// @summary Define the data associated with the system task profiler. The task profiler can be used to emit:
 /// Events: Used for point-in-time events such as worker thread startup and shutdown or task submission.
 /// Spans : Used to represent a range of time such as the time between task submission and execution, or task start and finish.
@@ -247,7 +343,6 @@ struct OS_TASK_PROFILER_SPAN
 {
     CV_SPAN            *CvSpan;                      /// The Concurrency Visualizer SDK object representing the time span.
 };
-#endif
 
 /// @summary Define the data available to an application callback executing on a worker thread.
 struct OS_WORKER_THREAD
@@ -300,9 +395,7 @@ struct OS_THREAD_POOL
     HANDLE              CompletionPort;              /// The I/O completion port used to wait and wake worker threads in the pool.
     HANDLE              LaunchSignal;                /// The manual-reset event used to launch all threads in the pool.
     HANDLE              TerminateSignal;             /// The manual-reset event used to notify all threads that they should terminate.
-#ifndef OS_LAYER_NO_TASK_PROFILER
     OS_TASK_PROFILER    TaskProfiler;                /// The task profiler associated with the thread pool.
-#endif
 };
 
 /// @summary Define the parameters used to configure a thread pool.
@@ -457,6 +550,81 @@ struct OS_DISPLAY
     DISPLAY_DEVICE      DisplayInfo;                 /// Information uniquely identifying the display to the operating system.
 };
 
+/// @summary Define the data associated with a Vulkan runtime loader, used to access the Vulkan API.
+struct OS_VULKAN_LOADER
+{
+    HMODULE                           LoaderHandle;                                  /// The module base address of the vulkan-1.dll loader module.
+
+    size_t                            InstanceLayerCount;                            /// The number of VkLayerProperties instances in the InstanceLayerInfo array.
+    VkLayerProperties                *InstanceLayerList;                             /// An array of VkLayerProperties structures describing supported instance-level layers.
+    size_t                           *LayerExtensionCount;                           /// An array of InstanceLayerCount counts specifying the number of VkExtensionProperties per-layer.
+    VkExtensionProperties           **LayerExtensionList;                            /// An array of InstanceLayerCount arrays describing supported per-layer extensions.
+    size_t                            InstanceExtensionCount;                        /// The number of VkExtensionProperties structures in the InstanceExtensionInfo array.
+    VkExtensionProperties            *InstanceExtensionList;                         /// An array of VkExtensionProperties structures describing supported instance-level extensions.
+
+    OS_LAYER_VULKAN_ICD_FUNCTION     (vkGetInstanceProcAddr);                        /// The vkGetInstanceProcAddr function.
+    OS_LAYER_VULKAN_GLOBAL_FUNCTION  (vkCreateInstance);                             /// The vkCreateInstance function.
+    OS_LAYER_VULKAN_GLOBAL_FUNCTION  (vkEnumerateInstanceLayerProperties);           /// The vkEnumerateInstanceLayerProperties function.
+    OS_LAYER_VULKAN_GLOBAL_FUNCTION  (vkEnumerateInstanceExtensionProperties);       /// The vkEnumerateInstanceExtensionProperties function.
+};
+
+/// @summary Define the data associated with a Vulkan physical device. Data is populated during instance creation.
+struct OS_VULKAN_PHYSICAL_DEVICE
+{
+    VkPhysicalDevice                  DeviceHandle;                                  /// The Vulkan physical device object handle.
+    VkPhysicalDeviceFeatures          Features;                                      /// Information about optional features supported by the physical device.
+    VkPhysicalDeviceProperties        Properties;                                    /// Information about the type and vendor of the physical device.
+    VkPhysicalDeviceMemoryProperties  Memory;                                        /// Information about the memory access features of the physical device.
+    size_t                            QueueFamilyCount;                              /// The number of command queue families exposed by the device.
+    VkQueueFamilyProperties          *QueueFamily;                                   /// An array of QueueFamilyCount VkQueueFamiliyProperties describing command queue attributes.
+    size_t                            LayerCount;                                    /// The number of device-level optional layers exposed by the device.
+    VkLayerProperties                *LayerList;                                     /// An array of LayerCount VkLayerProperties descriptors for the device-level layers exposed by the device.
+    size_t                           *LayerExtensionCount;                           /// An array of LayerCount count values specifying the number of extensions exposed by each device-level layer.
+    VkExtensionProperties           **LayerExtensionList;                            /// An array of LayerCount VkExtensionProperties lists providing additional information on the layer-level extensions.
+    size_t                            ExtensionCount;                                /// The number of device-level optional extensions exposed by the device.
+    VkExtensionProperties            *ExtensionList;                                 /// An array of ExtensionCount VkExtensionProperties providing additional information about device-level extensions.
+};
+
+/// @summary Define the data associated with a Vulkan API instance, used to enumerate physical devices and capabilities.
+struct OS_VULKAN_INSTANCE
+{
+    VkInstance                        InstanceHandle;                                /// The Vulkan context object returned by vkCreateInstance.
+    size_t                            PhysicalDeviceCount;                           /// The number of physical devices available in the system.
+    VkPhysicalDevice                 *PhysicalDeviceHandles;                         /// An array of PhysicalDeviceCount physical device handles.
+    VkPhysicalDeviceType             *PhysicalDeviceTypes;                           /// An array of PhysicalDeviceCount physical device types.
+    OS_VULKAN_PHYSICAL_DEVICE        *PhysicalDeviceList;                            /// An array of PhysicalDeviceCount physical device metadata.
+    
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkCreateDevice);                               /// The vkCreateDevice function.
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkDestroyInstance);                            /// The vkDestroyInstance function.
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkEnumeratePhysicalDevices);                   /// The vkEnumeratePhysicalDevices function.
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceFeatures);                  /// The vkGetPhysicalDeviceFeatures function.
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceProperties);                /// The vkGetPhysicalDeviceProperties function.
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceMemoryProperties);          /// The vkGetPhysicalDeviceMemoryProperties function.
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceQueueFamilyProperties);     /// The vkGetPhysicalDeviceQueueFamilyProperties function.
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkEnumerateDeviceLayerProperties);             /// The vkEnumerateDeivceLayerProperties function.
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkEnumerateDeviceExtensionProperties);         /// The vkEnumerateDeviceExtensionProperties function.
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetDeviceProcAddr);                          /// The vkGetDeviceProcAddr function.
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkDestroySurfaceKHR);                          /// The VK_KHR_surface vkDestroySurfaceKHR function.
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceSurfaceSupportKHR);         /// The VK_KHR_surface vkGetPhysicalDeviceSurfaceSupportKHR function.
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceSurfaceFormatsKHR);         /// The VK_KHR_surface vkGetPhysicalDeviceSurfaceFormatsKHR function.
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceSurfaceCapabilitiesKHR);    /// The VK_KHR_surface vkGetPhysicalDeviceSurfaceCapabilitiesKHR function.
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceSurfacePresentModesKHR);    /// The VK_KHR_surface vkGetPhysicalDeviceSurfacePresentModesKHR function.
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkCreateWin32SurfaceKHR);                      /// The VK_KHR_win32_surface vkCreateWin32SurfaceKHR function.
+};
+
+/// @summary Define the data associated with a Vulkan logical device, used to manage resources and execute commands.
+struct OS_VULKAN_DEVICE
+{
+    VkDevice                          LogicalDevice;                                 /// The handle of the logical device.
+    VkPhysicalDevice                  PhysicalDevice;                                /// The handle of the associated physical device.
+    VkPhysicalDeviceType              PhysicalDeviceType;                            /// The physical device type (integrated GPU, discrete GPU, etc.)
+    OS_VULKAN_PHYSICAL_DEVICE        *PhysicalDeviceInfo;                            /// A pointer into the OS_VULKAN_INSTANCE::PhysicalDeviceList providing information on device capabilities.
+
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkDestroyDevice);                              /// The vkDestroyDevice function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkGetDeviceQueue);                             /// The vkGetDeviceQueue function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkDeviceWaitIdle);                             /// The vkDeviceWaitIdle function.
+};
+
 /// @summary Define constants for specifying worker thread stack sizes.
 enum OS_WORKER_THREAD_STACK_SIZE     : size_t
 {
@@ -484,6 +652,16 @@ enum OS_DISPLAY_ORIENTATION          : int
 {
     OS_DISPLAY_ORIENTATION_LANDSCAPE = 0,            /// The display orientation is landscape.
     OS_DISPLAY_ORIENTATION_PORTRAIT  = 1,            /// The display orientation is portrait.
+};
+
+/// @summary Define the possible result codes returned by OsCreateVulkanLoader.
+enum OS_VULKAN_LOADER_RESULT         : int
+{
+    OS_VULKAN_LOADER_RESULT_SUCCESS  = 0,            /// The Vulkan loader was successfully created; the host supports Vulkan.
+    OS_VULKAN_LOADER_RESULT_NOVULKAN =-1,            /// The host system does not expose any Vulkan ICDs.
+    OS_VULKAN_LOADER_RESULT_NOMEMORY =-2,            /// The supplied memory arena does not have sufficient space.
+    OS_VULKAN_LOADER_RESULT_NOENTRY  =-3,            /// One or more required Vulkan API entry points are missing.
+    OS_VULKAN_LOADER_RESULT_VKERROR  =-4,            /// A Vulkan API call returned an error.
 };
 
 /// @summary Define flags indicating how to interpret WIN32_POINTER_STATE::Relative.
@@ -638,10 +816,8 @@ OS_LAYER_DEFINE_RUNTIME_FUNCTION(XInputGetCapabilities);
 /// @summary The module load address of the XInput DLL.
 global_variable HMODULE    XInputDll = NULL;
 
-#ifndef OS_LAYER_NO_TASK_PROFILER
 /// @summary The GUID of the Win32 OS Layer task profiler provider {349CE0E9-6DF5-4C25-AC5B-C84F529BC0CE}.
 global_variable GUID const TaskProfilerGUID = { 0x349ce0e9, 0x6df5, 0x4c25, { 0xac, 0x5b, 0xc8, 0x4f, 0x52, 0x9b, 0xc0, 0xce } };
-#endif
 
 /*//////////////////////////
 //   Internal Functions   //
@@ -1747,6 +1923,290 @@ OsWorkerThreadWaitForWakeup
     }
 }
 
+/// @summary Convert a lowercase ASCII character 'a'-'z' to the corresponding uppercase character.
+/// @param ch The input character.
+/// @return The uppercase version of the input character.
+internal_function inline int
+OsToUpper
+(
+    char ch
+)
+{
+    return (ch >= 'a' && ch <= 'z') ? (ch - 32) : ch;
+}
+
+/// @summary Convert an uppercase ASCII character 'A'-'Z' to the corresponding lowercase character.
+/// @param ch The input character.
+/// @return The lowercase version of the input character.
+internal_function inline int
+OsToLower
+(
+    char ch
+)
+{
+    return (ch >= 'A' && ch <= 'Z') ? (ch + 32) : ch;
+}
+
+/// @summary Locate one substring within another, ignoring case.
+/// @param search The zero-terminated ASCII string to search.
+/// @param find The zero-terminated ASCII string to locate within the search string.
+/// @return A pointer to the start of the first match, or NULL.
+internal_function char const*
+OsStringSearch
+(
+    char const *search, 
+    char const *find
+)
+{
+    if (search == NULL)
+    {   // invalid search string.
+        return NULL;
+    }
+    if (*search == 0 && *find == 0)
+    {   // both are empty strings.
+        return search;
+    }
+    else if (*search == 0)
+    {   // search is an empty string, but find is not.
+        return NULL;
+    }
+    else
+    {   // both search and find are non-NULL, non-empty strings.
+        char const *si = search;
+        int  const  ff = OsToLower(*find++);
+        for ( ; ; )
+        {
+            int const sc = OsToLower(*si++);
+            if (sc == ff)
+            {   // first character of find matches this character of search.
+                char const *ss = si;   // si points to one after the match.
+                char const *fi = find; // find points to the second character.
+                for ( ; ; )
+                {
+                    int const s = OsToLower(*ss++);
+                    int const f = OsToLower(*fi++);
+                    if (f == 0) return si-1;
+                    if (s == 0) return NULL;
+                    if (s != f) break;
+                }
+            }
+            if (sc == 0) break;
+        }
+    }
+    return NULL;
+}
+
+/// @summary Search a list of layers for a given layer name to determine if a layer is supported.
+/// @param layer_name A zero-terminated ASCII string specifying the registered name of the layer to locate.
+/// @param layer_list The list of layer properties to search.
+/// @param layer_count The number of layer properties to search.
+/// @param layer_index If non-NULL, and the named layer is supported, this location is updated with the zero-based index of the layer in the list.
+/// @return The layer name string (of the associated VkLayerProperties), if supported; otherwise, NULL.
+internal_function char const*
+OsSupportsVulkanLayer
+(
+    char              const *layer_name,
+    VkLayerProperties const *layer_list, 
+    size_t                   layer_count, 
+    size_t                  *layer_index=NULL
+)
+{
+    char const *s = NULL;
+    for (size_t i = 0; i < layer_count; ++i)
+    {
+        if ((s = OsStringSearch(layer_list[i].layerName, layer_name)) != NULL)
+        {
+            if (layer_index != NULL) *layer_index = i;
+            return s;
+        }
+    }
+    return NULL;
+}
+
+/// @summary Search a list of extensions for a given extension name to determine if an extension is supported.
+/// @param extension_name A zero-terminated ASCII string specifying the registered name of the extension to locate.
+/// @param extension_list The list of extension properties to search.
+/// @param extension_count The number of extension properties to search.
+/// @param extension_index If non-NULL, and the named extension is supported, this location is updated with the zero-based index of the extension in the list.
+/// @return The extension name string (of the associated VkExtensionProperties), if supported; otherwise, NULL.
+internal_function char const*
+OsSupportsVulkanExtension
+(
+    char                  const *extension_name,
+    VkExtensionProperties const *extension_list, 
+    size_t                       extension_count, 
+    size_t                      *extension_index=NULL
+)
+{
+    char const *s = NULL;
+    for (size_t i = 0; i < extension_count; ++i)
+    {
+        if ((s = OsStringSearch(extension_list[i].extensionName, extension_name)) != NULL)
+        {
+            if (extension_index != NULL) *extension_index = i;
+            return s;
+        }
+    }
+    return NULL;
+}
+
+/// @summary Search a list of extension names for a specific extension name string.
+/// @param extension_name A zero-terminated ASCII string specifying the registered name of the extension to locate.
+/// @param extension_list The list of zero-terminated ASCII extension name strings to search.
+/// @param extension_count The number of zero-terminated ASCII strings in the extension_list.
+/// @return true if the named extension was found in the specified extension list.
+internal_function bool
+OsSupportsNamedExtension
+(
+    char   const         *extension_name, 
+    char   const * const *extension_list, 
+    size_t const          extension_count
+)
+{
+    for (size_t i = 0; i < extension_count; ++i)
+    {
+        if (OsStringSearch(extension_list[i], extension_name) != NULL)
+            return true;
+    }
+    return false;
+}
+
+/// @summary Determine whether the application has enabled an instance-level extension.
+/// @param extension_name A zero-terminated ASCII string specifying the registered name of the extension to locate.
+/// @param create_info The application-provided VkInstanceCreateInfo being supplied to vkCreateInstance.
+/// @return true if the application has enabled the specified extension.
+internal_function inline bool
+OsVulkanInstanceExtensionEnabled
+(
+    char                 const *extension_name, 
+    VkInstanceCreateInfo const    *create_info
+)
+{
+    return OsSupportsNamedExtension(extension_name, create_info->ppEnabledExtensionNames, create_info->enabledExtensionCount);
+}
+
+/// @summary Determine whether the application has enabled a device-level extension.
+/// @param extension_name A zero-terminated ASCII string specifying the registered name of the extension to locate.
+/// @param create_info The application-provided VkDeviceCreateInfo being supplied to vkCreateDevice.
+/// @return true if the application has enabled the specified extension.
+internal_function inline bool
+OsVulkanDeviceExtensionEnabled
+(
+    char               const *extension_name, 
+    VkDeviceCreateInfo const *create_info
+)
+{
+    return OsSupportsNamedExtension(extension_name, create_info->ppEnabledExtensionNames, create_info->enabledExtensionCount);
+}
+
+/// @summary Resolve functions exported directly from a Vulkan ICD.
+/// @param vkloader The OS_VULKAN_LOADER instance, with the LoaderHandle field set.
+/// @return true if all exported functions were resolved successfully.
+internal_function bool
+OsVulkanLoaderResolveIcdFunctions
+(
+    OS_VULKAN_LOADER *vkloader
+)
+{
+    OS_LAYER_RESOLVE_VULKAN_ICD_FUNCTION(vkloader, vkGetInstanceProcAddr);
+    return true;
+}
+
+/// @summary Resolve global functions exported by a Vulkan ICD.
+/// @param vkloader The OS_VULKAN_LOADER instance, with the LoaderHandle field set.
+/// @return true if all global functions were resolved successfully.
+internal_function bool
+OsVulkanLoaderResolveGlobalFunctions
+(
+    OS_VULKAN_LOADER *vkloader
+)
+{
+    OS_LAYER_RESOLVE_VULKAN_GLOBAL_FUNCTION(vkloader, vkCreateInstance);
+    OS_LAYER_RESOLVE_VULKAN_GLOBAL_FUNCTION(vkloader, vkEnumerateInstanceLayerProperties);
+    OS_LAYER_RESOLVE_VULKAN_GLOBAL_FUNCTION(vkloader, vkEnumerateInstanceExtensionProperties);
+    return true;
+}
+
+/// @summary Resolve instance-level functions exported by a Vulkan ICD.
+/// @param vkloader The OS_VULKAN_LOADER object, with the vkGetInstanceProcAddr entry point set.
+/// @param vkinstance The OS_VULKAN_INSTANCE object, with the InstanceHandle field set.
+/// @param create_info The VkInstanceCreateInfo being used to initialize the instance. Used here to resolve instance-level function pointers for extensions.
+/// @return true if all instance-level functions were resolved successfully.
+internal_function bool
+OsVulkanLoaderResolveInstanceFunctions
+(
+    OS_VULKAN_LOADER               *vkloader,
+    OS_VULKAN_INSTANCE           *vkinstance,
+    VkInstanceCreateInfo  const *create_info 
+)
+{
+    OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(vkinstance, vkloader, vkCreateDevice);
+    OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(vkinstance, vkloader, vkDestroyInstance);
+    OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(vkinstance, vkloader, vkEnumeratePhysicalDevices);
+    OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(vkinstance, vkloader, vkGetPhysicalDeviceFeatures);
+    OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(vkinstance, vkloader, vkGetPhysicalDeviceProperties);
+    OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(vkinstance, vkloader, vkGetPhysicalDeviceMemoryProperties);
+    OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(vkinstance, vkloader, vkGetPhysicalDeviceQueueFamilyProperties);
+    OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(vkinstance, vkloader, vkEnumerateDeviceLayerProperties);
+    OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(vkinstance, vkloader, vkEnumerateDeviceExtensionProperties);
+    OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(vkinstance, vkloader, vkGetDeviceProcAddr);
+    if (OsVulkanInstanceExtensionEnabled(VK_KHR_SURFACE_EXTENSION_NAME, create_info))
+    {   // resolve entry points for VK_KHR_surface.
+        OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(vkinstance, vkloader, vkDestroySurfaceKHR);
+        OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(vkinstance, vkloader, vkGetPhysicalDeviceSurfaceSupportKHR);
+        OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(vkinstance, vkloader, vkGetPhysicalDeviceSurfaceFormatsKHR);
+        OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(vkinstance, vkloader, vkGetPhysicalDeviceSurfaceCapabilitiesKHR);
+        OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(vkinstance, vkloader, vkGetPhysicalDeviceSurfacePresentModesKHR);
+    }
+    if (OsVulkanInstanceExtensionEnabled(VK_KHR_WIN32_SURFACE_EXTENSION_NAME, create_info))
+    {   // resolve entry points for VK_KHR_win32_surface.
+        OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(vkinstance, vkloader, vkCreateWin32SurfaceKHR);
+    }
+}
+
+/// @summary Resolve device-level functions exported by the Vulkan ICD.
+/// @param vkinstance The OS_VULKAN_INSTANCE object, with the vkGetDeviceProcAddr entry point set.
+/// @param vkdevice The OS_VULKAN_DEVICE object, with the LogicalDevice field set.
+/// @param create_info The VkDeviceCreateInfo being used to initialize the logical device. Used here to resolve device-level function pointers for extensions.
+/// @return true if all device-level functions were resolved successfully.
+internal_function bool
+OsVulkanLoaderResolveDeviceFunctions
+(
+    OS_VULKAN_INSTANCE        *vkinstance,
+    OS_VULKAN_DEVICE            *vkdevice, 
+    VkDeviceCreateInfo const *create_info
+)
+{
+    UNREFERENCED_PARAMETER(create_info);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(vkdevice, vkinstance, vkDestroyDevice);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(vkdevice, vkinstance, vkGetDeviceQueue);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(vkdevice, vkinstance, vkDeviceWaitIdle);
+}
+
+/// @summary Retrieve the OS_VULKAN_PHYSICAL_DEVICE object given the physical device handle.
+/// @param vkinstance A valid OS_VULKAN_INSTANCE to search.
+/// @param handle The Vulkan API physical device handle to locate.
+/// @param index On return, this location stores the zero-based index of the device within the OS_VULKAN_INSTANCE.
+/// @return A pointer to the physical device object, or NULL if the device handle could not be found.
+internal_function OS_VULKAN_PHYSICAL_DEVICE*
+OsFindVulkanPhysicalDevice
+(
+    OS_VULKAN_INSTANCE *vkinstance, 
+    VkPhysicalDevice        handle, 
+    size_t              *index=NULL
+)
+{
+    for (size_t i = 0, n = vkinstance->PhysicalDeviceCount; i < n; ++i)
+    {
+        if (vkinstance->PhysicalDeviceHandles[i] == handle)
+        {
+            if (index != NULL) *index = i;
+            return &vkinstance->PhysicalDeviceList[i];
+        }
+    }
+    return NULL;
+}
+
 /*////////////////////////
 //   Public Functions   //
 ////////////////////////*/
@@ -2738,13 +3198,10 @@ OsCreateThreadPool
     os_arena_marker_t mem_marker = OsMemoryArenaMark(arena);
     size_t        bytes_required = OsCalculateMemoryForThreadPool(init->ThreadCount);
     size_t        align_required = std::alignment_of<HANDLE>::value;
-
-#ifndef OS_LAYER_NO_TASK_PROFILER
     CV_PROVIDER     *cv_provider = NULL;
     CV_MARKERSERIES   *cv_series = NULL;
     HRESULT            cv_result = S_OK;
     char             cv_name[64] = {};
-#endif
 
     if (!OsMemoryArenaCanSatisfyAllocation(arena, bytes_required, align_required))
     {
@@ -2774,7 +3231,6 @@ OsCreateThreadPool
         return -1;
     }
 
-#ifndef OS_LAYER_NO_TASK_PROFILER
     if (name == NULL)
     {   // Concurrency Visualizer SDK requires a non-NULL string.
         sprintf_s(cv_name, "Unnamed pool 0x%p", pool);
@@ -2798,9 +3254,6 @@ OsCreateThreadPool
         CloseHandle(iocp);
         return -1;
     }
-#else
-    UNREFERENCED_PARAMETER(name);
-#endif
 
     // initialize the thread pool fields and allocate memory for per-thread arrays.
     pool->ActiveThreads   = 0;
@@ -2811,10 +3264,8 @@ OsCreateThreadPool
     pool->CompletionPort  = iocp;
     pool->LaunchSignal    = evt_launch;
     pool->TerminateSignal = evt_terminate;
-#ifndef OS_LAYER_NO_TASK_PROFILER
     pool->TaskProfiler.Provider      = cv_provider;
     pool->TaskProfiler.MarkerSeries  = cv_series;
-#endif
     OsZeroMemory(pool->OSThreadIds   , init->ThreadCount * sizeof(unsigned int));
     OsZeroMemory(pool->OSThreadHandle, init->ThreadCount * sizeof(HANDLE));
     OsZeroMemory(pool->WorkerReady   , init->ThreadCount * sizeof(HANDLE));
@@ -2907,11 +3358,9 @@ cleanup_and_fail:
             if (pool->WorkerError != NULL) CloseHandle(pool->WorkerError[i]);
         }
     }
-#ifndef OS_LAYER_NO_TASK_PROFILER
     // clean up the task profiler objects.
     if (cv_series) CvReleaseMarkerSeries(cv_series);
     if (cv_provider) CvReleaseProvider(cv_provider);
-#endif
     // clean up the I/O completion port and synchronization objects.
     if (evt_terminate) CloseHandle(evt_terminate);
     if (evt_launch) CloseHandle(evt_launch);
@@ -2989,7 +3438,6 @@ OsDestroyThreadPool
         OsZeroMemory(pool->WorkerError   , pool->ActiveThreads * sizeof(HANDLE));
         pool->ActiveThreads = 0;
     }
-#ifndef OS_LAYER_NO_TASK_PROFILER
     // clean up the task provider objects from the Concurrency Visualizer SDK.
     if (pool->TaskProfiler.MarkerSeries != NULL)
     {
@@ -3001,7 +3449,6 @@ OsDestroyThreadPool
         CvReleaseProvider(pool->TaskProfiler.Provider);
         pool->TaskProfiler.Provider = NULL;
     }
-#endif
     if (pool->LaunchSignal != NULL)
     {
         CloseHandle(pool->LaunchSignal);
@@ -3417,6 +3864,490 @@ OsDisplayRefreshRate
     {   // return the display frequency specified in the DEVMODE structure.
         return (float) display->DisplayMode.dmDisplayFrequency;
     }
+}
+
+/// @summary Determine whether an instance-level layer is supported by the runtime.
+/// @param vkloader A valid OS_VULKAN_LOADER to search.
+/// @param layer_name A zero-terminated ASCII string specifying the registered name of the layer to locate.
+/// @param layer_index If non-NULL, and the named layer is supported, this location is updated with the zero-based index of the layer in the list.
+/// @return The layer name string (of the associated VkLayerProperties), if supported; otherwise, NULL.
+public_function char const*
+OsSupportsVulkanInstanceLayer
+(
+    OS_VULKAN_LOADER const   *vkloader,
+    char             const *layer_name, 
+    size_t            *layer_index=NULL
+)
+{
+    return OsSupportsVulkanLayer(layer_name, vkloader->InstanceLayerList, vkloader->InstanceLayerCount, layer_index);
+}
+
+/// @summary Determine whether the runtime supports an entire set of instance-level layers.
+/// @param vkloader A valid OS_VULKAN_LOADER to search.
+/// @param layer_names An array of zero-terminated ASCII strings specifying the registered name of each layer to validate.
+/// @param layer_count The number of strings in the layer_names array.
+/// @return true if the runtime supports the entire set of instance-level layers.
+public_function bool
+OsSupportsAllVulkanInstanceLayers
+(
+    OS_VULKAN_LOADER const     *vkloader, 
+    char             const **layer_names, 
+    size_t           const   layer_count
+)
+{
+    for (size_t i = 0; i < layer_count; ++i)
+    {
+        if (OsSupportsVulkanInstanceLayer(vkloader, layer_names[i]) == NULL)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// @summary Determine whether an instance-level extension is supported by the runtime.
+/// @paramvk vkloader A valid OS_VULKAN_LOADER to search.
+/// @param extension_name A zero-terminated ASCII string specifying the registered name of the extension to locate.
+/// @param extension_index If non-NULL, and the named extension is supported, this location is updated with the zero-based index of the extension in the list.
+/// @return The extension name string (of the associated VkExtensionProperties), if supported; otherwise, NULL.
+public_function char const*
+OsSupportsVulkanInstanceExtension
+(
+    OS_VULKAN_LOADER const       *vkloader, 
+    char             const *extension_name, 
+    size_t            *extension_index=NULL
+)
+{
+    return OsSupportsVulkanExtension(extension_name, vkloader->InstanceExtensionList, vkloader->InstanceExtensionCount, extension_index);
+}
+
+/// @summary Determine whether the runtime supports an entire set of instance-level extensions.
+/// @param vkloader A valid OS_VULKAN_LOADER to search.
+/// @param extension_names An array of zero-terminated ASCII strings specifying the registered name of each extension to validate.
+/// @param extension_count The number of strings in the extension_names array.
+/// @return true if the runtime supports the entire set of instance-level extensions.
+public_function bool
+OsSupportsAllVulkanInstanceExtensions
+(
+    OS_VULKAN_LOADER const         *vkloader, 
+    char             const **extension_names, 
+    size_t           const   extension_count
+)
+{
+    for (size_t i = 0; i < extension_count; ++i)
+    {
+        if (OsSupportsVulkanInstanceExtension(vkloader, extension_names[i]) == NULL)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// @summary Create a new Vulkan runtime loader object. This is the first step in accessing Vulkan functionality.
+/// @param vkloader The Vulkan runtime loader to initialize.
+/// @param arena The memory arena to use when allocating storage for Vulkan instance layer and extension information.
+/// @param result If the function returns OS_VULKAN_LOADER_RESULT_VKERROR, the Vulkan result code is stored at this location.
+/// @return One of OS_VULKAN_LOADER_RESULT indicating the result of the operation.
+public_function int
+OsCreateVulkanLoader
+(
+    OS_VULKAN_LOADER *vkloader,
+    OS_MEMORY_ARENA     *arena, 
+    VkResult           &result
+)
+{   
+    HMODULE     dll_instance = NULL;
+    uint32_t     layer_count = 0;
+    uint32_t layer_ext_count = 0;
+    uint32_t extension_count = 0;
+    int             ldresult = OS_VULKAN_LOADER_RESULT_SUCCESS;
+    os_arena_marker_t marker = OsMemoryArenaMark(arena);
+
+    // initialize all of the fields of the runtime loader instance.
+    ZeroMemory(vkloader, sizeof(OS_VULKAN_LOADER));
+    result = VK_SUCCESS;
+
+    // attempt to load the LunarG Vulkan loader into the process address space.
+    if ((dll_instance = LoadLibrary(_T("vulkan-1.dll"))) == NULL)
+    {   // if the LunarG loader isn't available, assume no ICD is present.
+        return OS_VULKAN_LOADER_RESULT_NOVULKAN;
+    }
+
+    // initialize the base loader object fields. this is required prior to resolving additional entry points.
+    vkloader->LoaderHandle = dll_instance;
+
+    // resolve the core Vulkan loader entry points.
+    if (!OsVulkanLoaderResolveIcdFunctions(vkloader))
+    {   // the loader will be unable to load additional required entry points or create an instance.
+        ldresult = OS_VULKAN_LOADER_RESULT_NOENTRY;
+        goto cleanup_and_fail;
+    }
+    if (!OsVulkanLoaderResolveGlobalFunctions(vkloader))
+    {   // the loader will be unable to create an instance or enumerate devices.
+        ldresult = OS_VULKAN_LOADER_RESULT_NOENTRY;
+        goto cleanup_and_fail;
+    }
+
+    // enumerate supported instance-level layers and extensions. get the count first, followed by the data.
+    if ((result = vkloader->vkEnumerateInstanceLayerProperties(&layer_count, NULL)) < 0)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to retrieve the number of Vulkan instance layers exposed by the runtime (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+        ldresult = OS_VULKAN_LOADER_RESULT_VKERROR;
+        goto cleanup_and_fail;
+    }
+    if ((result = vkloader->vkEnumerateInstanceExtensionProperties(NULL, &extension_count, NULL)) < 0)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to retrieve the number of Vulkan instance extensions exposed by the runtime (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+        ldresult = OS_VULKAN_LOADER_RESULT_VKERROR;
+        goto cleanup_and_fail;
+    }
+    if (layer_count != 0)
+    {   // allocate memory for and retrieve layer and layer extension information.
+        vkloader->InstanceLayerCount  = layer_count;
+        vkloader->InstanceLayerList   = OsMemoryArenaAllocateArray<VkLayerProperties     >(arena, layer_count);
+        vkloader->LayerExtensionCount = OsMemoryArenaAllocateArray<size_t                >(arena, layer_count);
+        vkloader->LayerExtensionList  = OsMemoryArenaAllocateArray<VkExtensionProperties*>(arena, layer_count);
+        if (vkloader->InstanceLayerList == NULL || vkloader->LayerExtensionCount == NULL || vkloader->LayerExtensionList == NULL)
+        {
+            OsLayerError("ERROR: %S(%u): Unable to allocate memory for Vulkan instance layer and extension information.\n", __FUNCTION__, GetCurrentThreadId());
+            ldresult = OS_VULKAN_LOADER_RESULT_VKERROR;
+            goto cleanup_and_fail;
+        }
+        if ((result = vkloader->vkEnumerateInstanceLayerProperties(&layer_count, vkloader->InstanceLayerList)) < 0)
+        {
+            OsLayerError("ERROR: %S(%u): Unable to retrieve the set of Vulkan instance layers exposed by the runtime (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+            ldresult = OS_VULKAN_LOADER_RESULT_VKERROR;
+            goto cleanup_and_fail;
+        }
+        for (size_t i = 0, n = vkloader->InstanceLayerCount; i < n; ++i)
+        {
+            if ((result = vkloader->vkEnumerateInstanceExtensionProperties(vkloader->InstanceLayerList[i].layerName, &layer_ext_count, NULL)) < 0)
+            {
+                OsLayerError("ERROR: %S(%u): Unable to retrieve the number of Vulkan instance layer extensions exposed by runtime layer %S (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), vkloader->InstanceLayerList[i].layerName, result);
+                ldresult = OS_VULKAN_LOADER_RESULT_VKERROR;
+                goto cleanup_and_fail;
+            }
+            if (layer_ext_count != 0)
+            {   // allocate memory for and retrieve the layer extension information.
+                vkloader->LayerExtensionCount[i] = layer_ext_count;
+                if ((vkloader->LayerExtensionList[i] = OsMemoryArenaAllocateArray<VkExtensionProperties>(arena, layer_ext_count)) == NULL)
+                {
+                    OsLayerError("ERROR: %S(%u): Unable to allocate memory for extensions exposed by Vulkan runtime layer %S.\n", __FUNCTION__, GetCurrentThreadId(), vkloader->InstanceLayerList[i].layerName);
+                    ldresult = OS_VULKAN_LOADER_RESULT_NOMEMORY;
+                    goto cleanup_and_fail;
+                }
+                if ((result = vkloader->vkEnumerateInstanceExtensionProperties(vkloader->InstanceLayerList[i].layerName, &layer_ext_count, vkloader->LayerExtensionList[i])) < 0)
+                {
+                    OsLayerError("ERROR: %S(%u): Unable to retrieve the set of extensions exposed by Vulkan runtime layer %S (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), vkloader->InstanceLayerList[i].layerName, result);
+                    ldresult = OS_VULKAN_LOADER_RESULT_VKERROR;
+                    goto cleanup_and_fail;
+                }
+            }
+            else
+            {   // don't allocate memory for zero-size arrays.
+                vkloader->LayerExtensionCount[i] = 0;
+                vkloader->LayerExtensionList [i] = NULL;
+            }
+        }
+    }
+    else
+    {   // don't allocate memory for zero-size arrays.
+        vkloader->InstanceLayerCount  = 0;
+        vkloader->InstanceLayerList   = NULL;
+        vkloader->LayerExtensionCount = NULL;
+        vkloader->LayerExtensionList  = NULL;
+    }
+    if (extension_count != 0)
+    {   // allocate memory for and retrieve the extension information.
+        vkloader->InstanceExtensionCount = extension_count;
+        if ((vkloader->InstanceExtensionList = OsMemoryArenaAllocateArray<VkExtensionProperties>(arena, extension_count)) == NULL)
+        {
+            OsLayerError("ERROR: %S(%u): Unable to allocate memory for Vulkan instance extension list.\n", __FUNCTION__, GetCurrentThreadId());
+            ldresult = OS_VULKAN_LOADER_RESULT_NOMEMORY;
+            goto cleanup_and_fail;
+        }
+        if ((result = vkloader->vkEnumerateInstanceExtensionProperties(NULL, &extension_count, vkloader->InstanceExtensionList)) < 0)
+        {
+            OsLayerError("ERROR: %S(%u): Unable to enumerate Vulkan instance extension properties (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+            ldresult = OS_VULKAN_LOADER_RESULT_VKERROR;
+            goto cleanup_and_fail;
+        }
+    }
+    else
+    {   // don't allocate memory for zero-size arrays.
+        vkloader->InstanceExtensionCount = 0;
+        vkloader->InstanceExtensionList  = NULL;
+    }
+
+    // everything is complete. the next step is to call OsCreateVulkanInstance().
+    return OS_VULKAN_LOADER_RESULT_SUCCESS;
+
+cleanup_and_fail:
+    if (dll_instance != NULL) CloseHandle(dll_instance);
+    ZeroMemory(vkloader, sizeof(OS_VULKAN_LOADER));
+    OsMemoryArenaResetToMarker(arena, marker);
+    return ldresult;
+}
+
+/// @summary Create a new Vulkan instance object and retrieve information about the physical devices in the host system.
+/// @param vkinstance The OS_VULKAN_INSTANCE to initialize.
+/// @param vkloader A valid OS_VULKAN_LOADER used to resolve API entry points.
+/// @param arena The memory arena to use when allocating storage for Vulkan physical device information.
+/// @param create_info The VkInstanceCreateInfo to pass to vkCreateInstance.
+/// @param allocation_callbacks The VkAllocationCallbacks to pass to vkCreateInstance.
+/// @param result If the function returns OS_VULKAN_LOADER_RESULT_VKERROR, the Vulkan result code is stored at this location.
+/// @return One of OS_VULKAN_LOADER_RESULT indicating the result of the operation.
+public_function int
+OsCreateVulkanInstance
+(
+    OS_VULKAN_INSTANCE                    *vkinstance,
+    OS_VULKAN_LOADER                        *vkloader, 
+    OS_MEMORY_ARENA                            *arena,
+    VkInstanceCreateInfo  const          *create_info, 
+    VkAllocationCallbacks const *allocation_callbacks, 
+    VkResult                                  &result
+)
+{
+    os_arena_marker_t marker = OsMemoryArenaMark(arena);
+    uint32_t    device_count = 0;
+    int             ldresult = OS_VULKAN_LOADER_RESULT_SUCCESS;
+
+    // initialize all of the fields of the Vulkan instance.
+    ZeroMemory(vkinstance, sizeof(OS_VULKAN_INSTANCE));
+    result = VK_SUCCESS;
+
+    // create the Vulkan API context (instance) used to enumerate physical devices and extensions.
+    if ((result = vkloader->vkCreateInstance(create_info, allocation_callbacks, &vkinstance->InstanceHandle)) != VK_SUCCESS)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to create Vulkan instance (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+        ldresult = OS_VULKAN_LOADER_RESULT_VKERROR;
+        goto cleanup_and_fail;
+    }
+    // resolve the instance-level API functions required to enumerate physical devices.
+    if (!OsVulkanLoaderResolveInstanceFunctions(vkloader, vkinstance, create_info))
+    {
+        ldresult = OS_VULKAN_LOADER_RESULT_NOENTRY;
+        goto cleanup_and_fail;
+    }
+    // query the number of physical devices installed in the system. 
+    // allocate memory for the various physical device attribute arrays.
+    if ((result = vkinstance->vkEnumeratePhysicalDevices(vkinstance->InstanceHandle, &device_count, NULL)) < 0)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to retrieve the number of Vulkan physical devices in the system (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+        ldresult = OS_VULKAN_LOADER_RESULT_VKERROR;
+        goto cleanup_and_fail;
+    }
+    vkinstance->PhysicalDeviceCount   = device_count;
+    vkinstance->PhysicalDeviceHandles = OsMemoryArenaAllocateArray<VkPhysicalDevice         >(arena, device_count);
+    vkinstance->PhysicalDeviceTypes   = OsMemoryArenaAllocateArray<VkPhysicalDeviceType     >(arena, device_count);
+    vkinstance->PhysicalDeviceList    = OsMemoryArenaAllocateArray<OS_VULKAN_PHYSICAL_DEVICE>(arena, device_count);
+    if (vkinstance->PhysicalDeviceHandles == NULL || vkinstance->PhysicalDeviceTypes == NULL || vkinstance->PhysicalDeviceList == NULL)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to allocate memory for Vulkan physical device properties.\n", __FUNCTION__, GetCurrentThreadId());
+        ldresult = OS_VULKAN_LOADER_RESULT_NOMEMORY;
+        goto cleanup_and_fail;
+    }
+    // retrieve the physical device handles, and then query the runtime for their attributes.
+    if ((result = vkinstance->vkEnumeratePhysicalDevices(vkinstance->InstanceHandle, &device_count, vkinstance->PhysicalDeviceHandles)) < 0)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to enumerate Vulkan physical devices (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+        ldresult = OS_VULKAN_LOADER_RESULT_VKERROR;
+        goto cleanup_and_fail;
+    }
+    for (size_t i = 0, n = vkinstance->PhysicalDeviceCount; i < n; ++i)
+    {
+        OS_VULKAN_PHYSICAL_DEVICE *dev =&vkinstance->PhysicalDeviceList[i];
+        VkPhysicalDevice   handle = vkinstance->PhysicalDeviceHandles[i];
+        uint32_t     family_count = 0;
+        uint32_t      layer_count = 0;
+        uint32_t  layer_ext_count = 0;
+        uint32_t  extension_count = 0;
+
+        dev->DeviceHandle = handle;
+        vkinstance->vkGetPhysicalDeviceFeatures(handle, &dev->Features);
+        vkinstance->vkGetPhysicalDeviceProperties(handle, &dev->Properties);
+        vkinstance->vkGetPhysicalDeviceMemoryProperties(handle, &dev->Memory);
+        vkinstance->vkGetPhysicalDeviceQueueFamilyProperties(handle, &family_count, NULL);
+        if (family_count != 0)
+        {   // allocate storage for and retrieve queue family information.
+            if ((dev->QueueFamily = OsMemoryArenaAllocateArray<VkQueueFamilyProperties>(arena, family_count)) == NULL)
+            {
+                OsLayerError("ERROR: %S(%u): Unable to allocate memory for Vulkan physical device queue family properties.\n", __FUNCTION__, GetCurrentThreadId());
+                ldresult = OS_VULKAN_LOADER_RESULT_NOMEMORY;
+                goto cleanup_and_fail;
+            }
+            dev->QueueFamilyCount = family_count;
+            vkinstance->vkGetPhysicalDeviceQueueFamilyProperties(handle, &family_count, dev->QueueFamily);
+        }
+        else
+        {   // don't allocate any memory for zero-size arrays.
+            dev->QueueFamilyCount = 0;
+            dev->QueueFamily = NULL;
+        }
+        if ((result = vkinstance->vkEnumerateDeviceLayerProperties(handle, &layer_count, NULL)) < 0)
+        {
+            OsLayerError("ERROR: %S(%u): Unable to retrieve the number of layers exposed by Vulkan physical device %S (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), dev->Properties.deviceName, result);
+            ldresult = OS_VULKAN_LOADER_RESULT_VKERROR;
+            goto cleanup_and_fail;
+        }
+        if ((result = vkinstance->vkEnumerateDeviceExtensionProperties(handle, NULL, &extension_count, NULL)) < 0)
+        {
+            OsLayerError("ERROR: %S(%u): Unable to retrieve the number of extensions exposed by Vulkan physical device %S (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), dev->Properties.deviceName, result);
+            ldresult = OS_VULKAN_LOADER_RESULT_VKERROR;
+            goto cleanup_and_fail;
+        }
+        if (layer_count != 0)
+        {   // retrieve the layer and layer extension information.
+            dev->LayerCount          = layer_count;
+            dev->LayerList           = OsMemoryArenaAllocateArray<VkLayerProperties     >(arena, layer_count);
+            dev->LayerExtensionCount = OsMemoryArenaAllocateArray<size_t                >(arena, layer_count);
+            dev->LayerExtensionList  = OsMemoryArenaAllocateArray<VkExtensionProperties*>(arena, layer_count);
+            if (dev->LayerList == NULL || dev->LayerExtensionCount == NULL || dev->LayerExtensionList == NULL)
+            {
+                OsLayerError("ERROR: %S(%u): Unable to allocate memory for Vulkan physical device layer properties.\n", __FUNCTION__, GetCurrentThreadId());
+                ldresult = OS_VULKAN_LOADER_RESULT_NOMEMORY;
+                goto cleanup_and_fail;
+            }
+            if ((result = vkinstance->vkEnumerateDeviceLayerProperties(handle, &layer_count, dev->LayerList)) < 0)
+            {
+                OsLayerError("ERROR: %S(%u): Unable to retrieve layer information for Vulkan physical device %S (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), dev->Properties.deviceName, result);
+                ldresult = OS_VULKAN_LOADER_RESULT_VKERROR;
+                goto cleanup_and_fail;
+            }
+            for (size_t j = 0, m = dev->LayerCount; j < m; ++j)
+            {   // retrieve the number of layer-level extensions for this layer.
+                if ((result = vkinstance->vkEnumerateDeviceExtensionProperties(handle, dev->LayerList[j].layerName, &layer_ext_count, NULL)) < 0)
+                {
+                    OsLayerError("ERROR: %S(%u): Unable to retrieve the number of extensions exposed by layer %S on Vulkan physical device %S (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), dev->LayerList[j].layerName, dev->Properties.deviceName, result);
+                    ldresult = OS_VULKAN_LOADER_RESULT_VKERROR;
+                    goto cleanup_and_fail;
+                }
+                if (layer_ext_count != 0)
+                {   // retrieve the layer-level device extension information.
+                    dev->LayerExtensionCount[j] = layer_ext_count;
+                    if ((dev->LayerExtensionList[j] = OsMemoryArenaAllocateArray<VkExtensionProperties>(arena, layer_ext_count)) == NULL)
+                    {
+                        OsLayerError("ERROR: %S(%u): Unable to allocate memory for Vulkan physical device layer extension list.\n", __FUNCTION__, GetCurrentThreadId());
+                        ldresult = OS_VULKAN_LOADER_RESULT_NOMEMORY;
+                        goto cleanup_and_fail;
+                    }
+                    if ((result = vkinstance->vkEnumerateDeviceExtensionProperties(handle, dev->LayerList[j].layerName, &layer_ext_count, dev->LayerExtensionList[j])) < 0)
+                    {
+                        OsLayerError("ERROR: %S(%u): Unable to retrieve extension information for layer %S on Vulkan physical device %S (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), dev->LayerList[j].layerName, dev->Properties.deviceName, result);
+                        ldresult = OS_VULKAN_LOADER_RESULT_VKERROR;
+                        goto cleanup_and_fail;
+                    }
+                }
+                else
+                {   // don't allocate any memory for zero-size arrays.
+                    dev->LayerExtensionCount[j] = 0;
+                    dev->LayerExtensionList [j] = NULL;
+                }
+            }
+        }
+        else
+        {   // don't allocate any memory for zero-size arrays.
+            dev->LayerCount          = 0;
+            dev->LayerList           = NULL;
+            dev->LayerExtensionCount = NULL;
+            dev->LayerExtensionList  = NULL;
+        }
+        if (extension_count != 0)
+        {   // retrieve the device-level extension information.
+            dev->ExtensionCount = extension_count;
+            if ((dev->ExtensionList = OsMemoryArenaAllocateArray<VkExtensionProperties>(arena, extension_count)) == NULL)
+            {
+                OsLayerError("ERROR: %S(%u): Unable to allocate memory for Vulkan physical device extension properties.\n", __FUNCTION__, GetCurrentThreadId());
+                ldresult = OS_VULKAN_LOADER_RESULT_NOMEMORY;
+                goto cleanup_and_fail;
+            }
+            if ((result = vkinstance->vkEnumerateDeviceExtensionProperties(handle, NULL, &extension_count, dev->ExtensionList)) < 0)
+            {
+                OsLayerError("ERROR: %S(%u): Unable to retrieve extension information for Vulkan physical device %S (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), dev->Properties.deviceName, result);
+                ldresult = OS_VULKAN_LOADER_RESULT_VKERROR;
+                goto cleanup_and_fail;
+            }
+        }
+        else
+        {   // don't allocate any memory for zero-size arrays.
+            dev->ExtensionCount = 0;
+            dev->ExtensionList  = NULL;
+        }
+        // finally, make sure to copy the device type up into the packed array.
+        vkinstance->PhysicalDeviceTypes[i] = dev->Properties.deviceType;
+    }
+
+    return OS_VULKAN_LOADER_RESULT_SUCCESS;
+
+cleanup_and_fail:
+    ZeroMemory(vkinstance, sizeof(OS_VULKAN_INSTANCE));
+    OsMemoryArenaResetToMarker(arena, marker);
+    return ldresult;
+}
+
+/// @summary Create a new Vulkan logical device which can be used for resource management and command submission.
+/// @param vkdevice The OS_VULKAN_DEVICE instance to initialize.
+/// @param vkinstance A valid OS_VULKAN_INSTANCE that manages the physical_device.
+/// @param arena The memory arena to use when allocating storage for Vulkan logical device information.
+/// @param physical_device The handle of the physical device on which logical device commands will execute.
+/// @param create_info The VkDeviceCreateInfo to pass to vkCreateDevice.
+/// @param allocation_callbacks The VkAllocationCallbacks to pass to vkCreateDevice.
+/// @param result If the function returns OS_VULKAN_LOADER_RESULT_VKERROR, the Vulkan result code is stored at this location.
+/// @return One of OS_VULKAN_LOADER_RESULT indicating the result of the operation.
+public_function int
+OsCreateVulkanDevice
+(
+    OS_VULKAN_DEVICE                        *vkdevice,
+    OS_VULKAN_INSTANCE                    *vkinstance, 
+    OS_MEMORY_ARENA                            *arena,
+    VkPhysicalDevice                  physical_device,
+    VkDeviceCreateInfo    const          *create_info, 
+    VkAllocationCallbacks const *allocation_callbacks, 
+    VkResult                                  &result
+)
+{
+    OS_VULKAN_PHYSICAL_DEVICE *vkphysdev = OsFindVulkanPhysicalDevice(vkinstance, physical_device);
+    os_arena_marker_t             marker = OsMemoryArenaMark(arena);
+    int                         ldresult = OS_VULKAN_LOADER_RESULT_SUCCESS;
+
+    // initialize all of the fields of the Vulkan device.
+    ZeroMemory(vkdevice, sizeof(OS_VULKAN_DEVICE));
+
+    // ensure that a valid physical device was specified.
+    if (vkphysdev == NULL)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to locate Vulkan physical device %p.\n", __FUNCTION__, GetCurrentThreadId(), physical_device);
+        ldresult = OS_VULKAN_LOADER_RESULT_NOVULKAN;
+        return NULL;
+    }
+
+    // copy properties of the physical device up to the logical device object.
+    vkdevice->PhysicalDevice     = physical_device;
+    vkdevice->PhysicalDeviceType = vkphysdev->Properties.deviceType;
+    vkdevice->PhysicalDeviceInfo = vkphysdev;
+
+    // create the logical Vulkan device used to create resources and submit commands.
+    if ((result = vkinstance->vkCreateDevice(physical_device, create_info, allocation_callbacks, &vkdevice->LogicalDevice)) != VK_SUCCESS)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to create logical device for Vulkan physical device %S (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), vkphysdev->Properties.deviceName, result);
+        ldresult = OS_VULKAN_LOADER_RESULT_VKERROR;
+        goto cleanup_and_fail;
+    }
+    // resolve the device-level API functions required to interface with the device and resources.
+    if (!OsVulkanLoaderResolveDeviceFunctions(vkinstance, vkdevice, create_info))
+    {
+        ldresult = OS_VULKAN_LOADER_RESULT_NOENTRY;
+        goto cleanup_and_fail;
+    }
+
+    // ...
+    return OS_VULKAN_LOADER_RESULT_SUCCESS;
+
+cleanup_and_fail:
+    ZeroMemory(vkdevice, sizeof(OS_VULKAN_DEVICE));
+    OsMemoryArenaResetToMarker(arena, marker);
+    return ldresult;
 }
 
 // TODO(rlk): Async disk I/O system.
