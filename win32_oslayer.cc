@@ -297,6 +297,7 @@ struct OS_VULKAN_LOADER;
 struct OS_VULKAN_DEVICE;
 struct OS_VULKAN_INSTANCE;
 struct OS_VULKAN_PHYSICAL_DEVICE;
+struct OS_PRESENTATION_SURFACE;
 
 /// @summary Define the data associated with an operating system arena allocator. 
 /// The memory arena is not safe for concurrent access by multiple threads.
@@ -574,9 +575,10 @@ struct OS_VULKAN_PHYSICAL_DEVICE
     VkPhysicalDevice                  DeviceHandle;                                  /// The Vulkan physical device object handle.
     VkPhysicalDeviceFeatures          Features;                                      /// Information about optional features supported by the physical device.
     VkPhysicalDeviceProperties        Properties;                                    /// Information about the type and vendor of the physical device.
-    VkPhysicalDeviceMemoryProperties  Memory;                                        /// Information about the memory access features of the physical device.
+    VkPhysicalDeviceMemoryProperties  HeapProperties;                                /// Information about the memory access features of the physical device.
     size_t                            QueueFamilyCount;                              /// The number of command queue families exposed by the device.
     VkQueueFamilyProperties          *QueueFamily;                                   /// An array of QueueFamilyCount VkQueueFamiliyProperties describing command queue attributes.
+    VkBool32                         *QueueFamilyCanPresent;                         /// An array of boolean values set to VK_TRUE if the corresponding queue family supports presentation commands.
     size_t                            LayerCount;                                    /// The number of device-level optional layers exposed by the device.
     VkLayerProperties                *LayerList;                                     /// An array of LayerCount VkLayerProperties descriptors for the device-level layers exposed by the device.
     size_t                           *LayerExtensionCount;                           /// An array of LayerCount count values specifying the number of extensions exposed by each device-level layer.
@@ -623,6 +625,22 @@ struct OS_VULKAN_DEVICE
     OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkDestroyDevice);                              /// The vkDestroyDevice function.
     OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkGetDeviceQueue);                             /// The vkGetDeviceQueue function.
     OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkDeviceWaitIdle);                             /// The vkDeviceWaitIdle function.
+};
+
+/// @summary Define the data associated with a presentation surface, used to present rendered graphics to the screen.
+struct OS_PRESENTATION_SURFACE
+{
+    VkSurfaceKHR                      SurfaceHandle;                                 /// The VK_KHR_win32_surface handle returned by vkCreateWin32SurfaceKHR.
+    VkPhysicalDevice                  PhysicalDevice;                                /// The handle of the associated physical device.
+    VkPhysicalDeviceType              PhysicalDeviceType;                            /// The physical device type (integrated GPU, discrete GPU, etc.)
+    OS_VULKAN_PHYSICAL_DEVICE        *PhysicalDeviceInfo;                            /// A pointer into the OS_VULKAN_INSTANCE::PhysicalDeviceList. The OS_VULKAN_PHYSICAL_DEVICE::QueueFamilyCanPresent indicates whether a queue family can present to this surface.
+    VkSurfaceCapabilitiesKHR          Capabilities;                                  /// Information about the capabilities and restrictions of the device when presenting to this surface.
+    size_t                            FormatCount;                                   /// The number of swap chain formats supported for presentation to this surface.
+    VkSurfaceFormatKHR               *SupportedFormats;                              /// The set of supported swap chain formats and color spaces when presenting to this surface.
+    size_t                            PresentModeCount;                              /// The number of presentation modes supported by the device when presenting to this surface.
+    VkPresentModeKHR                 *SupportedPresentModes;                         /// The set of supported presentation mode identifiers supported by the device when presenting to this surface.
+    HINSTANCE                         AppInstance;                                   /// The application HINSTANCE associated with the surface.
+    HWND                              TargetWindow;                                  /// The application window handle associated with the surface.
 };
 
 /// @summary Define constants for specifying worker thread stack sizes.
@@ -4167,23 +4185,27 @@ OsCreateVulkanInstance
         dev->DeviceHandle = handle;
         vkinstance->vkGetPhysicalDeviceFeatures(handle, &dev->Features);
         vkinstance->vkGetPhysicalDeviceProperties(handle, &dev->Properties);
-        vkinstance->vkGetPhysicalDeviceMemoryProperties(handle, &dev->Memory);
+        vkinstance->vkGetPhysicalDeviceMemoryProperties(handle, &dev->HeapProperties);
         vkinstance->vkGetPhysicalDeviceQueueFamilyProperties(handle, &family_count, NULL);
         if (family_count != 0)
         {   // allocate storage for and retrieve queue family information.
-            if ((dev->QueueFamily = OsMemoryArenaAllocateArray<VkQueueFamilyProperties>(arena, family_count)) == NULL)
+            dev->QueueFamily = OsMemoryArenaAllocateArray<VkQueueFamilyProperties>(arena, family_count);
+            dev->QueueFamilyCanPresent = OsMemoryArenaAllocateArray<VkBool32>(arena, family_count);
+            if (dev->QueueFamily == NULL || dev->QueueFamilyCanPresent == NULL)
             {
                 OsLayerError("ERROR: %S(%u): Unable to allocate memory for Vulkan physical device queue family properties.\n", __FUNCTION__, GetCurrentThreadId());
                 ldresult = OS_VULKAN_LOADER_RESULT_NOMEMORY;
                 goto cleanup_and_fail;
             }
             dev->QueueFamilyCount = family_count;
-            vkinstance->vkGetPhysicalDeviceQueueFamilyProperties(handle, &family_count, dev->QueueFamily);
+            OsZeroMemory(dev->QueueFamilyCanPresent, family_count * sizeof(VkBool32));
+            vkinstance->vkGetPhysicalDeviceQueueFamilyProperties(handle,&family_count, dev->QueueFamily);
         }
         else
         {   // don't allocate any memory for zero-size arrays.
             dev->QueueFamilyCount = 0;
             dev->QueueFamily = NULL;
+            dev->QueueFamilyCanPresent = NULL;
         }
         if ((result = vkinstance->vkEnumerateDeviceLayerProperties(handle, &layer_count, NULL)) < 0)
         {
@@ -4284,6 +4306,21 @@ cleanup_and_fail:
     ZeroMemory(vkinstance, sizeof(OS_VULKAN_INSTANCE));
     OsMemoryArenaResetToMarker(arena, marker);
     return ldresult;
+}
+
+public_function int
+OsCreatePresentationSurface
+(
+    OS_PRESENTATION_SURFACE                *vksurface, 
+    OS_VULKAN_INSTANCE                    *vkinstance, 
+    OS_MEMORY_ARENA                            *arena,
+    VkPhysicalDevice                  physical_device,
+    VkAllocationCallbacks const *allocation_callbacks, 
+    HINSTANCE                                instance, 
+    HWND                                       window,
+    VkResult                                  &result
+)
+{
 }
 
 /// @summary Create a new Vulkan logical device which can be used for resource management and command submission.
