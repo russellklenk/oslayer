@@ -577,7 +577,7 @@ struct OS_VULKAN_PHYSICAL_DEVICE
     VkPhysicalDeviceProperties        Properties;                                    /// Information about the type and vendor of the physical device.
     VkPhysicalDeviceMemoryProperties  HeapProperties;                                /// Information about the memory access features of the physical device.
     size_t                            QueueFamilyCount;                              /// The number of command queue families exposed by the device.
-    VkQueueFamilyProperties          *QueueFamily;                                   /// An array of QueueFamilyCount VkQueueFamiliyProperties describing command queue attributes.
+    VkQueueFamilyProperties          *QueueFamilyProperties;                         /// An array of QueueFamilyCount VkQueueFamiliyProperties describing command queue attributes.
     VkBool32                         *QueueFamilyCanPresent;                         /// An array of boolean values set to VK_TRUE if the corresponding queue family supports presentation commands.
     size_t                            LayerCount;                                    /// The number of device-level optional layers exposed by the device.
     VkLayerProperties                *LayerList;                                     /// An array of LayerCount VkLayerProperties descriptors for the device-level layers exposed by the device.
@@ -635,6 +635,9 @@ struct OS_PRESENTATION_SURFACE
     VkPhysicalDeviceType              PhysicalDeviceType;                            /// The physical device type (integrated GPU, discrete GPU, etc.)
     OS_VULKAN_PHYSICAL_DEVICE        *PhysicalDeviceInfo;                            /// A pointer into the OS_VULKAN_INSTANCE::PhysicalDeviceList. The OS_VULKAN_PHYSICAL_DEVICE::QueueFamilyCanPresent indicates whether a queue family can present to this surface.
     VkSurfaceCapabilitiesKHR          Capabilities;                                  /// Information about the capabilities and restrictions of the device when presenting to this surface.
+    size_t                            QueueFamilyCount;                              /// The number of queue families exposed by the physical device.
+    VkQueueFamilyProperties          *QueueFamilyProperties;                         /// Information about each queue family exposed by the physical device.
+    VkBool32                         *QueueFamilyCanPresent;                         /// An array of boolean values set to VK_TRUE if the corresponding queue family supports presentation to this surface.
     size_t                            FormatCount;                                   /// The number of swap chain formats supported for presentation to this surface.
     VkSurfaceFormatKHR               *SupportedFormats;                              /// The set of supported swap chain formats and color spaces when presenting to this surface.
     size_t                            PresentModeCount;                              /// The number of presentation modes supported by the device when presenting to this surface.
@@ -4189,23 +4192,19 @@ OsCreateVulkanInstance
         vkinstance->vkGetPhysicalDeviceQueueFamilyProperties(handle, &family_count, NULL);
         if (family_count != 0)
         {   // allocate storage for and retrieve queue family information.
-            dev->QueueFamily = OsMemoryArenaAllocateArray<VkQueueFamilyProperties>(arena, family_count);
-            dev->QueueFamilyCanPresent = OsMemoryArenaAllocateArray<VkBool32>(arena, family_count);
-            if (dev->QueueFamily == NULL || dev->QueueFamilyCanPresent == NULL)
+            if ((dev->QueueFamilyProperties = OsMemoryArenaAllocateArray<VkQueueFamilyProperties>(arena, family_count)) == NULL)
             {
                 OsLayerError("ERROR: %S(%u): Unable to allocate memory for Vulkan physical device queue family properties.\n", __FUNCTION__, GetCurrentThreadId());
                 ldresult = OS_VULKAN_LOADER_RESULT_NOMEMORY;
                 goto cleanup_and_fail;
             }
+            vkinstance->vkGetPhysicalDeviceQueueFamilyProperties(handle, &family_count, dev->QueueFamilyProperties);
             dev->QueueFamilyCount = family_count;
-            OsZeroMemory(dev->QueueFamilyCanPresent, family_count * sizeof(VkBool32));
-            vkinstance->vkGetPhysicalDeviceQueueFamilyProperties(handle,&family_count, dev->QueueFamily);
         }
         else
         {   // don't allocate any memory for zero-size arrays.
             dev->QueueFamilyCount = 0;
-            dev->QueueFamily = NULL;
-            dev->QueueFamilyCanPresent = NULL;
+            dev->QueueFamilyProperties = NULL;
         }
         if ((result = vkinstance->vkEnumerateDeviceLayerProperties(handle, &layer_count, NULL)) < 0)
         {
@@ -4308,6 +4307,16 @@ cleanup_and_fail:
     return ldresult;
 }
 
+/// @summary Associate an application window with a Vulkan presentation surface.
+/// @param vksurface The OS_PRESENTATION_SURFACE to initialize.
+/// @param vkinstance A valid OS_VULKAN_INSTANCE that manages the physical_device.
+/// @param arena The memory arena to use when allocating storage for Vulkan sorface information.
+/// @param physical_device The handle of the physical device to associate with the presentation surface.
+/// @param allocation_callbacks The VkAllocationCallbacks to pass to vkCreateWin32SurfaceKHR.
+/// @param instance The HINSTANCE or image base address of the application that created the target window.
+/// @param window The handle of the window representing the presentation surface.
+/// @param result If the function returns OS_VULKAN_LOADER_RESULT_VKERROR, the Vulkan result code is stored at this location.
+/// @return One of OS_VULKAN_LOADER_RESULT indicating the result of the operation.
 public_function int
 OsCreatePresentationSurface
 (
@@ -4321,6 +4330,121 @@ OsCreatePresentationSurface
     VkResult                                  &result
 )
 {
+    VkWin32SurfaceCreateInfoKHR create_info = {};
+    OS_VULKAN_PHYSICAL_DEVICE    *vkphysdev = OsFindVulkanPhysicalDevice(vkinstance, physical_device);
+    os_arena_marker_t                marker = OsMemoryArenaMark(arena);
+    uint32_t                   family_count = 0;
+    uint32_t                   format_count = 0;
+    uint32_t                     mode_count = 0;
+    int                            ldresult = OS_VULKAN_LOADER_RESULT_SUCCESS;
+
+    // initialize all of the fields of the Vulkan surface (and swap chain.)
+    OsZeroMemory(vksurface, sizeof(OS_PRESENTATION_SURFACE));
+
+    // ensure that a valid physical device was specified.
+    if (vkphysdev == NULL)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to locate Vulkan physical device %p.\n", __FUNCTION__, GetCurrentThreadId(), physical_device);
+        ldresult = OS_VULKAN_LOADER_RESULT_NOVULKAN;
+        return NULL;
+    }
+
+    // copy properties of the physical device up to the logical device object.
+    vksurface->PhysicalDevice     = physical_device;
+    vksurface->PhysicalDeviceType = vkphysdev->Properties.deviceType;
+    vksurface->PhysicalDeviceInfo = vkphysdev;
+
+    // create the OS-specific VkSurfaceKHR object.
+    create_info.sType     = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+    create_info.pNext     = NULL;
+    create_info.flags     = 0;
+    create_info.hinstance = instance;
+    create_info.hwnd      = window;
+    if ((result = vkinstance->vkCreateWin32SurfaceKHR(vkinstance->InstanceHandle, &create_info, allocation_callbacks, &vksurface->SurfaceHandle)) != VK_SUCCESS)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to create Win32 Vulkan surface (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+        ldresult = OS_VULKAN_LOADER_RESULT_VKERROR;
+        goto cleanup_and_fail;
+    }
+    if ((result = vkinstance->vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, vksurface->SurfaceHandle, &vksurface->Capabilities)) != VK_SUCCESS)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to retrieve Win32 Vulkan surface capabilities (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+        ldresult = OS_VULKAN_LOADER_RESULT_VKERROR;
+        goto cleanup_and_fail;
+    }
+
+    // determine which queue families, if any, support presentation to the new surface.
+    vkinstance->vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &family_count, NULL);
+    vksurface->QueueFamilyProperties = OsMemoryArenaAllocateArray<VkQueueFamilyProperties>(arena, family_count);
+    vksurface->QueueFamilyCanPresent = OsMemoryArenaAllocateArray<VkBool32>(arena, family_count);
+    if (vksurface->QueueFamilyProperties == NULL || vksurface->QueueFamilyCanPresent == NULL)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to allocate memory for Vulkan physical device queue family properties.\n", __FUNCTION__, GetCurrentThreadId());
+        ldresult = OS_VULKAN_LOADER_RESULT_NOMEMORY;
+        goto cleanup_and_fail;
+    }
+    for (uint32_t i = 0, n = (uint32_t) vkphysdev->QueueFamilyCount; i < n; ++i)
+    {
+        if ((result = vkinstance->vkGetPhysicalDeviceSurfaceSupportKHR(physical_device, i, vksurface->SurfaceHandle, &vksurface->QueueFamilyCanPresent[i])) != VK_SUCCESS)
+        {
+            OsLayerError("ERROR: %S(%u): Unable to determine surface presentation support for queue family %u of Vulkan physical device %S (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), i, vkphysdev->Properties.deviceName, result);
+            ldresult = OS_VULKAN_LOADER_RESULT_VKERROR;
+            goto cleanup_and_fail;
+        }
+    }
+    vkinstance->vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &family_count, vksurface->QueueFamilyProperties);
+
+    // retrieve the number of and properties of the surface formats supported by the device.
+    if ((result = vkinstance->vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, vksurface->SurfaceHandle, &format_count, NULL)) < 0)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to query the number of supported surface formats for Vulkan physical device %S (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), vkphysdev->Properties.deviceName, result);
+        ldresult = OS_VULKAN_LOADER_RESULT_VKERROR;
+        goto cleanup_and_fail;
+    }
+    if ((vksurface->SupportedFormats = OsMemoryArenaAllocateArray<VkSurfaceFormatKHR>(arena, format_count)) == NULL)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to allocate memory for %u surface formats for Vulkan physical device %S.\n", __FUNCTION__, GetCurrentThreadId(), format_count, vkphysdev->Properties.deviceName);
+        ldresult = OS_VULKAN_LOADER_RESULT_NOMEMORY;
+        goto cleanup_and_fail;
+    }
+    if ((result = vkinstance->vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, vksurface->SurfaceHandle, &format_count, vksurface->SupportedFormats)) < 0)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to retrieve the supported surface formats for Vulkan physical device %S (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), vkphysdev->Properties.deviceName, result);
+        ldresult = OS_VULKAN_LOADER_RESULT_VKERROR;
+        goto cleanup_and_fail;
+    }
+
+    // retrieve the number and type of presentation modes supported by the device.
+    if ((result = vkinstance->vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, vksurface->SurfaceHandle, &mode_count, NULL)) < 0)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to query the number of supported presentation modes for Vulkan physical device %S (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), vkphysdev->Properties.deviceName, result);
+        ldresult = OS_VULKAN_LOADER_RESULT_VKERROR;
+        goto cleanup_and_fail;
+    }
+    if ((vksurface->SupportedPresentModes = OsMemoryArenaAllocateArray<VkPresentModeKHR>(arena, mode_count)) == NULL)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to allocate memory for %u presentation modes for Vulkan physical device %S.\n", __FUNCTION__, GetCurrentThreadId(), mode_count, vkphysdev->Properties.deviceName);
+        ldresult = OS_VULKAN_LOADER_RESULT_NOMEMORY;
+        goto cleanup_and_fail;
+    }
+    if ((result = vkinstance->vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, vksurface->SurfaceHandle, &mode_count, vksurface->SupportedPresentModes)) < 0)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to retrieve the supported presentation modes for Vulkan physical device %S (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), vkphysdev->Properties.deviceName, result);
+        ldresult = OS_VULKAN_LOADER_RESULT_VKERROR;
+        goto cleanup_and_fail;
+    }
+
+    vksurface->QueueFamilyCount = family_count;
+    vksurface->FormatCount      = format_count;
+    vksurface->PresentModeCount = mode_count;
+    vksurface->AppInstance      = instance;
+    vksurface->TargetWindow     = window;
+    return OS_VULKAN_LOADER_RESULT_SUCCESS;
+
+cleanup_and_fail:
+    ZeroMemory(vkinstance, sizeof(OS_VULKAN_INSTANCE));
+    OsMemoryArenaResetToMarker(arena, marker);
+    return ldresult;
 }
 
 /// @summary Create a new Vulkan logical device which can be used for resource management and command submission.
