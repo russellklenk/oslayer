@@ -4052,7 +4052,7 @@ OsEnumerateVulkanPhysicalDevices
     {   // ignore pseudo-displays and displays not attached to a desktop.
         if ((display.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER) != 0)
             continue;
-        if ((display.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) != 0)
+        if ((display.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) == 0)
             continue;
         display_count++;
     }
@@ -4301,7 +4301,7 @@ OsEnumerateVulkanPhysicalDevices
             // ignore pseudo-displays and displays not attached to a desktop.
             if ((display.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER) != 0)
                 continue;
-            if ((display.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) != 0)
+            if ((display.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) == 0)
                 continue;
             // it's possible, but unlikely, that a display was attached during enumeration.
             if (display_index == display_count)
