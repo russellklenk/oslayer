@@ -235,7 +235,7 @@
 #ifndef OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION
     #define OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(vkdevice, vkinstance, fname) \
         do {                                                                   \
-            if (((vkdevice)->fname = (PFN_##fname) (vkinstance)->vkGetDeviceProcAddr((vkdevice)->LogicalDevice, #fname)) == NULL) { \
+            if (((vkdevice)->fname = (PFN_##fname) (vkinstance)->vkGetDeviceProcAddr((vkdevice)->DeviceHandle, #fname)) == NULL) { \
                 OsLayerError("ERROR: %S(%u): Unable to resolve Vulkan device entry point \"%S\".\n", __FUNCTION__, GetCurrentThreadId(), #fname); \
                 return VK_ERROR_INCOMPATIBLE_DRIVER;                           \
             }                                                                  \
@@ -564,19 +564,28 @@ struct OS_VULKAN_INSTANCE
     OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkCreateDevice);                               /// The vkCreateDevice function.
     OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkDestroyInstance);                            /// The vkDestroyInstance function.
     OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkEnumeratePhysicalDevices);                   /// The vkEnumeratePhysicalDevices function.
-    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceFeatures);                  /// The vkGetPhysicalDeviceFeatures function.
-    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceProperties);                /// The vkGetPhysicalDeviceProperties function.
-    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceMemoryProperties);          /// The vkGetPhysicalDeviceMemoryProperties function.
-    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceQueueFamilyProperties);     /// The vkGetPhysicalDeviceQueueFamilyProperties function.
-    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkEnumerateDeviceLayerProperties);             /// The vkEnumerateDeivceLayerProperties function.
     OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkEnumerateDeviceExtensionProperties);         /// The vkEnumerateDeviceExtensionProperties function.
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkEnumerateDeviceLayerProperties);             /// The vkEnumerateDeivceLayerProperties function.
     OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetDeviceProcAddr);                          /// The vkGetDeviceProcAddr function.
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceFeatures);                  /// The vkGetPhysicalDeviceFeatures function.
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceFormatProperties);          /// The vkGetPhysicalDeviceFormatProperties function.
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceImageFormatProperties);     /// The vkGetPhysicalDeviceImageFormatProperties function.
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceMemoryProperties);          /// The vkGetPhysicalDeviceMemoryProperties function.
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceProperties);                /// The vkGetPhysicalDeviceProperties function.
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceQueueFamilyProperties);     /// The vkGetPhysicalDeviceQueueFamilyProperties function.
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceSparseImageFormatProperties);///The vkGetPhysicalDeviceSparseImageFormatProperties function.
+
     OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkDestroySurfaceKHR);                          /// The VK_KHR_surface vkDestroySurfaceKHR function.
     OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceSurfaceSupportKHR);         /// The VK_KHR_surface vkGetPhysicalDeviceSurfaceSupportKHR function.
     OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceSurfaceFormatsKHR);         /// The VK_KHR_surface vkGetPhysicalDeviceSurfaceFormatsKHR function.
     OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceSurfaceCapabilitiesKHR);    /// The VK_KHR_surface vkGetPhysicalDeviceSurfaceCapabilitiesKHR function.
     OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceSurfacePresentModesKHR);    /// The VK_KHR_surface vkGetPhysicalDeviceSurfacePresentModesKHR function.
+
     OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkCreateWin32SurfaceKHR);                      /// The VK_KHR_win32_surface vkCreateWin32SurfaceKHR function.
+    
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkCreateDebugReportCallbackEXT);               /// The VK_EXT_debug_report vkCreateDebugReportCallbackEXT function.
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkDebugReportMessageEXT);                      /// The VK_EXT_debug_report vkDebugReportMessageEXT function.
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkDestroyDebugReportCallbackEXT);              /// The VK_EXT_debug_report vkDestroyDebugReportCallbackEXT function.
 };
 
 /// @summary Define the data describing the properties of all Vulkan-capable physical devices attached to the host, as well as any active display outputs.
@@ -608,6 +617,140 @@ struct OS_VULKAN_PHYSICAL_DEVICE_LIST
     HMONITOR                         *DisplayMonitor;                                /// An array where each element [Display] specifies the monitor handle of the display output.
     DISPLAY_DEVICE                   *DisplayDevice;                                 /// An array where each element [Display] specifies information about the display output device.
     DEVMODE                          *DisplayMode;                                   /// An array where each element [Display] specifies the display mode of a display output at the time of display enumeration.
+};
+
+/// @summary Define the device-level Vulkan runtime functions used to manage resources and submit work to the device.
+struct OS_VULKAN_DEVICE
+{
+    VkDevice                          DeviceHandle;                                  /// The Vulkan logical device handle used to interface with device-level API functions.
+    VkPhysicalDevice                  PhysicalDeviceHandle;                          /// The handle of the Vulkan physical device that executes the application commands.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkAllocateCommandBuffers);                     /// The vkAllocateCommandBuffers function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkAllocateDescriptorSets);                     /// The vkAllocateDescriptorSets function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkAllocateMemory);                             /// The vkAllocateMemory function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkBeginCommandBuffer);                         /// The vkBeginCommandBuffer function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkBindBufferMemory);                           /// The vkBindBufferMemory function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkBindImageMemory);                            /// The vkBindImageMemory function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdBeginQuery);                              /// The vkCmdBeginQuery function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdBeginRenderPass);                         /// The vkCmdBeginRenderPass function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdBindDescriptorSets);                      /// The vkCmdBindDescriptorSets function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdBindIndexBuffer);                         /// The vkCmdBindIndexBuffer function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdBindPipeline);                            /// The vkCmdBindPipeline function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdBindVertexBuffers);                       /// The vkCmdBindVertexBuffers function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdBlitImage);                               /// The vkCmdBlitImage function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdClearAttachments);                        /// The vkCmdClearAttachments function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdClearColorImage);                         /// The vkCmdClearColorImage function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdClearDepthStencilImage);                  /// The vkCmdClearDepthStencilImage function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdCopyBuffer);                              /// The vkCmdCopyBuffer function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdCopyBufferToImage);                       /// The vkCmdCopyBufferToImage function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdCopyImage);                               /// The vkCmdCopyImage function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdCopyImageToBuffer);                       /// The vkCmdCopyImageToBuffer function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdCopyQueryPoolResults);                    /// The vkCmdCopyQueryPoolResults function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdDispatch);                                /// The vkCmdDispatch function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdDispatchIndirect);                        /// The vkCmdDispatchIndirect function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdDraw);                                    /// The vkCmdDraw function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdDrawIndexed);                             /// The vkCmdDrawIndexed function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdDrawIndexedIndirect);                     /// The vkCmdDrawIndexedIndirect function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdDrawIndirect);                            /// The vkCmdDrawIndirect function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdEndQuery);                                /// The vkCmdEndQuery function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdEndRenderPass);                           /// The vkCmdEndRenderPass function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdExecuteCommands);                         /// The vkCmdExecuteCommands function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdFillBuffer);                              /// The vkCmdFillBuffer function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdNextSubpass);                             /// The vkCmdNextSubpass function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdPipelineBarrier);                         /// The vkCmdPipelineBarrier function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdPushConstants);                           /// The vkCmdPushConstants function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdResetEvent);                              /// The vkCmdResetEvent function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdResetQueryPool);                          /// The vkCmdResetQueryPool function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdResolveImage);                            /// The vkCmdResolveImage function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdSetBlendConstants);                       /// The vkCmdSetBlendConstants function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdSetDepthBias);                            /// The vkCmdSetDepthBias function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdSetDepthBounds);                          /// The vkCmdSetDepthBounds function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdSetEvent);                                /// The vkCmdSetEvent function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdSetLineWidth);                            /// The vkCmdSetLineWidth function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdSetScissor);                              /// The vkCmdSetScissor function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdSetStencilCompareMask);                   /// The vkCmdSetStencilCompareMask function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdSetStencilReference);                     /// The vkCmdSetStencilReference function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdSetStencilWriteMask);                     /// The vkCmdSetStencilWriteMask function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdSetViewport);                             /// The vkCmdSetViewport function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdUpdateBuffer);                            /// The vkCmdUpdateBuffer function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdWaitEvents);                              /// The vkCmdWaitEvents function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCmdWriteTimestamp);                          /// The vkCmdWriteTimestamp function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCreateBuffer);                               /// The vkCreateBuffer function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCreateBufferView);                           /// The vkCreateBufferView function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCreateCommandPool);                          /// The vkCreateCommandPool function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCreateComputePipelines);                     /// The vkCreateComputePipelines function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCreateDescriptorPool);                       /// The vkCreateDescriptorPool function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCreateDescriptorSetLayout);                  /// The vkCreateDescriptorSetLayout function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCreateEvent);                                /// The vkCreateEvent function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCreateFence);                                /// The vkCreateFence function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCreateFramebuffer);                          /// The vkCreateFramebuffer function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCreateGraphicsPipelines);                    /// The vkCreateGraphicsPipelines function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCreateImage);                                /// The vkCreateImage function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCreateImageView);                            /// The vkCreateImageView function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCreatePipelineCache);                        /// The vkCreatePipelineCache function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCreatePipelineLayout);                       /// The vkCreatePipelineLayout function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCreateQueryPool);                            /// The vkCreateQueryPool function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCreateRenderPass);                           /// The vkCreateRenderPass function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCreateSampler);                              /// The vkCreateSampler function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCreateSemaphore);                            /// The vkCreateSemaphore function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCreateShaderModule);                         /// The vkCreateShaderModule function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkDestroyBuffer);                              /// The vkDestroyBuffer function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkDestroyBufferView);                          /// The vkDestroyBufferView function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkDestroyCommandPool);                         /// The vkDestroyCommandPool function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkDestroyDescriptorPool);                      /// The vkDestroyDescriptorPool function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkDestroyDescriptorSetLayout);                 /// The vkDestroyDescriptorSetLayout function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkDestroyDevice);                              /// The vkDestroyDevice function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkDestroyEvent);                               /// The vkDestroyEvent function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkDestroyFence);                               /// The vkDestroyFence function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkDestroyFramebuffer);                         /// The vkDestroyFramebuffer function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkDestroyImage);                               /// The vkDestroyImage function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkDestroyImageView);                           /// The vkDestroyImageView function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkDestroyPipeline);                            /// The vkDestroyPipeline function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkDestroyPipelineCache);                       /// The vkDestroyPipelineCache function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkDestroyPipelineLayout);                      /// The vkDestroyPipelineLayout function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkDestroyQueryPool);                           /// The vkDestroyQueryPool function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkDestroyRenderPass);                          /// The vkDestroyRenderPass function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkDestroySampler);                             /// The vkDestroySampler function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkDestroySemaphore);                           /// The vkDestroySemaphore function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkDestroyShaderModule);                        /// The vkDestroyShaderModule function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkDeviceWaitIdle);                             /// The vkDeviceWaitIdle function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkEndCommandBuffer);                           /// The vkEndCommandBuffer function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkFlushMappedMemoryRanges);                    /// The vkFlushMappedMemoryRanges function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkFreeCommandBuffers);                         /// The vkFreeCommandBuffers function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkFreeDescriptorSets);                         /// The vkFreeDescriptorSets function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkFreeMemory);                                 /// The vkFreeMemory function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkGetBufferMemoryRequirements);                /// The vkGetBufferMemoryRequirements function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkGetDeviceMemoryCommitment);                  /// The vkGetDevicememoryCommitment function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkGetDeviceQueue);                             /// The vkGetDeviceQueue function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkGetEventStatus);                             /// The vkGetEventStatus function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkGetFenceStatus);                             /// The vkGetFenceStatus function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkGetImageMemoryRequirements);                 /// The vkGetImageMemoryRequirements function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkGetImageSparseMemoryRequirements);           /// The vkGetImageSparseMemoryRequirements function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkGetImageSubresourceLayout);                  /// The vkGetImageSubresourceLayout function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkGetPipelineCacheData);                       /// The vkGetPipelineCacheData function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkGetQueryPoolResults);                        /// The vkGetQueryPoolResults function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkGetRenderAreaGranularity);                   /// The vkGetRenderAreaGranularity function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkInvalidateMappedMemoryRanges);               /// The vkInvalidateMappedMemoryRanges function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkMapMemory);                                  /// The vkMapMemory function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkMergePipelineCaches);                        /// The vkMergePipelineCaches function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkQueueBindSparse);                            /// The vkQueueBindSparse function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkQueueSubmit);                                /// The vkQueueSubmit function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkQueueWaitIdle);                              /// The vkQueueWaitIdle function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkResetCommandBuffer);                         /// The vkResetCommandBuffer function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkResetCommandPool);                           /// The vkResetCommandPool function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkResetDescriptorPool);                        /// The vkResetDescriptorPool function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkResetEvent);                                 /// The vkResetEvent function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkResetFences);                                /// The vkResetFences function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkSetEvent);                                   /// The vkSetEvent function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkUnmapMemory);                                /// The vkUnmapMemory function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkUpdateDescriptorSets);                       /// The vkUpdateDescriptorSets function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkWaitForFences);                              /// The vkWaitForFences function.
+
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkAcquireNextImageKHR);                        /// The VK_KHR_swapchain vkAcquireNextImageKHR function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCreateSharedSwapchainsKHR);                  /// The VK_KHR_swapchain vkCreateSharedSwapchainsKHR function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkCreateSwapchainKHR);                         /// The VK_KHR_swapchain vkCreateSwapchainKHR function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkDestroySwapchainKHR);                        /// The VK_KHR_swapchain vkDestroySwapchainKHR function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkGetSwapchainImagesKHR);                      /// The VK_KHR_swapchain vkGetSwapchainImagesKHR function.
+    OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkQueuePresentKHR);                            /// The VK_KHR_swapchain vkQueuePresentKHR function.
 };
 
 /// @summary Define constants for specifying worker thread stack sizes.
@@ -2121,13 +2264,16 @@ OsResolveVulkanInstanceFunctions
     OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkCreateDevice);
     OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkDestroyInstance);
     OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkEnumeratePhysicalDevices);
-    OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkGetPhysicalDeviceFeatures);
-    OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkGetPhysicalDeviceProperties);
-    OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkGetPhysicalDeviceMemoryProperties);
-    OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkGetPhysicalDeviceQueueFamilyProperties);
-    OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkEnumerateDeviceLayerProperties);
     OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkEnumerateDeviceExtensionProperties);
+    OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkEnumerateDeviceLayerProperties);
     OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkGetDeviceProcAddr);
+    OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkGetPhysicalDeviceFeatures);
+    OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkGetPhysicalDeviceFormatProperties);
+    OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkGetPhysicalDeviceImageFormatProperties);
+    OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkGetPhysicalDeviceMemoryProperties);
+    OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkGetPhysicalDeviceProperties);
+    OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkGetPhysicalDeviceQueueFamilyProperties);
+    OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkGetPhysicalDeviceSparseImageFormatProperties);
     if (OsVulkanInstanceExtensionEnabled(VK_KHR_SURFACE_EXTENSION_NAME, create_info))
     {   // resolve entry points for VK_KHR_surface.
         OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkDestroySurfaceKHR);
@@ -2140,6 +2286,12 @@ OsResolveVulkanInstanceFunctions
     {   // resolve entry points for VK_KHR_win32_surface.
         OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkCreateWin32SurfaceKHR);
     }
+    if (OsVulkanInstanceExtensionEnabled(VK_EXT_DEBUG_REPORT_EXTENSION_NAME, create_info))
+    {   // resolve entry points for VK_EXT_debug_report.
+        OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkCreateDebugReportCallbackEXT);
+        OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkDebugReportMessageEXT);
+        OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkDestroyDebugReportCallbackEXT);
+    }
     return VK_SUCCESS;
 }
 
@@ -2148,20 +2300,144 @@ OsResolveVulkanInstanceFunctions
 /// @param vkdevice The OS_VULKAN_DEVICE object, with the LogicalDevice field set.
 /// @param create_info The VkDeviceCreateInfo being used to initialize the logical device. Used here to resolve device-level function pointers for extensions.
 /// @return VkResult if all device-level functions were resolved successfully.
-/*internal_function VkResult
+internal_function VkResult
 OsResolveVulkanDeviceFunctions
 (
-    OS_VULKAN_INSTANCE        *vkinstance,
-    OS_VULKAN_DEVICE            *vkdevice, 
+    OS_VULKAN_INSTANCE          *instance,
+    OS_VULKAN_DEVICE              *device, 
     VkDeviceCreateInfo const *create_info
 )
 {
-    UNREFERENCED_PARAMETER(create_info);
-    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(vkdevice, vkinstance, vkDestroyDevice);
-    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(vkdevice, vkinstance, vkGetDeviceQueue);
-    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(vkdevice, vkinstance, vkDeviceWaitIdle);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkAllocateCommandBuffers);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkAllocateMemory);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkBeginCommandBuffer);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkBindBufferMemory);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkBindImageMemory);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdBeginQuery);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdBeginRenderPass);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdBindDescriptorSets);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdBindIndexBuffer);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdBindPipeline);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdBindVertexBuffers);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdBlitImage);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdClearAttachments);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdClearColorImage);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdClearDepthStencilImage);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdCopyBuffer);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdCopyBufferToImage);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdCopyImage);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdCopyImageToBuffer);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdCopyQueryPoolResults);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdDispatch);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdDispatchIndirect);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdDraw);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdDrawIndexed);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdDrawIndexedIndirect);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdDrawIndirect);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdEndQuery);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdEndRenderPass);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdExecuteCommands);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdFillBuffer);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdNextSubpass);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdPipelineBarrier);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdPushConstants);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdResetEvent);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdResetQueryPool);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdResolveImage);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdSetBlendConstants);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdSetDepthBias);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdSetDepthBounds);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdSetEvent);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdSetLineWidth);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdSetScissor);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdSetStencilCompareMask);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdSetStencilReference);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdSetStencilWriteMask);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdSetViewport);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdUpdateBuffer);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdWaitEvents);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCmdWriteTimestamp);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCreateBuffer);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCreateBufferView);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCreateCommandPool);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCreateComputePipelines);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCreateDescriptorPool);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCreateDescriptorSetLayout);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCreateEvent);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCreateFence);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCreateFramebuffer);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCreateGraphicsPipelines);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCreateImage);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCreateImageView);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCreatePipelineCache);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCreatePipelineLayout);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCreateQueryPool);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCreateRenderPass);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCreateSampler);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCreateSemaphore);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCreateShaderModule);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkDestroyBuffer);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkDestroyBufferView);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkDestroyCommandPool);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkDestroyDescriptorPool);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkDestroyDescriptorSetLayout);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkDestroyDevice);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkDestroyEvent);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkDestroyFence);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkDestroyFramebuffer);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkDestroyImage);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkDestroyImageView);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkDestroyPipeline);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkDestroyPipelineCache);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkDestroyPipelineLayout);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkDestroyQueryPool);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkDestroyRenderPass);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkDestroySampler);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkDestroySemaphore);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkDestroyShaderModule);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkDeviceWaitIdle);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkEndCommandBuffer);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkFlushMappedMemoryRanges);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkFreeCommandBuffers);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkFreeDescriptorSets);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkFreeMemory);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkGetBufferMemoryRequirements);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkGetDeviceMemoryCommitment);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkGetDeviceQueue);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkGetEventStatus);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkGetFenceStatus);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkGetImageMemoryRequirements);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkGetImageSparseMemoryRequirements);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkGetImageSubresourceLayout);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkGetPipelineCacheData);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkGetQueryPoolResults);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkGetRenderAreaGranularity);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkInvalidateMappedMemoryRanges);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkMapMemory);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkMergePipelineCaches);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkQueueBindSparse);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkQueueSubmit);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkQueueWaitIdle);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkResetCommandBuffer);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkResetCommandPool);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkResetDescriptorPool);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkResetEvent);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkResetFences);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkSetEvent);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkUnmapMemory);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkUpdateDescriptorSets);
+    OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkWaitForFences);
+    if (OsVulkanDeviceExtensionEnabled(VK_KHR_SWAPCHAIN_EXTENSION_NAME, create_info))
+    {   // resolve entry points for VK_KHR_swapchain.
+        OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkAcquireNextImageKHR);
+        OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCreateSharedSwapchainsKHR);
+        OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkCreateSwapchainKHR);
+        OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkDestroySwapchainKHR);
+        OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkGetSwapchainImagesKHR);
+        OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkQueuePresentKHR);
+    }
     return VK_SUCCESS;
-}*/
+}
 
 /*////////////////////////
 //   Public Functions   //
@@ -3888,32 +4164,30 @@ OsIsPrimaryDisplay
     return(device_list->DisplayDevice[display_index].StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) != 0;
 }
 
-/*
 /// @summary Return the current refresh rate of a given display.
 /// @param device_list The list of physical devices and display outputs attached to the system.
 /// @param display_index The zero-based index of the display output to query.
 /// @return The display refresh rate, in Hz.
-public_function uint32_t
+public_function int32_t
 OsDisplayRefreshRate
 (
     OS_VULKAN_PHYSICAL_DEVICE_LIST const *device_list, 
     size_t                              display_index
 )
-{
-    if (display->DisplayMode.dmDisplayFrequency == 0 || 
-        display->DisplayMode.dmDisplayFrequency == 1)
+{   assert(display_index < device_list->DisplayCount);
+    DEVMODE     *devmode =&device_list->DisplayMode[display_index];
+    if (devmode->dmDisplayFrequency == 0 || devmode->dmDisplayFrequency == 1)
     {   // a value of 0 or 1 indicates the 'default' refresh rate.
         HDC dc = GetDC(NULL);
         int hz = GetDeviceCaps(dc, VREFRESH);
         ReleaseDC(NULL, dc);
-        return (float)  hz;
+        return hz;
     }
     else
     {   // return the display frequency specified in the DEVMODE structure.
-        return (float) display->DisplayMode.dmDisplayFrequency;
+        return devmode->dmDisplayFrequency;
     }
 }
-*/
 
 /// @summary Determine whether an instance-level layer is supported by the runtime.
 /// @param props A valid OS_VULKAN_RUNTIME_PROPERTIES to search.
@@ -4444,5 +4718,46 @@ cleanup_and_fail:
     ZeroMemory(device_list, sizeof(OS_VULKAN_PHYSICAL_DEVICE_LIST));
     OsMemoryArenaResetToMarker(arena, marker);
     return result;
+}
+
+/// @summary Create a new Vulkan logical device object and resolve device-level function pointers for the core API and any enabled extensions.
+/// @param device The OS_VULKAN_DEVICE to initialize.
+/// @param instance A valid OS_VULKAN_INSTANCE structure with instance function pointers set.
+/// @param physical_device The handle of the Vulkan-capable physical device to associate with the logical device.
+/// @param create_info The VkDeviceCreateInfo to pass to vkCreateDevice.
+/// @param allocation_callbacks The VkAllocationCallbacks to pass to vkCreateInstance.
+/// @param result If the function returns OS_VULKAN_LOADER_RESULT_VKERROR, the Vulkan result code is stored at this location.
+/// @return One of OS_VULKAN_LOADER_RESULT indicating the result of the operation.
+public_function VkResult
+OsCreateVulkanLogicalDevice
+(
+    OS_VULKAN_DEVICE                          *device,
+    OS_VULKAN_INSTANCE                      *instance,
+    VkPhysicalDevice                  physical_device, 
+    VkDeviceCreateInfo    const          *create_info, 
+    VkAllocationCallbacks const *allocation_callbacks
+)
+{
+    VkResult result = VK_SUCCESS;
+
+    // initialize all of the fields of the Vulkan logical device.
+    ZeroMemory(device, sizeof(OS_VULKAN_DEVICE));
+
+    // create the Vulkan logical device object.
+    if ((result = instance->vkCreateDevice(physical_device, create_info, allocation_callbacks, &device->DeviceHandle)) != VK_SUCCESS)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to create Vulkan device (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+        return result;
+    }
+    // resolve the device-level API functions required to manage resources and submit work to the physical device.
+    if ((result = OsResolveVulkanDeviceFunctions(instance, device, create_info)) != VK_SUCCESS)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to resolve one or more Vulkan device-level functions (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+        ZeroMemory(device, sizeof(OS_VULKAN_DEVICE));
+        return result;
+    }
+    // save the associated physical device handle for later reference.
+    device->PhysicalDeviceHandle = physical_device;
+    return VK_SUCCESS;
 }
 
