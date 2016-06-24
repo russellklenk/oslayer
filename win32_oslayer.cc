@@ -269,6 +269,10 @@
     #include <XInput.h>
     #include <intrin.h>
 
+    #include <mmdeviceapi.h>
+    #include <audioclient.h>
+    #include <functiondiscoverykeys_devpkey.h>
+
     #include <vulkan/vulkan.h>
 
     #include "cvmarkers.h"
@@ -280,22 +284,30 @@
 /// @summary Forward-declare several public types.
 struct OS_CPU_INFO;
 struct OS_MEMORY_ARENA;
+
 struct OS_WORKER_THREAD;
 struct OS_THREAD_POOL;
 struct OS_THREAD_POOL_INIT;
-struct OS_KEYBOARD_EVENTS;
+
+struct OS_INPUT_SYSTEM;
+struct OS_INPUT_EVENTS;
 struct OS_POINTER_EVENTS;
 struct OS_GAMEPAD_EVENTS;
-struct OS_INPUT_EVENTS;
-struct OS_INPUT_SYSTEM;
+struct OS_KEYBOARD_EVENTS;
 
 struct OS_TASK_PROFILER;
 struct OS_TASK_PROFILER_SPAN;
 
+struct OS_VULKAN_DEVICE;
 struct OS_VULKAN_RUNTIME;
-struct OS_VULKAN_RUNTIME_PROPERTIES;
 struct OS_VULKAN_INSTANCE;
+struct OS_VULKAN_RUNTIME_PROPERTIES;
 struct OS_VULKAN_PHYSICAL_DEVICE_LIST;
+
+struct OS_AUDIO_SYSTEM;
+struct OS_AUDIO_DEVICE_LIST;
+struct OS_AUDIO_OUTPUT_DEVICE;
+struct OS_AUDIO_CAPTURE_DEVICE;
 
 /// @summary Define the data associated with an operating system arena allocator. 
 /// The memory arena is not safe for concurrent access by multiple threads.
@@ -751,6 +763,53 @@ struct OS_VULKAN_DEVICE
     OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkDestroySwapchainKHR);                        /// The VK_KHR_swapchain vkDestroySwapchainKHR function.
     OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkGetSwapchainImagesKHR);                      /// The VK_KHR_swapchain vkGetSwapchainImagesKHR function.
     OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkQueuePresentKHR);                            /// The VK_KHR_swapchain vkQueuePresentKHR function.
+};
+
+/// @summary Defines the data associated with an active sound output device on the host.
+struct OS_AUDIO_OUTPUT_DEVICE
+{   static size_t const               MAX_DEVICE_ID = 128;                           /// The maximum supported size of a device ID string, including the zero-terminator, in characters.
+    IMMDevice                        *Device;                                        /// The multimedia device interface to the output device.
+    IAudioClient                     *AudioClient;                                   /// The WASAPI audio client associated with the output device.
+    IAudioRenderClient               *RenderClient;                                  /// The WASAPI interface used to write audio data to the device.
+    IAudioClock                      *AudioClock;                                    /// The WASAPI interface used to read the current read position within the output buffer.
+    uint32_t                          RequestedBufferSize;                           /// The requested buffer size, in samples.
+    uint32_t                          ActualBufferSize;                              /// The buffer size reported by the device, in samples.
+    uint32_t                          SamplesPerSecond;                              /// The requested sample rate, in samples-per-second.
+    WAVEFORMATEXTENSIBLE              AudioFormat;                                   /// The format of the audio data expected by the device (16-bit stereo PCM.)
+    WCHAR                             DeviceId[MAX_DEVICE_ID];                       /// A copy of the device ID string, zero-terminated. 
+};
+
+/// @summary Defines the data associated with an active sound capture device on the host.
+struct OS_AUDIO_CAPTURE_DEVICE
+{
+    IMMDevice                        *Device;                                        /// The multimedia device interface to the capture device.
+    IAudioClient                     *AudioClient;                                   /// The WASAPI audio client associated with the capture device.
+    IAudioCaptureClient              *CaptureClient;                                 /// The WASAPI interface used to read audio data from the device.
+    IAudioClock                      *AudioClock;                                    /// The WASAPI interface used to read the current write position within the capture buffer.
+};
+
+/// @summary Defines the data associated with the host audio system used for capturing and playing back sound data.
+struct OS_AUDIO_SYSTEM
+{
+    IMMDeviceEnumerator              *DeviceEnumerator;                              /// The system audio device enumerator interface.
+    WCHAR                            *DefaultOutputDeviceId;                         /// The unique identifier of the default sound output device.
+    WCHAR                            *DefaultCaptureDeviceId;                        /// The unique identifier of the default sound capture device.
+    bool                              AudioOutputEnabled;                            /// true if audio output is enabled.
+    bool                              AudioCaptureEnabled;                           /// true if audio capture is enabled.
+    OS_AUDIO_OUTPUT_DEVICE            ActiveOutputDevice;                            /// Data associated with the active sound output device.
+    OS_AUDIO_CAPTURE_DEVICE           ActiveCaptureDevice;                           /// Data associated with the active sound capture device.
+};
+
+/// @summary Defines the data associated with the list of audio output and capture devices on the host.
+struct OS_AUDIO_DEVICE_LIST
+{
+    size_t                            OutputDeviceCount;                             /// The number of audio output devices on the host, not including disabled output devices.
+    WCHAR                           **OutputDeviceId;                                /// An array where each element [Device] specifies a zero-terminated string used to uniquely identify an enabled audio output device.
+    WCHAR                           **OutputDeviceName;                              /// An array where each element [Device] specifies a zero-terminated string representing the friendly name of an enabled audio output device.
+
+    size_t                            CaptureDeviceCount;                            /// The number of audio capture devices on the host, not including disabled capture devices.
+    WCHAR                           **CaptureDeviceId;                               /// An array where each element [Device] specifies a zero-terminated string used to uniquely identify an enabled audio capture device.
+    WCHAR                           **CaptureDeviceName;                             /// An array where each element [Device] specifies a zero-terminated string representing the friendly name of an enabled audio capture device.
 };
 
 /// @summary Define constants for specifying worker thread stack sizes.
@@ -4759,5 +4818,598 @@ OsCreateVulkanLogicalDevice
     // save the associated physical device handle for later reference.
     device->PhysicalDeviceHandle = physical_device;
     return VK_SUCCESS;
+}
+
+/// @summary Initialize the host audio interface and retrieve the default audio device IDs.
+/// @param audio_system The audio system interface.
+/// @return Zero if the audio system is successfully initialized, or -1 if an error occurs.
+public_function int
+OsInitializeAudio
+(
+    OS_AUDIO_SYSTEM *audio_system
+)
+{
+    IMMDeviceEnumerator *devenum = NULL;
+    IMMDevice    *default_outdev = NULL;
+    IMMDevice    *default_capdev = NULL;
+    WCHAR             *outdev_id = NULL;
+    WCHAR             *capdev_id = NULL;
+    HRESULT               result = S_OK;
+
+    // initialize the fields of the audio system instance.
+    ZeroMemory(audio_system, sizeof(OS_AUDIO_SYSTEM));
+
+    // initialize COM on the calling thread. any thread that accesses the audio system must call CoInitializeEx.
+    if (FAILED((result = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_SPEED_OVER_MEMORY))))
+    {
+        OsLayerError("ERROR: %S(%u): Unable to initialize audio system COM services (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+        return -1;
+    }
+    // create the multimedia device enumerator and retrieve the IDs of the default output and capture devices.
+    if (FAILED((result = CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL, IID_PPV_ARGS(&devenum)))))
+    {
+        OsLayerError("ERROR: %S(%u): Unable to retrieve the multimedia device enumeration instance (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+        goto cleanup_and_fail;
+    }
+    // retrieve the default audio output device.
+    if ((result = devenum->GetDefaultAudioEndpoint(eRender, eConsole, &default_outdev)) != S_OK)
+    {   // it's possible that there are no audio output devices. don't fail in that case.
+        if (result != E_NOTFOUND)
+        {
+            OsLayerError("ERROR: %S(%u): Unable to retrieve the default audio output device (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+            goto cleanup_and_fail;
+        }
+    }
+    // retrieve the default audio capture device.
+    if ((result = devenum->GetDefaultAudioEndpoint(eCapture, eConsole, &default_capdev)) != S_OK)
+    {   // it's possible that there are no audio capture devices. don't fail in that case.
+        if (result != E_NOTFOUND)
+        {
+            OsLayerError("ERROR: %S(%u): Unable to retrieve the default audio capture device (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+            goto cleanup_and_fail;
+        }
+    }
+
+    // retrieve the device ID strings. these are allocated by the COM interface and freed when the audio system is destroyed.
+    if ((default_outdev != NULL) && FAILED((result = default_outdev->GetId(&outdev_id))))
+    {
+        OsLayerError("ERROR: %S(%u): Unable to retrieve the system ID of the default audio output device (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+        goto cleanup_and_fail;
+    }
+    if ((default_capdev != NULL) && FAILED((result = default_capdev->GetId(&capdev_id))))
+    {
+        OsLayerError("ERROR: %S(%u): Unable to retrieve the system ID of the default audio output device (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+        goto cleanup_and_fail;
+    }
+
+    // release the device objects; they are no longer needed.
+    if (default_capdev != NULL) default_capdev->Release();
+    if (default_outdev != NULL) default_outdev->Release();
+
+    // update the audio system instance.
+    audio_system->DeviceEnumerator       = devenum;
+    audio_system->DefaultOutputDeviceId  = outdev_id;
+    audio_system->DefaultCaptureDeviceId = capdev_id;
+    return 0;
+
+cleanup_and_fail:
+    ZeroMemory(audio_system, sizeof(OS_AUDIO_SYSTEM));
+    if (capdev_id != NULL) CoTaskMemFree(capdev_id);
+    if (outdev_id != NULL) CoTaskMemFree(outdev_id);
+    if (default_capdev != NULL) default_capdev->Release();
+    if (default_outdev != NULL) default_outdev->Release();
+    if (devenum != NULL) devenum->Release();
+    CoUninitialize();
+    return -1;
+}
+
+/// @summary Enumerate all audio output and capture devices that are enabled on the host.
+/// @param device_list The OS_AUDIO_DEVICE_LIST to populate.
+/// @param audio_system The initialized OS_AUDIO_SYSTEM to query.
+/// @param arena The OS_MEMORY_ARENA to used when allocating memory for device names and IDs.
+/// @return Zero if the operation was successful, or -1 if an error occurred.
+public_function int
+OsEnumerateAudioDevices
+(
+    OS_AUDIO_DEVICE_LIST *device_list, 
+    OS_AUDIO_SYSTEM     *audio_system, 
+    OS_MEMORY_ARENA            *arena
+)
+{
+    IMMDeviceEnumerator     *devenum = audio_system->DeviceEnumerator;
+    IMMDeviceCollection *outdev_list = NULL;
+    IMMDeviceCollection *capdev_list = NULL;
+    os_arena_marker_t         marker = OsMemoryArenaMark(arena);
+    HRESULT                   result = S_OK;
+    UINT                   out_count = 0;
+    UINT                   cap_count = 0;
+
+    // initialize the fields of the device list.
+    ZeroMemory(device_list, sizeof(OS_AUDIO_DEVICE_LIST));
+
+    // enumerate attached output audio endpoints.
+    // each call provides a list of objects implementing IMMDevice and IMMEndpoint.
+    if (FAILED((result = devenum->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE | DEVICE_STATE_UNPLUGGED, &outdev_list))))
+    {
+        OsLayerError("ERROR: %S(%u): Unable to enumerate attached audio output devices (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+        goto cleanup_and_fail;
+    }
+    if (FAILED((result = devenum->EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE | DEVICE_STATE_UNPLUGGED, &capdev_list))))
+    {
+        OsLayerError("ERROR: %S(%u): Unable to enumerate attached audio capture devices (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+        goto cleanup_and_fail;
+    }
+    if (FAILED((result = outdev_list->GetCount(&out_count))))
+    {
+        OsLayerError("ERROR: %S(%u): Unable to retrieve audio output device count (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+        goto cleanup_and_fail;
+    }
+    if (FAILED((result = capdev_list->GetCount(&cap_count))))
+    {
+        OsLayerError("ERROR: %S(%u): Unable to retrieve audio capture device count (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+        goto cleanup_and_fail;
+    }
+    device_list->OutputDeviceCount  = out_count;
+    device_list->CaptureDeviceCount = cap_count;
+    if (out_count > 0)
+    {
+        device_list->OutputDeviceId      = OsMemoryArenaAllocateArray<WCHAR*>(arena, out_count);
+        device_list->OutputDeviceName    = OsMemoryArenaAllocateArray<WCHAR*>(arena, out_count);
+        if (device_list->OutputDeviceId == NULL || device_list->OutputDeviceName == NULL)
+        {
+            OsLayerError("ERROR: %S(%u): Unable to allocate memory for audio output device information.\n", __FUNCTION__, GetCurrentThreadId());
+            goto cleanup_and_fail;
+        }
+    }
+    if (cap_count > 0)
+    {
+        device_list->CaptureDeviceId     = OsMemoryArenaAllocateArray<WCHAR*>(arena, cap_count);
+        device_list->CaptureDeviceName   = OsMemoryArenaAllocateArray<WCHAR*>(arena, cap_count);
+        if (device_list->CaptureDeviceId == NULL || device_list->CaptureDeviceName == NULL)
+        {
+            OsLayerError("ERROR: %S(%u): Unable to allocate memory for audio capture device information.\n", __FUNCTION__, GetCurrentThreadId());
+            goto cleanup_and_fail;
+        }
+    }
+
+    // loop over the populated collections and retrieve the device information.
+    for (UINT i = 0; i < out_count; ++i)
+    {
+        IMMDevice         *dev = NULL;
+        IPropertyStore  *devps = NULL;
+        WCHAR           *devid = NULL;
+        size_t           idlen = 0;
+        size_t           fnlen = 0;
+        PROPVARIANT      devnv;
+        PropVariantInit(&devnv);
+
+        if (FAILED((result = outdev_list->Item(i, &dev))))
+        {
+            OsLayerError("ERROR: %S(%u): Unable to retrieve audio output device interface (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+            goto cleanup_and_fail;
+        }
+        if (FAILED((result = dev->OpenPropertyStore(STGM_READ, &devps))))
+        {
+            OsLayerError("ERROR: %S(%u): Unable to open audio output device property store (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+            dev->Release();
+            goto cleanup_and_fail;
+        }
+        if (FAILED((result = dev->GetId(&devid))))
+        {
+            OsLayerError("ERROR: %S(%u): Unable to retrieve audio output device ID (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+            devps->Release();
+            dev->Release();
+            goto cleanup_and_fail;
+        }
+        if (FAILED((result = devps->GetValue(PKEY_Device_FriendlyName, &devnv))))
+        {
+            OsLayerError("ERROR: %S(%u): Unable to retrieve device name for audio output device (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+            CoTaskMemFree(devid);
+            devps->Release();
+            dev->Release();
+            goto cleanup_and_fail;
+        }
+        // note that the lengths returned by StringCchLength do not include the trailing zero character.
+        StringCchLengthW(devid        , STRSAFE_MAX_CCH, &idlen);
+        StringCchLengthW(devnv.pwszVal, STRSAFE_MAX_CCH, &fnlen);
+        if ((device_list->OutputDeviceId  [i] = OsMemoryArenaAllocateArray<WCHAR>(arena, idlen+1)) == NULL ||
+            (device_list->OutputDeviceName[i] = OsMemoryArenaAllocateArray<WCHAR>(arena, fnlen+1)) == NULL)
+        {
+            OsLayerError("ERROR: %S(%u): Unable to allocate string memory for audio output device properties.\n", __FUNCTION__, GetCurrentThreadId());
+            PropVariantClear(&devnv);
+            CoTaskMemFree(devid);
+            devps->Release();
+            dev->Release();
+        }
+        StringCchCopyExW(device_list->OutputDeviceId  [i], idlen+1, devid, NULL, NULL, STRSAFE_IGNORE_NULLS);
+        StringCchCopyExW(device_list->OutputDeviceName[i], fnlen+1, devnv.pwszVal, NULL, NULL, STRSAFE_IGNORE_NULLS);
+        // clean up all of the allocations made by COM.
+        PropVariantClear(&devnv);
+        CoTaskMemFree(devid);
+        devps->Release();
+        dev->Release();
+    }
+    for (UINT i = 0; i < cap_count; ++i)
+    {
+        IMMDevice         *dev = NULL;
+        IPropertyStore  *devps = NULL;
+        WCHAR           *devid = NULL;
+        size_t           idlen = 0;
+        size_t           fnlen = 0;
+        PROPVARIANT      devnv;
+        PropVariantInit(&devnv);
+
+        if (FAILED((result = capdev_list->Item(i, &dev))))
+        {
+            OsLayerError("ERROR: %S(%u): Unable to retrieve audio capture device interface (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+            goto cleanup_and_fail;
+        }
+        if (FAILED((result = dev->OpenPropertyStore(STGM_READ, &devps))))
+        {
+            OsLayerError("ERROR: %S(%u): Unable to open audio capture device property store (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+            dev->Release();
+            goto cleanup_and_fail;
+        }
+        if (FAILED((result = dev->GetId(&devid))))
+        {
+            OsLayerError("ERROR: %S(%u): Unable to retrieve audio capture device ID (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+            devps->Release();
+            dev->Release();
+            goto cleanup_and_fail;
+        }
+        if (FAILED((result = devps->GetValue(PKEY_Device_FriendlyName, &devnv))))
+        {
+            OsLayerError("ERROR: %S(%u): Unable to retrieve device name for audio capture device (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+            CoTaskMemFree(devid);
+            devps->Release();
+            dev->Release();
+            goto cleanup_and_fail;
+        }
+        // note that the lengths returned by StringCchLength do not include the trailing zero character.
+        StringCchLengthW(devid        , STRSAFE_MAX_CCH, &idlen);
+        StringCchLengthW(devnv.pwszVal, STRSAFE_MAX_CCH, &fnlen);
+        if ((device_list->CaptureDeviceId  [i] = OsMemoryArenaAllocateArray<WCHAR>(arena, idlen+1)) == NULL ||
+            (device_list->CaptureDeviceName[i] = OsMemoryArenaAllocateArray<WCHAR>(arena, fnlen+1)) == NULL)
+        {
+            OsLayerError("ERROR: %S(%u): Unable to allocate string memory for audio capture device properties.\n", __FUNCTION__, GetCurrentThreadId());
+            PropVariantClear(&devnv);
+            CoTaskMemFree(devid);
+            devps->Release();
+            dev->Release();
+        }
+        StringCchCopyExW(device_list->CaptureDeviceId  [i], idlen+1, devid, NULL, NULL, STRSAFE_IGNORE_NULLS);
+        StringCchCopyExW(device_list->CaptureDeviceName[i], fnlen+1, devnv.pwszVal, NULL, NULL, STRSAFE_IGNORE_NULLS);
+        // clean up all of the allocations made by COM.
+        PropVariantClear(&devnv);
+        CoTaskMemFree(devid);
+        devps->Release();
+        dev->Release();
+    }
+    
+    // release the device collection interfaces, which are no longer needed.
+    if (capdev_list != NULL) capdev_list->Release();
+    if (outdev_list != NULL) outdev_list->Release();
+    return 0;
+
+cleanup_and_fail:
+    ZeroMemory(device_list , sizeof(OS_AUDIO_DEVICE_LIST));
+    if (capdev_list != NULL) capdev_list->Release();
+    if (outdev_list != NULL) outdev_list->Release();
+    OsMemoryArenaResetToMarker(arena, marker);
+    return -1;
+}
+
+/// @summary Disables any active audio output device.
+/// @param audio_system The audio system on which the output device will be disabled.
+public_function void
+OsDisableAudioOutput
+(
+    OS_AUDIO_SYSTEM *audio_system
+)
+{
+    if (audio_system->AudioOutputEnabled)
+    {
+        OS_AUDIO_OUTPUT_DEVICE *dev = &audio_system->ActiveOutputDevice;
+        if (dev->RenderClient != NULL)
+        {
+            dev->RenderClient->Release();
+            dev->RenderClient = NULL;
+        }
+        if (dev->AudioClock != NULL)
+        {
+            dev->AudioClock->Release();
+            dev->AudioClock = NULL;
+        }
+        if (dev->AudioClient != NULL)
+        {
+            dev->AudioClient->Stop();
+            dev->AudioClient->Release();
+            dev->AudioClient = NULL;
+        }
+        if (dev->Device != NULL)
+        {
+            dev->Device->Release();
+            dev->Device = NULL;
+        }
+        ZeroMemory(dev, sizeof(OS_AUDIO_OUTPUT_DEVICE));
+        audio_system->AudioOutputEnabled = false;
+    }
+}
+
+/// @summary Selects and enables an audio device for audio output.
+/// @param audio_system The audio system on which the output device will be enabled.
+/// @param device_id A zero-terminated string uniquely identifying the output device to enable.
+/// @param samples_per_second The audio data sample rate, in Hertz.
+/// @param buffer_size The size of the audio buffer, in samples.
+/// @return Zero if the audio output device is enabled, or -1 if an error occurred.
+public_function int
+OsEnableAudioOutput
+(
+    OS_AUDIO_SYSTEM    *audio_system,
+    WCHAR                 *device_id,
+    uint32_t      samples_per_second, 
+    uint32_t             buffer_size
+)
+{
+    REFERENCE_TIME  buffer_100ns = 0;
+    IMMDeviceEnumerator *devenum = audio_system->DeviceEnumerator;
+    IMMDevice               *dev = NULL;
+    IAudioClient         *client = NULL;
+    IAudioRenderClient *renderer = NULL;
+    IAudioClock           *clock = NULL;
+    HRESULT               result = S_OK;
+    uint32_t         frame_count = 0;
+    WAVEFORMATEXTENSIBLE  format = {};
+
+    // retrieve an interface to the audio device, and use that to retrieve an IAudioClient.
+    if (FAILED((result = devenum->GetDevice(device_id, &dev))))
+    {
+        OsLayerError("ERROR: %S(%u): Unable to retrieve audio output device %s (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), device_id, result);
+        goto cleanup_and_fail;
+    }
+    if (FAILED((result = dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, (void**) &client))))
+    {
+        OsLayerError("ERROR: %S(%u): Unable to retrieve IAudioClient interface from output device %s (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), device_id, result);
+        goto cleanup_and_fail;
+    }
+
+    // set the buffer format and size desired by the application.
+    format.Format.cbSize               = sizeof(WAVEFORMATEXTENSIBLE);
+    format.Format.wFormatTag           = WAVE_FORMAT_EXTENSIBLE;
+    format.Format.wBitsPerSample       = 16; // 16-bit audio
+    format.Format.nChannels            = 2;  // stereo
+    format.Format.nSamplesPerSec       = samples_per_second;
+    format.Format.nBlockAlign          =(WORD) (format.Format.nChannels * format.Format.wBitsPerSample / 8);
+    format.Format.nAvgBytesPerSec      = format.Format.nSamplesPerSec   * format.Format.nBlockAlign;
+    format.Samples.wValidBitsPerSample = 16;
+    format.dwChannelMask               = KSAUDIO_SPEAKER_STEREO;
+    format.SubFormat                   = KSDATAFORMAT_SUBTYPE_PCM;
+    buffer_100ns                       = 10000000ULL * buffer_size / samples_per_second;
+    if (FAILED((result = client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_NOPERSIST, buffer_100ns, 0, &format.Format, NULL))))
+    {
+        OsLayerError("ERROR: %S(%u): Unable to initialize the audio client for output device %s (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), device_id, result);
+        goto cleanup_and_fail;
+    }
+
+    // retrieve the rendering and clock services from the audio client.
+    if (FAILED((result = client->GetService(IID_PPV_ARGS(&renderer)))))
+    {
+        OsLayerError("ERROR: %S(%u): Unable to retrieve the IAudioRendererClient for output device %s (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), device_id, result);
+        goto cleanup_and_fail;
+    }
+    if (FAILED((result = client->GetService(IID_PPV_ARGS(&clock)))))
+    {
+        OsLayerError("ERROR: %S(%u): Unable to retrieve the IAudioClock for output device %s (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), device_id, result);
+        goto cleanup_and_fail;
+    }
+
+    // retrieve the actual size of the audio buffer.
+    if (FAILED((result = client->GetBufferSize(&frame_count))))
+    {
+        OsLayerError("ERROR: %S(%u): Unable to retrieve audio output buffer size for output device %s (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), device_id, result);
+        goto cleanup_and_fail;
+    }
+
+    // finally, start the audio session.
+    if (FAILED((result = client->Start())))
+    {
+        OsLayerError("ERROR: %S(%u): Unable to start the audio output session for device %s (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), device_id, result);
+        goto cleanup_and_fail;
+    }
+
+    // save the necessary data on the output device.
+    audio_system->ActiveOutputDevice.Device                   = dev;
+    audio_system->ActiveOutputDevice.AudioClient              = client;
+    audio_system->ActiveOutputDevice.RenderClient             = renderer;
+    audio_system->ActiveOutputDevice.AudioClock               = clock;
+    audio_system->ActiveOutputDevice.RequestedBufferSize      = buffer_size;
+    audio_system->ActiveOutputDevice.ActualBufferSize         = frame_count;
+    audio_system->ActiveOutputDevice.SamplesPerSecond         = samples_per_second;
+    CopyMemory(&audio_system->ActiveOutputDevice.AudioFormat  , &format, sizeof(WAVEFORMATEXTENSIBLE));
+    StringCchCopyExW(audio_system->ActiveOutputDevice.DeviceId, OS_AUDIO_OUTPUT_DEVICE::MAX_DEVICE_ID, device_id, NULL, NULL, STRSAFE_IGNORE_NULLS);
+    audio_system->AudioOutputEnabled = true;
+    return 0;
+
+cleanup_and_fail:
+    ZeroMemory(&audio_system->ActiveOutputDevice, sizeof(OS_AUDIO_OUTPUT_DEVICE));
+    if (clock    != NULL) clock->Release();
+    if (renderer != NULL) renderer->Release();
+    if (client   != NULL) client->Release();
+    if (dev      != NULL) dev->Release();
+    return -1;
+}
+
+/// @summary Attempt to recover a lost audio output device by destroying the device interfaces and recreating them.
+/// @param audio_system The OS_AUDIO_SYSTEM managing the lost output device.
+/// @return Zero if the lost device was recovered (or audio output is disabled), or -1 if an error occurred.
+public_function int
+OsRecoverLostAudioOutputDevice
+(
+    OS_AUDIO_SYSTEM *audio_system
+)
+{
+    REFERENCE_TIME  buffer_100ns = 0;
+    OS_AUDIO_OUTPUT_DEVICE *adev =&audio_system->ActiveOutputDevice;
+    IMMDeviceEnumerator *devenum = audio_system->DeviceEnumerator;
+    IMMDevice               *dev = NULL;
+    IAudioClient         *client = NULL;
+    IAudioRenderClient *renderer = NULL;
+    IAudioClock           *clock = NULL;
+    WCHAR             *device_id = audio_system->ActiveOutputDevice.DeviceId;
+    HRESULT               result = S_OK;
+    uint32_t         frame_count = 0;
+
+    if (audio_system->AudioOutputEnabled == false)
+    {   // no audio output is enabled, so there's nothing to do.
+        return 0;
+    }
+
+    // release all of the existing interfaces to start from a clean slate.
+    if (adev->RenderClient != NULL)
+    {
+        adev->RenderClient->Release();
+        adev->RenderClient = NULL;
+    }
+    if (adev->AudioClock != NULL)
+    {
+        adev->AudioClock->Release();
+        adev->AudioClock = NULL;
+    }
+    if (adev->AudioClient != NULL)
+    {
+        adev->AudioClient->Stop();
+        adev->AudioClient->Release();
+        adev->AudioClient = NULL;
+    }
+    if (adev->Device != NULL)
+    {
+        adev->Device->Release();
+        adev->Device = NULL;
+    }
+
+    // retrieve an interface to the audio device, and use that to retrieve an IAudioClient.
+    if (FAILED((result = devenum->GetDevice(device_id, &dev))))
+    {
+        OsLayerError("ERROR: %S(%u): Unable to retrieve audio output device %s (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), device_id, result);
+        goto cleanup_and_fail;
+    }
+    if (FAILED((result = dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, (void**) &client))))
+    {
+        OsLayerError("ERROR: %S(%u): Unable to retrieve IAudioClient interface from output device %s (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), device_id, result);
+        goto cleanup_and_fail;
+    }
+
+    // set the buffer format and size desired by the application.
+    buffer_100ns = 10000000ULL * adev->RequestedBufferSize / adev->SamplesPerSecond;
+    if (FAILED((result = client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_NOPERSIST, buffer_100ns, 0, &adev->AudioFormat.Format, NULL))))
+    {
+        OsLayerError("ERROR: %S(%u): Unable to initialize the audio client for output device %s (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), device_id, result);
+        goto cleanup_and_fail;
+    }
+
+    // retrieve the rendering and clock services from the audio client.
+    if (FAILED((result = client->GetService(IID_PPV_ARGS(&renderer)))))
+    {
+        OsLayerError("ERROR: %S(%u): Unable to retrieve the IAudioRendererClient for output device %s (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), device_id, result);
+        goto cleanup_and_fail;
+    }
+    if (FAILED((result = client->GetService(IID_PPV_ARGS(&clock)))))
+    {
+        OsLayerError("ERROR: %S(%u): Unable to retrieve the IAudioClock for output device %s (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), device_id, result);
+        goto cleanup_and_fail;
+    }
+
+    // retrieve the actual size of the audio buffer.
+    if (FAILED((result = client->GetBufferSize(&frame_count))))
+    {
+        OsLayerError("ERROR: %S(%u): Unable to retrieve audio output buffer size for output device %s (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), device_id, result);
+        goto cleanup_and_fail;
+    }
+
+    // finally, start the audio session.
+    if (FAILED((result = client->Start())))
+    {
+        OsLayerError("ERROR: %S(%u): Unable to start the audio output session for device %s (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), device_id, result);
+        goto cleanup_and_fail;
+    }
+
+    // save the necessary data on the output device.
+    audio_system->ActiveOutputDevice.Device           = dev;
+    audio_system->ActiveOutputDevice.AudioClient      = client;
+    audio_system->ActiveOutputDevice.RenderClient     = renderer;
+    audio_system->ActiveOutputDevice.AudioClock       = clock;
+    audio_system->ActiveOutputDevice.ActualBufferSize = frame_count;
+    return 0;
+
+cleanup_and_fail:
+    if (clock    != NULL) clock->Release();
+    if (renderer != NULL) renderer->Release();
+    if (client   != NULL) client->Release();
+    if (dev      != NULL) dev->Release();
+    return -1;
+}
+
+/// @summary Query the active audio output device for the number of samples that can be written to the audio buffer.
+/// @param audio_system The OS_AUDIO_SYSTEM managing the output device to query.
+/// @return The number of samples that can be written to the audio output device.
+public_function uint32_t
+OsAudioSamplesToWrite
+(
+    OS_AUDIO_SYSTEM *audio_system
+)
+{
+    IAudioClient *client = audio_system->ActiveOutputDevice.AudioClient;
+    HRESULT       result = S_OK;
+    uint32_t  pad_frames = 0;
+    uint32_t  sample_cnt = 0;
+    uint32_t buffer_size = audio_system->ActiveOutputDevice.ActualBufferSize;
+
+    if (audio_system->AudioOutputEnabled == false || client == NULL)
+    {   // there's no audio output enabled, so no data can be written.
+        return 0;
+    }
+    if (FAILED((result = client->GetCurrentPadding(&pad_frames))))
+    {   // TODO(rlk): handle lost devices, etc.
+        return 0;
+    }
+    // the number of samples to write is buffer_size - pad_frames.
+    if ((sample_cnt = buffer_size - pad_frames) > buffer_size)
+    {   // clamp to the actual size of the buffer returned by the device.
+        sample_cnt = buffer_size;
+    }
+    return sample_cnt;
+}
+
+/// @summary Write audio data to the active output device.
+/// @param audio_system The OS_AUDIO_SYSTEM managing the output device.
+/// @param sample_data The sample data to write, in 16-bit stereo format.
+/// @param sample_count The number of samples to copy from @a sample_data into the device audio buffer.
+/// @return Zero if the data was written successfully, or -1 if an error occurred.
+public_function int
+OsWriteAudioSamples
+(   
+    OS_AUDIO_SYSTEM *audio_system, 
+    void     const   *sample_data,
+    uint32_t const    sample_count
+)
+{
+    IAudioRenderClient *client = audio_system->ActiveOutputDevice.RenderClient;
+    HRESULT             result = S_OK;
+    uint8_t            *buffer = NULL;
+
+    if (audio_system->AudioOutputEnabled == false || client == NULL)
+    {   // there's no audio output enabled, so just return.
+        return 0;
+    }
+    if (FAILED((result = client->GetBuffer(sample_count, &buffer))))
+    {   // TODO(rlk): handle a lost device here.
+        return -1;
+    }
+    // copy the data to the audio device buffer.
+    CopyMemory(buffer, sample_data, 2 * sample_count * sizeof(uint16_t));
+    if (FAILED((result = client->ReleaseBuffer(sample_count, 0))))
+    {   // TODO(rlk): handle a lost device here.
+    }
+    return 0;
 }
 
