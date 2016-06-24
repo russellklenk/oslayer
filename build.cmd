@@ -19,7 +19,7 @@ SET DEFINES_RELEASE=/D WINVER=0x0601 /D _WIN32_WINNT=0x0601 /D UNICODE /D _UNICO
 SET CPPFLAGS_RELEASE=%INCLUDES% /FC /nologo /W4 /WX /wd4505 /Zi /EHsc /Ob2it
 SET LINKFLAGS_RELEASE=/MT
 
-SET LIBRARIES=User32.lib Gdi32.lib Shell32.lib Advapi32.lib winmm.lib
+SET LIBRARIES=User32.lib Gdi32.lib Shell32.lib Advapi32.lib Ole32.lib winmm.lib
 
 IF [%1] NEQ [] (
     IF "%1" == "debug" (
@@ -49,6 +49,7 @@ PUSHD %OUTPUTDIR%
 cl %CPPFLAGS% ..\main.cc %DEFINES% %LIBRARIES% %LNKFLAGS% /Feoslayer.exe
 cl %CPPFLAGS% ..\threadpool.cc %DEFINES% %LIBRARIES% %LNKFLAGS% /Fethreadpool.exe
 cl %CPPFLAGS% ..\vulkan.cc %DEFINES% %LIBRARIES% %LNKFLAGS% /Fevulkan.exe
+cl %CPPFLAGS% ..\audio.cc %DEFINES% %LIBRARIES% %LNKFLAGS% /Feaudio.exe
 POPD
 
 @ECHO Build complete.
