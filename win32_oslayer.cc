@@ -289,6 +289,9 @@ struct OS_WORKER_THREAD;
 struct OS_THREAD_POOL;
 struct OS_THREAD_POOL_INIT;
 
+struct OS_VFS_FILE;
+struct OS_VFS_MOUNT;
+
 struct OS_INPUT_SYSTEM;
 struct OS_INPUT_EVENTS;
 struct OS_POINTER_EVENTS;
@@ -420,6 +423,15 @@ struct OS_THREAD_POOL_INIT
     size_t              ArenaSize;                   /// The size of the per-thread memory arena, in bytes.
     uint32_t            NUMAGroup;                   /// The zero-based index of the NUMA processor group on which the worker threads will be scheduled. Set to 0.
 };
+
+/// @summary Synchronously open a file for access. The information necessary to access the file is written to @a file.
+/// @param mount The mount point performing the file open operation.
+/// @param path The zero-terminated UTF-8 path of the file to open, relative to the mount point root.
+/// @param usage One of OS_VFS_USAGE specifying the intended use of the file by the application.
+/// @param hints One or more of OS_VFS_USAGE_HINTS specifying additional desired behaviors.
+/// @param file If the call returns OS_VFS_RESULT_SUCCESS, this structure should be populated with file data.
+/// @return One of OS_VFS_RESULT indicating the result of the operation.
+typedef int           (*OS_VFS_OPEN_FILE)(OS_VFS_MOUNT *mount, char const *path, int usage, uint32_t hints, OS_VFS_FILE *file);
 
 /// @summary Define the data associated with keyboard state.
 struct OS_KEYBOARD_STATE
@@ -834,6 +846,64 @@ enum OS_WORKER_THREAD_WAKE_REASON    : int
     OS_WORKER_THREAD_WAKE_FOR_ERROR  = 3,            /// The thread was woken because of an error in GetQueuedCompletionStatus.
 };
 
+/// @summary Define the recognized categories of virtual file system mount points.
+enum OS_VFS_MOUNT_TYPE               : int32_t
+{
+    OS_VFS_MOUNT_TYPE_DIRECTORY      = 0,            /// The mount point is a directory on the filesystem.
+    OS_VFS_MOUNT_TYPE_ARCHIVE        = 1,            /// The mount point is an archive file (like a TAR.)
+    OS_VFS_MOUNT_TYPE_COUNT          = 2,            /// The number of recognized virtual file system mount point types.
+};
+
+/// @summary Define the recognized types of virtual file system entities.
+enum OS_VFS_ENTRY_TYPE               : int32_t
+{
+    OS_VFS_ENTRY_TYPE_UNKNOWN        = 0,            /// The entry type is not yet known or could not be determined.
+    OS_VFS_ENTRY_TYPE_FILE           = 1,            /// The entry is a regular file.
+    OS_VFS_ENTRY_TYPE_DIRECTORY      = 2,            /// The entry is a regular directory.
+    OS_VFS_ENTRY_TYPE_ALIAS          = 3,            /// The entry is an alias to another file or directory.
+    OS_VFS_ENTRY_TYPE_IGNORE         = 4,            /// The entry exists, but should be ignored.
+    OS_VFS_ENTRY_TYPE_COUNT          = 5,            /// The number of recognized virtual file system entity types.
+};
+
+/// @summary Define the recognized usage types for file I/O, which in turn define the access and sharing modes.
+enum OS_VFS_USAGE                    : int
+{
+    OS_VFS_USAGE_STREAM_IN           = 0,            /// The file will be streamed in to memory and then closed (read-only.)
+    OS_VFS_USAGE_STREAM_OUT          = 1,            /// The file will be streamed out to disk and then closed (write-only.)
+    OS_VFS_USAGE_MMAP_READ           = 2,            /// The file (or portions of the file) will be read-only using memory-mapped I/O.
+    OS_VFS_USAGE_MMAP_WRITE          = 3,            /// The file will be write-only using memory-mapped I/O.
+    OS_VFS_USAGE_MANUAL_IO           = 4,            /// The file will be opened for reading and writing using manual I/O.
+};
+
+/// @summary Define the return codes for virtual file system operations executed by a VFS mountpoint driver.
+enum OS_VFS_RESULT                   : int
+{
+    OS_VFS_RESULT_SUCCESS            = 0,            /// The virtual file system operation completed successfully.
+    OS_VFS_RESULT_NOT_SUPPORTED      = 1,            /// The virtual file system operation is not supported by the mountpoint driver.
+    OS_VFS_RESULT_OSERROR            = 2,            /// The virtual file system operation failed due to an operating system error.
+};
+
+/// @summary Defines identifiers for special well-known directories.
+enum OS_KNOWN_PATH                   : int
+{
+    OS_KNOWN_PATH_EXECUTABLE         = 0,            /// The absolute path to the current executable, without filename.
+    OS_KNOWN_PATH_USER_HOME          = 1,            /// The absolute path to the user's home directory.
+    OS_KNOWN_PATH_USER_DESKTOP       = 2,            /// The absolute path to the user's desktop directory.
+    OS_KNOWN_PATH_USER_DOCUMENTS     = 3,            /// The absolute path to the user's documents directory.
+    OS_KNOWN_PATH_USER_DOWNLOADS     = 4,            /// The absolute path to the user's downloads directory.
+    OS_KNOWN_PATH_USER_MUSIC         = 5,            /// The absolute path to the user's music directory.
+    OS_KNOWN_PATH_USER_PICTURES      = 6,            /// The absolute path to the user's pictures directory.
+    OS_KNOWN_PATH_USER_SAVE_GAMES    = 7,            /// The absolute path to the user's save games directory.
+    OS_KNOWN_PATH_USER_VIDEOS        = 8,            /// The absolute path to the user's videos directory.
+    OS_KNOWN_PATH_USER_PREFERENCES   = 9,            /// The absolute path to the user's preferences directory.
+    OS_KNOWN_PATH_PUBLIC_DOCUMENTS   = 10,           /// The absolute path to the public documents directory.
+    OS_KNOWN_PATH_PUBLIC_DOWNLOADS   = 11,           /// The absolute path to the public downloads directory.
+    OS_KNOWN_PATH_PUBLIC_MUSIC       = 12,           /// The absolute path to the public music directory.
+    OS_KNOWN_PATH_PUBLIC_PICTURES    = 13,           /// The absolute path to the public pictures directory.
+    OS_KNOWN_PATH_PUBLIC_VIDEOS      = 14,           /// The absolute path to the public videos directory.
+    OS_KNOWN_PATH_SYSTEM_FONTS       = 15,           /// The absolute path to the system fonts directory.
+};
+
 /// @summary Define the possible result codes returned by OsCreateVulkanLoader.
 enum OS_VULKAN_LOADER_RESULT         : int
 {
@@ -842,6 +912,16 @@ enum OS_VULKAN_LOADER_RESULT         : int
     OS_VULKAN_LOADER_RESULT_NOMEMORY =-2,            /// The supplied memory arena does not have sufficient space.
     OS_VULKAN_LOADER_RESULT_NOENTRY  =-3,            /// One or more required Vulkan API entry points are missing.
     OS_VULKAN_LOADER_RESULT_VKERROR  =-4,            /// A Vulkan API call returned an error.
+};
+
+/// @summary Define flags used to optimize file accesses for a particular usage scenario.
+enum OS_VFS_USAGE_HINTS              : uint32_t
+{
+    OS_VFS_USAGE_HINT_NONE           = (0 << 0),     /// No special usage hints are specified.
+    OS_VFS_USAGE_HINT_UNBUFFERED     = (1 << 0),     /// Prefer to perform I/O that bypasses the system file cache.
+    OS_VFS_USAGE_HINT_ASYNCHRONOUS   = (1 << 1),     /// All read or write I/O operations will be performed asynchronously.
+    OS_VFS_USAGE_HINT_OVERWRITE      = (1 << 2),     /// If the file exists, the existing contents will be overwritten.
+    OS_VFS_USAGE_HINT_MMAP_FILE      = (1 << 3),     /// When specified with OS_VFS_USAGE_MMAP, map the entire file contents.
 };
 
 /// @summary Define flags indicating how to interpret WIN32_POINTER_STATE::Relative.
@@ -5412,4 +5492,9 @@ OsWriteAudioSamples
     }
     return 0;
 }
+
+// start with VFS implementation. know that we want to support prioritized ASIO.
+// each op has callback to run when complete.
+// to integrate with task system, allocate task handle for pseudo-task, in ASIO
+// completion callback, complete task (on ASIO thread, so must be fast!)
 
