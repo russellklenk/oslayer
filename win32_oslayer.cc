@@ -290,8 +290,9 @@ struct OS_WORKER_THREAD;
 struct OS_THREAD_POOL;
 struct OS_THREAD_POOL_INIT;
 
-struct OS_VFS_FILE;
-struct OS_VFS_MOUNT;
+struct OS_FILE;
+struct OS_MOUNTPOINT;
+struct OS_FILE_REGION;
 
 struct OS_INPUT_SYSTEM;
 struct OS_INPUT_EVENTS;
@@ -481,32 +482,32 @@ struct OS_TARBALL
 /// @summary Define the signature for the callback invoked to synchronously open a file for access. The information necessary to access the file is written to @a file.
 /// @param mount The mount point performing the file open operation.
 /// @param path The zero-terminated UTF-8 path of the file to open, relative to the mount point root.
-/// @param usage One of OS_VFS_USAGE specifying the intended use of the file by the application.
-/// @param hints One or more of OS_VFS_USAGE_HINTS specifying additional desired behaviors.
-/// @param file If the call returns OS_VFS_RESULT_SUCCESS, this structure should be populated with file data.
-/// @return One of OS_VFS_RESULT indicating the result of the operation.
-typedef int           (*OS_VFS_OPEN_FILE)(OS_VFS_MOUNT *mount, char const *path, int usage, uint32_t hints, OS_VFS_FILE *file);
+/// @param usage One of OS_FILE_USAGE specifying the intended use of the file by the application.
+/// @param hints One or more of OS_FILE_USAGE_HINTS specifying additional desired behaviors.
+/// @param file If the call returns OS_IO_RESULT_SUCCESS, this structure should be populated with file data.
+/// @return One of OS_IO_RESULT indicating the result of the operation.
+typedef int           (*OS_OPEN_FILE)(OS_MOUNTPOINT *mount, char const *path, int usage, uint32_t hints, OS_FILE *file);
 
 /// @summary Define the signature for the callback invoked to synchronously write an entire file to disk. If the file exists, its contents are overwritten; otherwise, a new file is created.
 /// @param mount The mount point performing the file save operation.
 /// @param path The zero-terminated UTF-8 path of the file to write, relative to the mount point root.
 /// @param data The buffer containing the data to write to the file.
 /// @param file_size The number of bytes to read from the data buffer and write to the file.
-/// @return One of OS_VFS_RESULT indicating the result of the operation.
-typedef int           (*OS_VFS_SAVE_FILE)(OS_VFS_MOUNT *mount, char const *path, void const *data, int64_t const file_size);
+/// @return One of OS_IO_RESULT indicating the result of the operation.
+typedef int           (*OS_SAVE_FILE)(OS_MOUNTPOINT *mount, char const *path, void const *data, int64_t const file_size);
 
 /// @summary Define the signature for the callback invoked to determine whether a given mount point supports a particular type of file access.
 /// @param mount The mount point to query.
-/// @param usage One of OS_VFS_USAGE specifying the intended use of the file by the application.
-/// @return OS_VFS_RESULT_SUCCESS if the usage is supported, or OS_VFS_RESULT_NOT_SUPPORTED.
-typedef int           (*OS_VFS_SUPPORT_USE)(OS_VFS_MOUNT *mount, int usage);
+/// @param usage One of OS_FILE_USAGE specifying the intended use of the file by the application.
+/// @return OS_IO_RESULT_SUCCESS if the usage is supported, or OS_IO_RESULT_NOT_SUPPORTED.
+typedef int           (*OS_MOUNT_SUPPORT)(OS_MOUNTPOINT *mount, int usage);
 
 /// @summary Define the signature for the callback invoked when a mount point is being removed.
 /// @param mount The mount point being unmounted.
-typedef void          (*OS_VFS_UNMOUNT)(OS_VFS_MOUNT *mount);
+typedef void          (*OS_UNMOUNT)(OS_MOUNTPOINT *mount);
 
 /// @summary Defines the data associated with an open file. This information is populated by the mount point.
-struct OS_VFS_FILE
+struct OS_FILE
 {
     HANDLE              Filedes;                     /// The handle used to access the file.
     HANDLE              Filemap;                     /// The handle representing the file mapping, for memory-mapped files.
@@ -514,50 +515,52 @@ struct OS_VFS_FILE
     int64_t             BaseOffset;                  /// The offset of the start of the file data, in butes.
     int64_t             BaseSize;                    /// The size of the file data, in bytes, as stored.
     int64_t             FileSize;                    /// The runtime size of the file data, in bytes. For non-compressed files, BaseSize and FileSize are the same.
-    uint32_t            FileHints;                   /// One or more of OS_VFS_USAGE_HINTS.
+    uint32_t            FileHints;                   /// One or more of OS_FILE_USAGE_HINTS.
     uint32_t            FileFlags;                   /// Reserved for future use. Set to 0.
     DWORD               OSError;                     /// The most recent operating system error reported when accessing the file.
     DWORD               OpenFlags;                   /// The open mode flags used to open the file handle. See MSDN for CreateFile.
 };
 
+/// @summary Defines the data associated with a memory-mapped region of a file.
+struct OS_FILE_REGION
+{
+    int64_t             BaseOffset;                  /// The zero-based offset from the start of the file at which the mapped region begins. This is always a multiple of the system allocation granularity.
+    uint8_t            *SystemBase;                  /// The pointer to the start of the mapped region, aligned to the system allocation granularity.
+    uint8_t            *UserBase;                    /// The pointer to the start of the mapped region requested by the user.
+    int64_t             RegionSize;                  /// The number of bytes mapped, starting at UserBase.
+};
+
 /// @summary Define the data associated with a mountpoint, which represents a single mounted file system within the larger virtualized file system.
 /// The file system could be represented by a local directory, a remote directory, or an archive file.
-struct OS_VFS_MOUNT
+struct OS_MOUNTPOINT
 {
     uintptr_t           Id;                          /// The application-defined mount point identifier.
     char               *Root;                        /// The mount point name exposed to the VFS, such as "/exec".
     size_t              RootLength;                  /// The length of the mount point name, in bytes.
-    void               *StateData;                   /// A pointer to opaque mountpoint-specific data.
-    OS_VFS_OPEN_FILE    OpenFile;                    /// The callback used to open a file for access.
-    OS_VFS_SAVE_FILE    SaveFile;                    /// The callback used to save a file to disk.
-    OS_VFS_SUPPORT_USE  SupportsUsage;               /// The callback used to determine whether the mountpoint supports a given file usage.
-    OS_VFS_UNMOUNT      Unmount;                     /// The callback used to clean up mountpoint-specific data when the mount point is removed.
-};
-
-/// @summary Defines the data associated with a filesystem mount point, rooted in a specific directory on a local or remote disk.
-struct OS_VFS_MOUNT_FS
-{
     size_t              LocalPathLength;             /// The length of the LocalPath string, in characters.
-    WCHAR              *LocalPath;                   /// The fully-resolved absolute path of the mount point root.
+    WCHAR              *LocalPath;                   /// The fully-resolved absolute path of the backing directory or file.
+    void               *StateData;                   /// A pointer to opaque mountpoint-specific data.
+    OS_OPEN_FILE        OpenFile;                    /// The callback used to open a file for access.
+    OS_SAVE_FILE        SaveFile;                    /// The callback used to save a file to disk.
+    OS_MOUNT_SUPPORT    SupportsUsage;               /// The callback used to determine whether the mountpoint supports a given file usage.
+    OS_UNMOUNT          Unmount;                     /// The callback used to clean up mountpoint-specific data when the mount point is removed.
 };
 
 /// @summary Defines the internal state data associated with a tarball mount point.
-struct OS_VFS_MOUNT_TAR
+struct OS_MOUNTPOINT_TAR
 {
     HANDLE              TarFiledes;                  /// The file descriptor for the tarball. Duplicated for each opened file.
     size_t              SectorSize;                  /// The physical disk sector size, in bytes.
-    size_t              LocalPathLength;             /// The number of characters that make up the LocalPath string.
-    WCHAR              *LocalPath;                   /// The fully-resolved absolute path of the TAR file.
     OS_TARBALL          TarballData;                 /// The parsed entry data for all regular files.
 };
 
 /// @summary Define the data associated with a prioritized set of mount points. Items can be iterated over in priority order. Multiple mount points can be defined at the same root location, but with different priorities.
-struct OS_VFS_MOUNT_TABLE
+struct OS_MOUNTPOINT_TABLE
 {
     size_t              Count;                       /// The number of mountpoints defined in the table.
     size_t              Capacity;                    /// The capacity of the mount point table. The capacity is fixed.
     uintptr_t          *MountpointIds;               /// The set of application-defined unique mount point identifiers.
-    OS_VFS_MOUNT       *MountpointData;              /// The set of mount point data and callback functions.
+    OS_MOUNTPOINT      *MountpointData;              /// The set of mount point data and callback functions.
     uint32_t           *MountpointPriority;          /// The set of mount point priority values.
 };
 
@@ -565,7 +568,9 @@ struct OS_VFS_MOUNT_TABLE
 struct OS_FILE_SYSTEM
 {
     SRWLOCK             MountpointLock;              /// A reader-writer lock protecting access to the mountpoint table.
-    OS_VFS_MOUNT_TABLE  MountpointTable;             /// A table of mount points stored in priority order.
+    OS_MOUNTPOINT_TABLE MountpointTable;             /// A table of mount points stored in priority order.
+    DWORD               PageSize;                    /// The operating system page size, in bytes.
+    DWORD               AllocationGranularity;       /// The operating system allocation granularity, in bytes.
     // ...
 };
 
@@ -990,41 +995,41 @@ enum OS_WORKER_THREAD_WAKE_REASON    : int
     OS_WORKER_THREAD_WAKE_FOR_ERROR  = 3,            /// The thread was woken because of an error in GetQueuedCompletionStatus.
 };
 
-/// @summary Define the recognized categories of virtual file system mount points.
-enum OS_VFS_MOUNT_TYPE               : int32_t
+/// @summary Define the recognized categories of file system mount points.
+enum OS_MOUNTPOINT_TYPE              : int32_t
 {
-    OS_VFS_MOUNT_TYPE_DIRECTORY      = 0,            /// The mount point is a directory on the filesystem.
-    OS_VFS_MOUNT_TYPE_ARCHIVE        = 1,            /// The mount point is an archive file (like a TAR.)
-    OS_VFS_MOUNT_TYPE_COUNT          = 2,            /// The number of recognized virtual file system mount point types.
+    OS_MOUNTPOINT_TYPE_DIRECTORY     = 0,            /// The mount point is a directory on the filesystem.
+    OS_MOUNTPOINT_TYPE_ARCHIVE       = 1,            /// The mount point is an archive file (like a TAR.)
+    OS_MOUNTPOINT_TYPE_COUNT         = 2,            /// The number of recognized virtual file system mount point types.
 };
 
-/// @summary Define the recognized types of virtual file system entities.
-enum OS_VFS_ENTRY_TYPE               : int32_t
+/// @summary Define the recognized types of file system entities.
+enum OS_FILE_ENTRY_TYPE              : int32_t
 {
-    OS_VFS_ENTRY_TYPE_UNKNOWN        = 0,            /// The entry type is not yet known or could not be determined.
-    OS_VFS_ENTRY_TYPE_FILE           = 1,            /// The entry is a regular file.
-    OS_VFS_ENTRY_TYPE_DIRECTORY      = 2,            /// The entry is a regular directory.
-    OS_VFS_ENTRY_TYPE_ALIAS          = 3,            /// The entry is an alias to another file or directory.
-    OS_VFS_ENTRY_TYPE_IGNORE         = 4,            /// The entry exists, but should be ignored.
-    OS_VFS_ENTRY_TYPE_COUNT          = 5,            /// The number of recognized virtual file system entity types.
+    OS_FILE_ENTRY_TYPE_UNKNOWN       = 0,            /// The entry type is not yet known or could not be determined.
+    OS_FILE_ENTRY_TYPE_FILE          = 1,            /// The entry is a regular file.
+    OS_FILE_ENTRY_TYPE_DIRECTORY     = 2,            /// The entry is a regular directory.
+    OS_FILE_ENTRY_TYPE_ALIAS         = 3,            /// The entry is an alias to another file or directory.
+    OS_FILE_ENTRY_TYPE_IGNORE        = 4,            /// The entry exists, but should be ignored.
+    OS_FILE_ENTRY_TYPE_COUNT         = 5,            /// The number of recognized virtual file system entity types.
 };
 
 /// @summary Define the recognized usage types for file I/O, which in turn define the access and sharing modes.
-enum OS_VFS_USAGE                    : int
+enum OS_FILE_USAGE                   : int
 {
-    OS_VFS_USAGE_STREAM_IN           = 0,            /// The file will be streamed in to memory and then closed (read-only.)
-    OS_VFS_USAGE_STREAM_OUT          = 1,            /// The file will be streamed out to disk and then closed (write-only.)
-    OS_VFS_USAGE_MMAP_READ           = 2,            /// The file (or portions of the file) will be read-only using memory-mapped I/O.
-    OS_VFS_USAGE_MMAP_WRITE          = 3,            /// The file will be write-only using memory-mapped I/O.
-    OS_VFS_USAGE_MANUAL_IO           = 4,            /// The file will be opened for reading and writing using manual I/O.
+    OS_FILE_USAGE_STREAM_IN          = 0,            /// The file will be streamed in to memory and then closed (read-only.)
+    OS_FILE_USAGE_STREAM_OUT         = 1,            /// The file will be streamed out to disk and then closed (write-only.)
+    OS_FILE_USAGE_MMAP_READ          = 2,            /// The file (or portions of the file) will be read-only using memory-mapped I/O.
+    OS_FILE_USAGE_MMAP_WRITE         = 3,            /// The file (or portions of the file) will be read+write using memory-mapped I/O.
+    OS_FILE_USAGE_MANUAL_IO          = 4,            /// The file will be opened for reading and writing using manual I/O.
 };
 
-/// @summary Define the return codes for virtual file system operations executed by a VFS mountpoint driver.
-enum OS_VFS_RESULT                   : int
+/// @summary Define the return codes for file system I/O operations.
+enum OS_IO_RESULT                    : int
 {
-    OS_VFS_RESULT_SUCCESS            = 0,            /// The virtual file system operation completed successfully.
-    OS_VFS_RESULT_NOT_SUPPORTED      = 1,            /// The virtual file system operation is not supported by the mountpoint driver.
-    OS_VFS_RESULT_OSERROR            = 2,            /// The virtual file system operation failed due to an operating system error.
+    OS_IO_RESULT_SUCCESS             = 0,            /// The I/O operation completed successfully.
+    OS_IO_RESULT_NOT_SUPPORTED       = 1,            /// The I/O system operation is not supported by the mountpoint driver.
+    OS_IO_RESULT_OSERROR             = 2,            /// The I/O operation failed due to an operating system error. Check OS_FILE::OSError.
 };
 
 /// @summary Defines the recognized types of entries in a tarball. Vendor extensions may additionally have a type 'A'-'Z'.
@@ -1074,13 +1079,12 @@ enum OS_VULKAN_LOADER_RESULT         : int
 };
 
 /// @summary Define flags used to optimize file accesses for a particular usage scenario.
-enum OS_VFS_USAGE_HINTS              : uint32_t
+enum OS_FILE_USAGE_HINTS             : uint32_t
 {
-    OS_VFS_USAGE_HINT_NONE           = (0 << 0),     /// No special usage hints are specified.
-    OS_VFS_USAGE_HINT_UNBUFFERED     = (1 << 0),     /// Prefer to perform I/O that bypasses the system file cache.
-    OS_VFS_USAGE_HINT_ASYNCHRONOUS   = (1 << 1),     /// All read or write I/O operations will be performed asynchronously.
-    OS_VFS_USAGE_HINT_OVERWRITE      = (1 << 2),     /// If the file exists, the existing contents will be overwritten.
-    OS_VFS_USAGE_HINT_MMAP_FILE      = (1 << 3),     /// When specified with OS_VFS_USAGE_MMAP, map the entire file contents.
+    OS_FILE_USAGE_HINT_NONE          = (0 << 0),     /// No special usage hints are specified.
+    OS_FILE_USAGE_HINT_UNBUFFERED    = (1 << 0),     /// Prefer to perform I/O that bypasses the system file cache.
+    OS_FILE_USAGE_HINT_ASYNCHRONOUS  = (1 << 1),     /// All read or write I/O operations will be performed asynchronously.
+    OS_FILE_USAGE_HINT_OVERWRITE     = (1 << 2),     /// If the file exists, the existing contents will be overwritten.
 };
 
 /// @summary Define flags indicating how to interpret WIN32_POINTER_STATE::Relative.
@@ -1237,6 +1241,96 @@ global_variable HMODULE    XInputDll = NULL;
 
 /// @summary The GUID of the Win32 OS Layer task profiler provider {349CE0E9-6DF5-4C25-AC5B-C84F529BC0CE}.
 global_variable GUID const TaskProfilerGUID = { 0x349ce0e9, 0x6df5, 0x4c25, { 0xac, 0x5b, 0xc8, 0x4f, 0x52, 0x9b, 0xc0, 0xce } };
+
+/*////////////////////////////
+//   Forward Declarations   //
+////////////////////////////*/
+public_function void              OsZeroMemory(void *dst, size_t len);
+public_function void              OsSecureZeroMemory(void *dst, size_t len);
+public_function void              OsCopyMemory(void * __restrict dst, void const * __restrict src, size_t len);
+public_function void              OsMoveMemory(void *dst, void const *src, size_t len);
+public_function void              OsFillMemory(void *dst, size_t len, uint8_t val);
+public_function size_t            OsAlignUp(size_t size, size_t pow2);
+public_function int               OsCreateMemoryArena(OS_MEMORY_ARENA *arena, size_t arena_size, bool commit_all, bool guard_page);
+public_function void              OsDeleteMemoryArena(OS_MEMORY_ARENA *arena);
+public_function size_t            OsMemoryArenaBytesReserved(OS_MEMORY_ARENA *arena);
+public_function size_t            OsMemoryArenaBytesUncommitted(OS_MEMORY_ARENA *arena);
+public_function size_t            OsMemoryArenaBytesCommitted(OS_MEMORY_ARENA *arena);
+public_function size_t            OsMemoryArenaBytesInActiveReservation(OS_MEMORY_ARENA *arena);
+public_function size_t            OsMemoryArenaPageSize(OS_MEMORY_ARENA *arena);
+public_function size_t            OsMemoryArenaSystemGranularity(OS_MEMORY_ARENA *arena);
+public_function bool              OsMemoryArenaCanSatisfyAllocation(OS_MEMORY_ARENA *arena, size_t alloc_size, size_t alloc_alignment);
+public_function void*             OsMemoryArenaAllocate(OS_MEMORY_ARENA *arena, size_t alloc_size, size_t alloc_alignment);
+public_function void*             OsMemoryArenaReserve(OS_MEMORY_ARENA *arena, size_t reserve_size, size_t alloc_alignment);
+public_function int               OsMemoryArenaCommit(OS_MEMORY_ARENA *arena, size_t commit_size);
+public_function void              OsMemoryArenaCancel(OS_MEMORY_ARENA *arena);
+public_function os_arena_marker_t OsMemoryArenaMark(OS_MEMORY_ARENA *arena);
+public_function void              OsMemoryArenaResetToMarker(OS_MEMORY_ARENA *arena, os_arena_marker_t arena_marker);
+public_function void              OsMemoryArenaReset(OS_MEMORY_ARENA *arena);
+public_function void              OsMemoryArenaDecommitToMarker(OS_MEMORY_ARENA *arena, os_arena_marker_t arena_marker);
+public_function void              OsMemoryArenaDecommit(OS_MEMORY_ARENA *arena);
+
+public_function uint64_t          OsTimestampInTicks(void);
+public_function uint64_t          OsTimestampInNanoseconds(void);
+public_function uint64_t          OsNanosecondSliceOfSecond(uint64_t fraction);
+public_function uint64_t          OsElapsedNanoseconds(uint64_t start_ticks, uint64_t end_ticks);
+public_function uint64_t          OsMillisecondsToNanoseconds(uint32_t milliseconds);
+public_function uint32_t          OsNanosecondsToWholeMillisecons(uint64_t nanoseconds);
+public_function bool              OsQueryHostCpuLayout(OS_CPU_INFO *cpu_info, OS_MEMORY_ARENA *arena);
+
+public_function uint32_t __cdecl  OsWorkerThreadMain(void *argp);
+public_function size_t            OsCalculateMemoryForThreadPool(size_t thread_count);
+public_function int               OsCreateThreadPool(OS_THREAD_POOL *pool, OS_THREAD_POOL_INIT *init, OS_MEMORY_ARENA *arena, char const *name);
+public_function void              OsLaunchThreadPool(OS_THREAD_POOL *pool);
+public_function void              OsTerminateThreadPool(OS_THREAD_POOL *pool);
+public_function void              OsDestroyThreadPool(OS_THREAD_POOL *pool);
+public_function bool              OsSignalWorkerThreads(OS_WORKER_THREAD *sender, uintptr_t signal_arg, size_t thread_count);
+public_function bool              OsSignalWorkerThreads(OS_THREAD_POOL *pool, uintptr_t signal_arg, size_t thread_count);
+
+public_function int               OsLoadTarball(OS_TARBALL *tar, HANDLE tarfd, DWORD result);
+public_function void              OsUnloadTarball(OS_TARBALL *tar);
+
+public_function void              OsResetInputSystem(OS_INPUT_SYSTEM *system);
+public_function void              OsPushRawInput(OS_INPUT_SYSTEM *system, RAWINPUT const *input);
+public_function void              OsPushRawInputDeviceChange(OS_INPUT_SYSTEM *system, WPARAM wparam, LPARAM lparam);
+public_function void              OsSimulateKeyPress(OS_INPUT_SYSTEM *system, HANDLE device, UINT virtual_key);
+public_function void              OsSimulateKeyRelease(OS_INPUT_SYSTEM *system, HANDLE device, UINT virtual_key);
+public_function void              OsConsumeInputEvents(OS_INPUT_EVENTS *events, OS_INPUT_SYSTEM *system, uint64_t tick_time);
+
+public_function VkResult          OsLoadVulkanRuntime(OS_VULKAN_RUNTIME *runtime);
+public_function VkResult          OsQueryVulkanRuntimeProperties(OS_VULKAN_RUNTIME_PROPERTIES *props, OS_VULKAN_RUNTIME *runtime, OS_MEMORY_ARENA *arena);
+public_function VkResult          OsCreateVulkanInstance(OS_VULKAN_INSTANCE *instance, OS_VULKAN_RUNTIME *runtime, VkInstanceCreateInfo const *create_info, VkAllocationCallbacks const *allocation_callbacks);
+public_function bool              OsIsPrimaryDisplay(OS_VULKAN_PHYSICAL_DEVICE_LIST const *device_list, size_t display_index);
+public_function int32_t           OsDisplayRefreshRate(OS_VULKAN_PHYSICAL_DEVICE_LIST const *device_list, size_t display_index);
+public_function char const*       OsSupportsVulkanInstanceLayer(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const *layer_name, size_t *layer_index);
+public_function bool              OsSupportsAllVulkanInstanceLayers(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const **layer_name, size_t const layer_count);
+public_function char const*       OsSupportsVulkanInstanceExtension(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const *extension_name, size_t *extension_index);
+public_function bool              OsSupportsAllVulkanInstanceExtensions(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const **extension_names, size_t const extension_count);
+public_function VkResult          OsEnumerateVulkanPhysicalDevices(OS_VULKAN_PHYSICAL_DEVICE_LIST *device_list, OS_VULKAN_INSTANCE *instance, OS_MEMORY_ARENA *arena, HINSTANCE exe_instance);
+public_function VkResult          OsCreateVulkanLogicalDevice(OS_VULKAN_DEVICE *device, OS_VULKAN_INSTANCE *instance, VkPhysicalDevice physical_Device, VkDeviceCreateInfo const *create_info, VkAllocationCallbacks const *allocation_callbacks);
+
+public_function int               OsInitializeAudio(OS_AUDIO_SYSTEM *audio_system);
+public_function int               OsEnumerateAudioDevices(OS_AUDIO_DEVICE_LIST *device_list, OS_AUDIO_SYSTEM *audio_system, OS_MEMORY_ARENA *arena);
+public_function void              OsDisableAudioOutput(OS_AUDIO_SYSTEM *audio_system);
+public_function int               OsEnableAudioOutput(OS_AUDIO_SYSTEM *audio_system, WCHAR *device_id, uint32_t samples_per_second, uint32_t buffer_size);
+public_function int               OsRecoverLostAudioOutputDevice(OS_AUDIO_SYSTEM *audio_system);
+public_function uint32_t          OsAudioSamplesToWrite(OS_AUDIO_SYSTEM *audio_system);
+public_function int               OsWriteAudioSamples(OS_AUDIO_SYSTEM *audio_system, void const *sample_data, uint32_t const sample_count);
+
+public_function bool              OsShellFolderPath(WCHAR *buf, size_t buf_bytes, size_t &bytes_needed, REFKNOWNFOLDERID folder_id);
+public_function bool              OsKnownPath(WCHAR *buf, size_t buf_bytes, size_t &bytes_needed, int folder_id);
+public_function size_t            OsPhysicalSectorSize(HANDLE file);
+public_function int               OsCreateFilesystem(OS_FILE_SYSTEM *file_system, OS_FILE_SYSTEM_INIT const *init, OS_MEMORY_ARENA *arena);
+public_function int               OsMountKnownPath(OS_FILE_SYSTEM *file_system, int folder_id, char const *mount_path, uint32_t priority, uintptr_t mount_id);
+public_function int               OsMountPhysicalPath(OS_FILE_SYSTEM *file_system, char const *source_path, char const *mount_path, uint32_t priority, uintptr_t mount_id);
+public_function int               OsMountVirtualPath(OS_FILE_SYSTEM *file_system, char const *virtual_path, char const *mount_path, uint32_t priority, uintptr_t mount_id);
+public_function void              OsUnmount(OS_FILE_SYSTEM *file_system, uintptr_t mount_id);
+public_function void              OsUnmountAll(OS_FILE_SYSTEM *file_system, char const *mount_path);
+public_function void              OsCloseFile(OS_FILE *file);
+public_function int               OsOpenFile(OS_FILE_SYSTEM *file_system, char const *path, int usage, uint32_t hints, OS_FILE *file);
+public_function int               OsReadFile(OS_FILE *file, int64_t offset, void *buffer, size_t size, size_t &bytes_read);
+public_function int               OsWriteFile(OS_FILE *file, int64_t offset, void const *buffer, size_t size, size_t &bytes_written);
+public_function int               OsFlushFile(OS_FILE *file);
 
 /*//////////////////////////
 //   Internal Functions   //
@@ -2625,45 +2719,1142 @@ OsUtf8ToNativeMalloc
     return pathbuf;
 }
 
-/// @summary Generate a Windows API-ready file path for a given filesystem mount.
-/// @param fs Internal data for the filesystem mount, specifying the mount root.
-/// @param relative_path The portion of the virtual_path specified relative to the mount point.
+/// @summary Generate a Windows API-ready file path for a given virtual path specified relative to the mount point root.
+/// @param mount_local_path A zero-terminated buffer specifying the filesystem mount point local path.
+/// @param local_path_length The number of characters in the mount_local_path string, not including the zero terminator.
+/// @param relative_path The portion of the virtual path specified relative to the mount point root.
 /// @return The API-ready system path, or NULL. Free the returned buffer using free().
 internal_function WCHAR* 
-OsVfsMakeSystemPath
+OsMakeSystemPathMalloc
 (
-    OS_VFS_MOUNT_FS       *fs, 
-    char const *relative_path
+    WCHAR        *mount_local_path, 
+    size_t const local_path_length,
+    char   const    *relative_path
 )
 {
     WCHAR  *pathbuf = NULL;
-    size_t  offset  = fs->LocalPathLength;
     int     nchars  = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, relative_path, -1, NULL, 0);
     // convert the virtual_path from UTF-8 to UCS-2, which Windows requires.
     if (nchars == 0)
     {   // the path cannot be converted from UTF-8 to UCS-2.
         return NULL;
     }
-    if ((pathbuf = (WCHAR*) malloc((nchars + fs->LocalPathLength + 1) * sizeof(WCHAR))) == NULL)
+    if ((pathbuf = (WCHAR*) malloc((nchars + local_path_length + 1) * sizeof(WCHAR))) == NULL)
     {   // unable to allocate memory for UCS-2 path.
         return NULL;
     }
     // start with the local root, and then append the relative path portion.
-    memcpy(pathbuf, fs->LocalPath, fs->LocalPathLength * sizeof(WCHAR));
-    pathbuf[fs->LocalPathLength] = L'\\';
-    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, relative_path, -1, &pathbuf[fs->LocalPathLength+1], nchars) == 0)
+    memcpy(pathbuf, mount_local_path, local_path_length * sizeof(WCHAR));
+    pathbuf[local_path_length] = L'\\';
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, relative_path, -1, &pathbuf[local_path_length+1], nchars) == 0)
     {   // the path cannot be converted from UTF-8 to UCS-2.
         free(pathbuf);
         return NULL;
     }
     // normalize the directory separator characters to the system default.
     // on Windows, this is not strictly necessary, but on other OS's it is.
-    for (size_t i = offset + 1, n = offset + nchars; i < n; ++i)
+    for (size_t i = local_path_length + 1, n = local_path_length + nchars; i < n; ++i)
     {
         if (pathbuf[i] == L'/')
             pathbuf[i]  = L'\\';
     }
     return pathbuf;
+}
+
+/// @summary Retrieve the fully-resolved absolute path for a file or directory.
+/// @param handle The handle of the opened file or directory.
+/// @param length On return, the number of characters in the returned path string is stored here, not including the zero terminator.
+/// @return The zero-terminated, fully-resolved absolute path of the file system entity, or NULL. Free the returned buffer using free().
+internal_function WCHAR*
+OsResolvePathForHandleMalloc
+(
+    HANDLE  handle, 
+    size_t &length
+)
+{
+    WCHAR *pathbuf = NULL;
+    DWORD    flags = VOLUME_NAME_DOS | FILE_NAME_NORMALIZED;
+    DWORD  pathlen = GetFinalPathNameByHandleW(handle, NULL, 0, flags);
+    // GetFinalPathNameByHandle returns the buffer length, in TCHARs, including zero terminator.
+    if (pathlen == 0)
+    {
+        length  = 0;
+        return NULL;
+    }
+    if ((pathbuf = (WCHAR*) malloc(pathlen * sizeof(WCHAR))) == NULL)
+    {
+        length  = 0;
+        return NULL;
+    }
+    // GetFinalPathNameByHandle returns the number of TCHARs written, not including zero terminator.
+    if (GetFinalPathNameByHandleW(handle, pathbuf, pathlen-1, flags) != (pathlen-1))
+    {
+        free(pathbuf);
+        length  = 0;
+        return NULL;
+    }
+    pathbuf[pathlen-1] = 0;
+    length = pathlen-1;
+    return pathbuf;
+}
+
+/// @summary Allocate storage for a mountpoint table.
+/// @param table The OS_MOUNTPOINT_TABLE to initialize.
+/// @param capcity The table capacity, in mount points.
+/// @return Zero if the table is successfully initialized, or -1 if memory allocation failed.
+internal_function int
+OsCreateMountpointTable
+(
+    OS_MOUNTPOINT_TABLE *table, 
+    size_t            capacity
+)
+{   // initialize all fields of the mount table instance.
+    ZeroMemory(table, sizeof(OS_MOUNTPOINT_TABLE));
+
+    // allocate storage for the specified number of items.
+    table->Count               = 0;
+    table->Capacity            = capacity;
+    table->MountpointIds       =(uintptr_t    *) malloc(capacity * sizeof(uintptr_t));
+    table->MountpointData      =(OS_MOUNTPOINT*) malloc(capacity * sizeof(OS_MOUNTPOINT));
+    table->MountpointPriority  =(uint32_t     *) malloc(capacity * sizeof(uint32_t));
+    if (table->MountpointIds  == NULL || table->MountpointData == NULL || table->MountpointPriority == NULL)
+    {
+        if (table->MountpointPriority != NULL) free(table->MountpointPriority);
+        if (table->MountpointData != NULL) free(table->MountpointData);
+        if (table->MountpointIds != NULL) free(table->MountpointIds);
+        ZeroMemory(table, sizeof(OS_MOUNTPOINT_TABLE));
+        return -1;
+    }
+    return 0;
+}
+
+/// @summary Update a mountpoint table with a new mount point.
+/// @param table The OS_MOUNTPOINT_TABLE to update.
+/// @param id The application-defined identifier of the new mount point.
+/// @param priority The priority value of the mount point being added.
+/// @return A pointer to the mount point data to populate, or NULL if the table is full.
+internal_function OS_MOUNTPOINT*
+OsAddMountpoint
+(
+    OS_MOUNTPOINT_TABLE *table, 
+    uintptr_t               id, 
+    uint32_t          priority
+)
+{
+    intptr_t ins_idx  = 0;
+    intptr_t min_idx  = 0;
+    intptr_t max_idx  = 0;
+    intptr_t end_idx  =(intptr_t) table->Count;
+
+    if (table->Count == table->Capacity)
+    {   // grow storage by a fixed-size amount.
+        size_t     new_capacity = table->Capacity + 32;
+        uintptr_t      *id_list =(uintptr_t    *) realloc(table->MountpointIds     , new_capacity * sizeof(uintptr_t));
+        OS_MOUNTPOINT *rec_list =(OS_MOUNTPOINT*) realloc(table->MountpointData    , new_capacity * sizeof(OS_MOUNTPOINT));
+        uint32_t      *pri_list =(uint32_t     *) realloc(table->MountpointPriority, new_capacity * sizeof(uint32_t));
+        if (id_list  != NULL) table->MountpointIds      = id_list;
+        if (rec_list != NULL) table->MountpointData     = rec_list;
+        if (pri_list != NULL) table->MountpointPriority = pri_list;
+        if (pri_list != NULL || rec_list != NULL || id_list != NULL)
+        {   // all storage arrays were successfully grown. capacity was increased.
+            table->Capacity = new_capacity;
+        }
+        else
+        {   // unable to allocate storage for one or more arrays. capacity cannot be increased.
+            return NULL;
+        }
+    }
+
+    // perform a binary search to determine where the new item should be inserted.
+    while (min_idx <= max_idx)
+    {   // expect that many items will have the same priority value.
+        intptr_t mid  =(min_idx + max_idx) / 2;
+        uint32_t pri  = table->MountpointPriority[mid];
+        if (priority == pri)
+        {   // find the end of this run so that the new item appears last.
+            ins_idx   = mid;
+            while (priority == table->MountpointPriority[ins_idx])
+            {
+                ins_idx++;
+            }
+            break;
+        }
+        else if (priority > pri)
+        {   // continue searching the lower half of the range.
+            max_idx = mid - 1;
+        }
+        else
+        {   // continue searching the upper half of the range.
+            min_idx = mid + 1;
+        }
+    }
+    // insert the new item into the mount point table at the designated location.
+    if (ins_idx != end_idx)
+    {   // shift the other list items down by one.
+        intptr_t dst = end_idx;
+        intptr_t src = end_idx - 1;
+        do {
+            table->MountpointIds     [dst] = table->MountpointIds     [src];
+            table->MountpointData    [dst] = table->MountpointData    [src];
+            table->MountpointPriority[dst] = table->MountpointPriority[src];
+            dst  = src--;
+        } while (src >= ins_idx);
+        // insert the new item into the list.
+        table->MountpointIds[ins_idx] = id;
+        table->MountpointPriority[ins_idx] = priority;
+        table->Count++;
+    }
+    else
+    {   // insert the item at the end of the list.
+        ins_idx = end_idx++;
+        table->MountpointIds[ins_idx] = id;
+        table->MountpointPriority[ins_idx] = priority;
+        table->Count++;
+    }
+    return &table->MountpointData[ins_idx];
+}
+
+/// @summary Remove a mountpoint at a given location within the mount point table.
+/// @param table The OS_MOUNTPOINT_TABLE to update.
+/// @param index The zero-based index of the item to remove.
+internal_function void
+OsRemoveMountpointAt
+(
+    OS_MOUNTPOINT_TABLE *table, 
+    size_t               index
+)
+{   assert(index <= table->Count && table->Count > 0);
+    if (table->Count > 0)
+    {   
+        size_t dst = index;
+        size_t src = index + 1;
+
+        // release resources associated with the item being unmounted.
+        table->MountpointData[index].Unmount(&table->MountpointData[index]);
+        free(table->MountpointData[index].Root);
+        free(table->MountpointData[index].LocalPath);
+        ZeroMemory(&table->MountpointData[index], sizeof(OS_MOUNTPOINT));
+
+        // shift all of the other items up on top of the removed item.
+        for (size_t i = index, n = table->Count - 1; i < n; ++i, ++dst, ++src)
+        {
+            table->MountpointIds     [dst] = table->MountpointIds     [src];
+            table->MountpointData    [dst] = table->MountpointData    [src];
+            table->MountpointPriority[dst] = table->MountpointPriority[src];
+        }
+        table->Count--;
+    }
+}
+
+/// @summary Removes a mount point with a given ID from a prioritized mount list.
+/// @param table The OS_MOUNTPOINT_TABLE to update.
+/// @param id The unique application identifier of the mount point to remove.
+internal_function void
+OsRemoveMountpointId
+(
+    OS_MOUNTPOINT_TABLE *table, 
+    uintptr_t               id
+)
+{
+    for (size_t i = 0, n = table->Count; i < n; ++i)
+    {
+        if (table->MountpointIds[i] == id)
+        {
+            OsRemoveMountpointAt(table, i);
+            break;
+        }
+    }
+}
+
+/// @summary Synchronously open a file for access. The information necessary to access the file is written to @a file.
+/// @param mount The mount point performing the file open operation.
+/// @param path The zero-terminated UTF-8 path of the file to open, relative to the mount point root.
+/// @param usage One of OS_FILE_USAGE specifying the intended use of the file by the application.
+/// @param hints One or more of OS_FILE_USAGE_HINTS specifying additional desired behaviors.
+/// @param file If the call returns OS_IO_RESULT_SUCCESS, this structure should be populated with file data.
+/// @return One of OS_IO_RESULT indicating the result of the operation.
+internal_function int 
+OsOpenFile_Filesystem
+(
+    OS_MOUNTPOINT *mount, 
+    char const     *path, 
+    int            usage, 
+    uint32_t       hints, 
+    OS_FILE        *file
+)
+{
+    LARGE_INTEGER fsize = {0};
+    WCHAR      *pathbuf = OsMakeSystemPathMalloc(mount->LocalPath, mount->LocalPathLength, path);
+    HANDLE        hFile = INVALID_HANDLE_VALUE;
+    HANDLE     hFileMap = NULL;
+    DWORD        access = 0;
+    DWORD         share = 0;
+    DWORD        create = 0;
+    DWORD         flags = 0;
+    DWORD       protect = 0;
+    size_t        ssize = 0;
+
+    // initialize the fields of the file object.
+    ZeroMemory(file, sizeof(OS_FILE));
+
+    // figure out access flags, share modes, etc. based on the intended usage.
+    switch (usage)
+    {
+    case OS_FILE_USAGE_STREAM_IN:
+        {
+            access = GENERIC_READ;
+            share  = FILE_SHARE_READ;
+            create = OPEN_EXISTING;
+            flags  = FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OVERLAPPED;
+            if (hints & OS_FILE_USAGE_HINT_UNBUFFERED)
+            {
+                flags |= FILE_FLAG_NO_BUFFERING;
+            }
+        } break;
+    case OS_FILE_USAGE_STREAM_OUT:
+        {
+            access = GENERIC_READ | GENERIC_WRITE;
+            share  = FILE_SHARE_READ;
+            create = CREATE_ALWAYS;
+            flags  = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OVERLAPPED;
+            if (hints & OS_FILE_USAGE_HINT_UNBUFFERED)
+            {
+                flags |= FILE_FLAG_NO_BUFFERING;
+            }
+        } break;
+    case OS_FILE_USAGE_MMAP_READ:
+        {
+            access  = GENERIC_READ;
+            share   = FILE_SHARE_READ;
+            create  = OPEN_EXISTING;
+            flags   = FILE_FLAG_SEQUENTIAL_SCAN;
+            protect = PAGE_READONLY;
+        } break;
+    case OS_FILE_USAGE_MMAP_WRITE:
+        {
+            access  = GENERIC_READ | GENERIC_WRITE;
+            share   = 0;
+            create  = OPEN_ALWAYS;
+            flags   = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN;
+            protect = PAGE_READWRITE;
+        } break;
+    case OS_FILE_USAGE_MANUAL_IO:
+        {
+            access = GENERIC_READ | GENERIC_WRITE;
+            share  = FILE_SHARE_READ;
+            create = OPEN_ALWAYS;
+            flags  = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN;
+            if (hints & OS_FILE_USAGE_HINT_UNBUFFERED)
+            {
+                flags |= FILE_FLAG_NO_BUFFERING;
+            }
+            if (hints & OS_FILE_USAGE_HINT_ASYNCHRONOUS)
+            {
+                flags |= FILE_FLAG_OVERLAPPED;
+            }
+            if (hints & OS_FILE_USAGE_HINT_OVERWRITE)
+            {
+                create = CREATE_ALWAYS;
+            }
+        } break;
+    default:
+        return OS_IO_RESULT_NOT_SUPPORTED;
+    }
+
+    // open the file as specified by the caller.
+    if ((hFile = CreateFileW(pathbuf, access, share, NULL, create, flags, NULL)) == INVALID_HANDLE_VALUE)
+    {   // the file cannot be opened.
+        OsLayerError("ERROR: %S(%u): Unable to open file %s (user path %S) (%08X).\n", __FUNCTION__, GetCurrentThreadId(), pathbuf, path, GetLastError());
+        goto cleanup_and_fail;
+    }
+
+    // retrieve basic file attributes.
+    ssize = OsPhysicalSectorSize(hFile);
+    if (!GetFileSizeEx(hFile, &fsize))
+    {   // the file size cannot be retrieved.
+        OsLayerError("ERROR: %S(%u): Unable to retrieve size for file %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), pathbuf, GetLastError());
+        goto cleanup_and_fail;
+    }
+
+    // clean up temporary buffers.
+    free(pathbuf); pathbuf = NULL;
+
+    // if the file is being opened for memory-mapped I/O, create the mapping.
+    if (usage == OS_FILE_USAGE_MMAP_READ || usage == OS_FILE_USAGE_MMAP_WRITE)
+    {   // create the file mapping over the entire file.
+        if ((hFileMap = CreateFileMapping(hFile, NULL, protect, 0, 0, NULL)) == NULL)
+        {
+            OsLayerError("ERROR: %S(%u): Unable to create file mapping for file %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), pathbuf, GetLastError());
+            goto cleanup_and_fail;
+        }
+    }
+
+    // set output parameters and clean up.
+    file->Filedes    = hFile;
+    file->Filemap    = hFileMap;
+    file->SectorSize = ssize;
+    file->BaseOffset = 0;
+    file->BaseSize   = fsize.QuadPart;
+    file->FileSize   = fsize.QuadPart;
+    file->FileHints  = hints;
+    file->FileFlags  = 0;
+    file->OSError    = ERROR_SUCCESS;
+    file->OpenFlags  = flags;
+    return OS_IO_RESULT_SUCCESS;
+
+cleanup_and_fail:
+    if (hFileMap != NULL) CloseHandle(hFileMap);
+    if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
+    if (pathbuf != NULL) free(pathbuf);
+    ZeroMemory(file, sizeof(OS_FILE));
+    file->OpenFlags  = flags;
+    file->Filedes    = INVALID_HANDLE_VALUE;
+    file->Filemap    = NULL;
+    file->FileHints  = hints;
+    file->OSError    = GetLastError();
+    return OS_IO_RESULT_OSERROR;
+}
+
+/// @summary Synchronously write an entire file to disk. If the file exists, its contents are overwritten; otherwise, a new file is created.
+/// @param mount The mount point performing the file save operation.
+/// @param path The zero-terminated UTF-8 path of the file to write, relative to the mount point root.
+/// @param data The buffer containing the data to write to the file.
+/// @param file_size The number of bytes to read from the data buffer and write to the file.
+/// @return One of OS_IO_RESULT indicating the result of the operation.
+internal_function int
+OsSaveFile_Filesystem
+(
+    OS_MOUNTPOINT *mount, 
+    char    const  *path, 
+    void    const  *data, 
+    int64_t const   size
+)
+{
+    FILE_END_OF_FILE_INFO eof;
+    FILE_ALLOCATION_INFO  sec;
+    uint8_t const     *buffer = (uint8_t const  *) data;
+    SYSTEM_INFO       sysinfo = {0};
+    HANDLE                 fd = INVALID_HANDLE_VALUE;
+    DWORD           mem_flags = MEM_RESERVE  | MEM_COMMIT;
+    DWORD         mem_protect = PAGE_READWRITE;
+    DWORD              access = GENERIC_READ | GENERIC_WRITE;
+    DWORD               share = FILE_SHARE_READ;
+    DWORD              create = CREATE_ALWAYS;
+    DWORD               flags = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING;
+    WCHAR          *file_path = NULL;
+    size_t      file_path_len = 0;
+    WCHAR          *temp_path = NULL;
+    WCHAR           *temp_ext = NULL;
+    size_t       temp_ext_len = 0;
+    DWORD           page_size = 4096;
+    int64_t         file_size = 0;
+    uint8_t    *sector_buffer = NULL;
+    size_t       sector_count = 0;
+    int64_t      sector_bytes = 0;
+    size_t        sector_over = 0;
+    size_t        sector_size = 0;
+
+    // get the system page size, and allocate a single-page buffer. to support
+    // unbuffered I/O, the buffer must be allocated on a sector-size boundary
+    // and must also be a multiple of the physical disk sector size. allocating
+    // a virtual memory page using VirtualAlloc will satisfy these constraints.
+    GetNativeSystemInfo(&sysinfo); page_size = sysinfo.dwPageSize;
+    if ((sector_buffer = (uint8_t*) VirtualAlloc(NULL, page_size, mem_flags, mem_protect)) == NULL)
+    {   // unable to allocate the overage buffer; check GetLastError().
+        OsLayerError("ERROR: %S(%u): Unable to allocate overage buffer for file %S (%08X).\n", __FUNCTION__, GetCurrentThreadId(), path, GetLastError());
+        goto cleanup_and_fail;
+    }
+
+    // generate a temporary filename in the same location as the output file.
+    // this prevents the file from being copied when it is moved, which happens
+    // if the temp file isn't on the same volume as the output file.
+    if ((file_path = OsMakeSystemPathMalloc(mount->LocalPath, mount->LocalPathLength, path)) == NULL)
+    {   // unable to allocate the output path buffer.
+        OsLayerError("ERROR: %S(%u): Unable to allocate system path buffer for file %S.\n", __FUNCTION__, GetCurrentThreadId(), path);
+        goto cleanup_and_fail;
+    }
+    temp_ext_len   =  4; // wcslen(L".tmp")
+    file_path_len  =  wcslen(file_path);
+    if ((temp_path = (WCHAR*) malloc((file_path_len + temp_ext_len + 1) * sizeof(WCHAR))) == NULL)
+    {   // unable to allocate temporary path memory.
+        OsLayerError("ERROR: %S(%u): Unable to allocate temporary path buffer for file %s (%S).\n", __FUNCTION__, GetCurrentThreadId(), file_path, path);
+        goto cleanup_and_fail;
+    }
+    temp_ext  = temp_path + file_path_len;
+    memcpy(temp_path, file_path, file_path_len   * sizeof(WCHAR));
+    memcpy(temp_ext , L".tmp"  ,(temp_ext_len+1) * sizeof(WCHAR));
+
+    // create the temporary file, and get the physical disk sector size.
+    // pre-allocate storage for the file contents, which should improve performance.
+    if ((fd = CreateFile(temp_path, access, share, NULL, create, flags, NULL)) == INVALID_HANDLE_VALUE)
+    {   // unable to create the new file; check GetLastError().
+        OsLayerError("ERROR: %S(%u): Unable to create staging file %s for file %S (%08X).\n", __FUNCTION__, GetCurrentThreadId(), temp_path, path, GetLastError());
+        goto cleanup_and_fail;
+    }
+    sector_size = OsPhysicalSectorSize(fd);
+    file_size   = OsAlignUp(size, sector_size);
+    sec.AllocationSize.QuadPart = file_size;
+    SetFileInformationByHandle(fd, FileAllocationInfo , &sec, sizeof(sec));
+
+    // copy the data extending into the tail sector into the overage buffer.
+    sector_count = size_t (size / sector_size);
+    sector_bytes = int64_t(sector_size) * sector_count;
+    sector_over  = size_t (size - sector_bytes);
+    if (sector_over > 0)
+    {   // buffer the overlap amount. note that the page will have been zeroed.
+        memcpy(sector_buffer, &buffer[sector_bytes], sector_over);
+    }
+
+    // write the data to the file.
+    if (sector_bytes > 0)
+    {   // write the bulk of the data, if the data is > 1 sector.
+        int64_t amount = 0;
+        DWORD   nwrite = 0;
+        while  (amount < sector_bytes)
+        {
+            DWORD n = (sector_bytes - amount) < 0xFFFFFFFFU ? DWORD(sector_bytes - amount) : 0xFFFFFFFFU;
+            if (!WriteFile(fd, &buffer[amount], n, &nwrite, NULL))
+            {
+                OsLayerError("ERROR: %S(%u): Failed write to staging file %s for file %S (%08X).\n", __FUNCTION__, GetCurrentThreadId(), temp_path, path, GetLastError());
+                goto cleanup_and_fail;
+            }
+            amount += nwrite;
+        }
+    }
+    if (sector_over > 0)
+    {   // write the remaining sector-sized chunk of data.
+        DWORD n = (DWORD) sector_size;
+        DWORD w = (DWORD) 0;
+        if (!WriteFile(fd, sector_buffer, n, &w, NULL))
+        {
+            OsLayerError("ERROR: %S(%u): Failed last-sector write to staging file %s for file %S (%08X).\n", __FUNCTION__, GetCurrentThreadId(), temp_path, path, GetLastError());
+            goto cleanup_and_fail;
+        }
+    }
+
+    // set the correct end-of-file marker.
+    eof.EndOfFile.QuadPart = size;
+    SetFileInformationByHandle(fd, FileEndOfFileInfo, &eof, sizeof(eof));
+    SetFileValidData(fd, eof.EndOfFile.QuadPart);
+
+    // close the file, and move it to the destination path.
+    CloseHandle(fd); fd = INVALID_HANDLE_VALUE;
+    if (!MoveFileEx(temp_path, file_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    {   // the file could not be moved into place; check GetLastError().
+        OsLayerError("ERROR: %S(%u): Unable to move staging file %s to %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), temp_path, file_path, GetLastError());
+        goto cleanup_and_fail;
+    }
+
+    // clean up our temporary buffers; we're done.
+    free(temp_path); temp_path =  NULL;
+    free(file_path); file_path =  NULL;
+    VirtualFree(sector_buffer, 0, MEM_RELEASE);
+    return OS_IO_RESULT_SUCCESS;
+
+cleanup_and_fail:
+    if (fd != INVALID_HANDLE_VALUE) CloseHandle(fd);
+    if (temp_path     != NULL)      DeleteFile(temp_path);
+    if (temp_path     != NULL)      free(temp_path);
+    if (file_path     != NULL)      free(file_path);
+    if (sector_buffer != NULL)      VirtualFree(sector_buffer, 0, MEM_RELEASE);
+    return OS_IO_RESULT_OSERROR;
+}
+
+/// @summary Determine whether a given mount point supports a particular type of file access.
+/// @param mount The mount point to query.
+/// @param usage One of OS_FILE_USAGE specifying the intended use of the file by the application.
+/// @return OS_IO_RESULT_SUCCESS if the usage is supported, or OS_IO_RESULT_NOT_SUPPORTED.
+internal_function int
+OsSupportsUsage_Filesystem
+(
+    OS_MOUNTPOINT *mount, 
+    int            usage
+)
+{
+    switch (usage)
+    {
+        case OS_FILE_USAGE_STREAM_IN : return OS_IO_RESULT_SUCCESS;
+        case OS_FILE_USAGE_STREAM_OUT: return OS_IO_RESULT_SUCCESS;
+        case OS_FILE_USAGE_MMAP_READ : return OS_IO_RESULT_SUCCESS;
+        case OS_FILE_USAGE_MMAP_WRITE: return OS_IO_RESULT_SUCCESS;
+        case OS_FILE_USAGE_MANUAL_IO : return OS_IO_RESULT_SUCCESS;
+        default: return OS_IO_RESULT_NOT_SUPPORTED;
+    }
+    UNREFERENCED_PARAMETER(mount);
+}
+
+/// @summary Define the signature for the callback invoked when a mount point is being removed.
+/// @param mount The mount point being unmounted.
+internal_function void
+OsUnmount_Filesystem
+(
+    OS_MOUNTPOINT *mount
+)
+{
+    UNREFERENCED_PARAMETER(mount);
+}
+
+/// @summary Initialize a filesystem-based mountpoint and allocate the private state data.
+/// @param mount The OS_VFS_MOUNT instance to initialize.
+/// @param local_path The NULL-terminated string specifying the local path that functions as the root of the mount point. This directory must exist.
+/// @return true if the mount point was initialized successfully.
+internal_function int
+OsCreateMount_Filesystem
+(
+    OS_MOUNTPOINT    *mount, 
+    WCHAR const *local_path
+)
+{
+    size_t  pathlen = 0;
+    WCHAR  *pathbuf = NULL;
+    DWORD     share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    HANDLE     hDir = INVALID_HANDLE_VALUE;
+
+    // to get a consistent, fully-resolved path to use as the base path, 
+    // open the directory, and then retrieve the path from the resulting handle.
+    if ((hDir = CreateFile(local_path, 0, share, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL)) == INVALID_HANDLE_VALUE)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to initialize filesystem mount point %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), local_path, GetLastError());
+        goto cleanup_and_fail;
+    }
+    if ((pathbuf = OsResolvePathForHandleMalloc(hDir, pathlen)) == NULL)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to retrieve path for filesystem mount point %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), local_path, GetLastError());
+        goto cleanup_and_fail;
+    }
+    CloseHandle(hDir);
+
+    // everything was successful; set up the mount point fields.
+    // the Id, Root and RootLength fields are set up by the caller.
+    mount->LocalPath       = pathbuf;
+    mount->LocalPathLength = pathlen;
+    mount->StateData       = NULL;
+    mount->OpenFile        = OsOpenFile_Filesystem;
+    mount->SaveFile        = OsSaveFile_Filesystem;
+    mount->SupportsUsage   = OsSupportsUsage_Filesystem;
+    mount->Unmount         = OsUnmount_Filesystem;
+    return 0;
+
+cleanup_and_fail:
+    if (hDir != INVALID_HANDLE_VALUE) CloseHandle(hDir);
+    if (pathbuf != NULL) free(pathbuf);
+    return -1;
+}
+
+/// @summary Synchronously open a file for access. The information necessary to access the file is written to @a file.
+/// @param mount The mount point performing the file open operation.
+/// @param path The zero-terminated UTF-8 path of the file to open, relative to the mount point root.
+/// @param usage One of OS_FILE_USAGE specifying the intended use of the file by the application.
+/// @param hints One or more of OS_FILE_USAGE_HINTS specifying additional desired behaviors.
+/// @param file If the call returns OS_IO_RESULT_SUCCESS, this structure should be populated with file data.
+/// @return One of OS_IO_RESULT indicating the result of the operation.
+internal_function int 
+OsOpenFile_Tarball
+(
+    OS_MOUNTPOINT *mount, 
+    char const     *path, 
+    int            usage, 
+    uint32_t       hints, 
+    OS_FILE        *file
+)
+{
+    OS_MOUNTPOINT_TAR    *tar =(OS_MOUNTPOINT_TAR*) mount->StateData;
+    uint32_t const *hash_list = tar->TarballData.EntryHash;
+    HANDLE              hFile = INVALID_HANDLE_VALUE;
+    HANDLE           hFileMap = NULL;
+    DWORD              access = 0;
+    DWORD               share = 0;
+    DWORD              create = 0;
+    DWORD               flags = 0;
+    DWORD             protect = 0;
+    uint32_t             hash = OsHashPath(path);
+
+    // initialize the fields of the file object.
+    ZeroMemory(file, sizeof(OS_FILE));
+
+    // figure out access flags, share modes, etc. based on the intended usage.
+    switch (usage)
+    {
+    case OS_FILE_USAGE_STREAM_IN:
+        {
+            access = GENERIC_READ;
+            share  = FILE_SHARE_READ;
+            create = OPEN_EXISTING;
+            flags  = FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OVERLAPPED;
+            // alignment restrictions can't be guaranteed, so unbuffered I/O isn't supported.
+        } break;
+    case OS_FILE_USAGE_STREAM_OUT:
+        { // stream out is not supported.
+        } return OS_IO_RESULT_NOT_SUPPORTED;
+    case OS_FILE_USAGE_MMAP_READ:
+        {
+            access  = GENERIC_READ;
+            share   = FILE_SHARE_READ;
+            create  = OPEN_EXISTING;
+            flags   = FILE_FLAG_SEQUENTIAL_SCAN;
+            protect = PAGE_READONLY;
+        } break;
+    case OS_FILE_USAGE_MMAP_WRITE:
+        { // mmap-for-write is not supported.
+        } return OS_IO_RESULT_NOT_SUPPORTED;
+    case OS_FILE_USAGE_MANUAL_IO:
+        { // manual I/O is not supported (writing is not supported.)
+        } return OS_IO_RESULT_NOT_SUPPORTED;
+    default:
+        return OS_IO_RESULT_NOT_SUPPORTED;
+    }
+
+    // locate the file within the tarball by comparing hashes.
+    for (size_t i = 0, n = tar->TarballData.EntryCount; i < n; ++i)
+    {
+        if (hash_list[i] == hash)
+        {   // hashes match, confirm by comparing strings.
+            if (_stricmp(path, tar->TarballData.EntryInfo[i].FullPath) == 0)
+            {   // found an exact match for the path; duplicate the file handle(s) for the caller.
+                HANDLE p = GetCurrentProcess();
+                if (!DuplicateHandle(p, tar->TarFiledes, p, &hFile, 0, FALSE, DUPLICATE_SAME_ACCESS))
+                {
+                    OsLayerError("ERROR: %S(%u): Unable to duplicate TAR file handle for file %S (%08X).\n", __FUNCTION__, GetCurrentThreadId(), path, GetLastError());
+                    goto cleanup_and_fail;
+                }
+                if (usage == OS_FILE_USAGE_MMAP_READ)
+                {   // also create a new read-only file mapping object.
+                    if ((hFileMap = CreateFileMapping(hFile, NULL, PAGE_READONLY, 0, 0, NULL)) == NULL)
+                    {
+                        OsLayerError("ERROR: %S(%u): Unable to create file mapping object for file %S (%08X).\n", __FUNCTION__, GetCurrentThreadId(), path, GetLastError());
+                        goto cleanup_and_fail;
+                    }
+                }
+                file->Filedes    = hFile;
+                file->Filemap    = hFileMap;
+                file->SectorSize = tar->SectorSize;
+                file->BaseOffset = tar->TarballData.EntryInfo[i].DataOffset;
+                file->BaseSize   = tar->TarballData.EntryInfo[i].FileSize;
+                file->FileSize   = tar->TarballData.EntryInfo[i].FileSize;
+                file->FileHints  = hints;
+                file->FileFlags  = 0;
+                file->OSError    = ERROR_SUCCESS;
+                file->OpenFlags  = flags;
+                return OS_IO_RESULT_SUCCESS;
+            }
+        }
+    }
+
+    // else, the file was not found in the tarball.
+    // fall-through to cleanup_and_fail.
+    SetLastError(ERROR_FILE_NOT_FOUND);
+
+cleanup_and_fail:
+    if (hFileMap != NULL) CloseHandle(hFileMap);
+    if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
+    ZeroMemory(file, sizeof(OS_FILE));
+    file->OpenFlags  = flags;
+    file->Filedes    = INVALID_HANDLE_VALUE;
+    file->Filemap    = NULL;
+    file->FileHints  = hints;
+    file->OSError    = GetLastError();
+    return OS_IO_RESULT_OSERROR;
+}
+
+/// @summary Synchronously write an entire file to disk. If the file exists, its contents are overwritten; otherwise, a new file is created.
+/// @param mount The mount point performing the file save operation.
+/// @param path The zero-terminated UTF-8 path of the file to write, relative to the mount point root.
+/// @param data The buffer containing the data to write to the file.
+/// @param file_size The number of bytes to read from the data buffer and write to the file.
+/// @return One of OS_IO_RESULT indicating the result of the operation.
+internal_function int
+OsSaveFile_Tarball
+(
+    OS_MOUNTPOINT *mount, 
+    char    const  *path, 
+    void    const  *data, 
+    int64_t const   size
+)
+{
+    UNREFERENCED_PARAMETER(mount);
+    UNREFERENCED_PARAMETER(path);
+    UNREFERENCED_PARAMETER(data);
+    UNREFERENCED_PARAMETER(size);
+    return OS_IO_RESULT_NOT_SUPPORTED;
+}
+
+/// @summary Determine whether a given mount point supports a particular type of file access.
+/// @param mount The mount point to query.
+/// @param usage One of OS_FILE_USAGE specifying the intended use of the file by the application.
+/// @return OS_IO_RESULT_SUCCESS if the usage is supported, or OS_IO_RESULT_NOT_SUPPORTED.
+internal_function int
+OsSupportsUsage_Tarball
+(
+    OS_MOUNTPOINT *mount, 
+    int            usage
+)
+{
+    switch (usage)
+    {
+        case OS_FILE_USAGE_STREAM_IN : return OS_IO_RESULT_SUCCESS;
+        case OS_FILE_USAGE_STREAM_OUT: return OS_IO_RESULT_NOT_SUPPORTED;
+        case OS_FILE_USAGE_MMAP_READ : return OS_IO_RESULT_SUCCESS;
+        case OS_FILE_USAGE_MMAP_WRITE: return OS_IO_RESULT_NOT_SUPPORTED;
+        case OS_FILE_USAGE_MANUAL_IO : return OS_IO_RESULT_NOT_SUPPORTED;
+        default: return OS_IO_RESULT_NOT_SUPPORTED;
+    }
+    UNREFERENCED_PARAMETER(mount);
+}
+
+/// @summary Define the signature for the callback invoked when a mount point is being removed.
+/// @param mount The mount point being unmounted.
+internal_function void
+OsUnmount_Tarball
+(
+    OS_MOUNTPOINT *mount
+)
+{
+    if (mount != NULL)
+    {   // free the internal state data.
+        if (mount->StateData != NULL)
+        {
+            OS_MOUNTPOINT_TAR *tar = (OS_MOUNTPOINT_TAR*) mount->StateData;
+            OsUnloadTarball(&tar->TarballData);
+            CloseHandle(tar->TarFiledes);
+        }
+        free(mount->StateData);
+    }
+}
+
+/// @summary Initialize a tarball-based mountpoint and allocate the private state data.
+/// @param mount The OS_MOUNTPOINT instance to initialize.
+/// @param local_path The NULL-terminated string specifying the local path that functions as the root of the mount point. This directory must exist.
+/// @return Zero if the mount point was initialized successfully, or -1 if an error occurred.
+internal_function int
+OsCreateMount_Tarball
+(
+    OS_MOUNTPOINT    *mount, 
+    WCHAR const *local_path
+)
+{
+    OS_MOUNTPOINT_TAR *tar = NULL;
+    WCHAR         *pathbuf = NULL;
+    size_t         pathlen = 0;
+    DWORD           access = GENERIC_READ;
+    DWORD           create = OPEN_EXISTING;
+    DWORD            share = FILE_SHARE_READ;
+    HANDLE            hTar = INVALID_HANDLE_VALUE;
+    DWORD           result = ERROR_SUCCESS;
+
+    // to get a consistent, fully-resolved path to use as the base path, 
+    // open the file, and then retrieve the path from the resulting handle.
+    if ((hTar = CreateFile(local_path, access, share, NULL, create, FILE_FLAG_SEQUENTIAL_SCAN, NULL)) == INVALID_HANDLE_VALUE)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to initialize tarball mount point %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), local_path, GetLastError());
+        goto cleanup_and_fail;
+    }
+    if ((pathbuf = OsResolvePathForHandleMalloc(hTar, pathlen)) == NULL)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to retrieve path name for tarball mount point %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), local_path, GetLastError());
+        goto cleanup_and_fail;
+    }
+    if ((tar = (OS_MOUNTPOINT_TAR*) malloc(sizeof(OS_MOUNTPOINT_TAR))) == NULL)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to allocate memory for tarball mount point %s.\n", __FUNCTION__, GetCurrentThreadId(), local_path);
+        goto cleanup_and_fail;
+    }
+    if (OsLoadTarball(&tar->TarballData, hTar, result) < 0)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to parse tarball for mount point %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), local_path, result);
+        goto cleanup_and_fail;
+    }
+
+    // everything was successful; set up the mount point fields.
+    // the Id, Root and RootLength fields are set up by the caller.
+    tar->TarFiledes        = hTar;
+    tar->SectorSize        = OsPhysicalSectorSize(hTar);
+    mount->LocalPath       = pathbuf;
+    mount->LocalPathLength = pathlen;
+    mount->StateData       = tar;
+    mount->OpenFile        = OsOpenFile_Tarball;
+    mount->SaveFile        = OsSaveFile_Tarball;
+    mount->SupportsUsage   = OsSupportsUsage_Tarball;
+    mount->Unmount         = OsUnmount_Tarball;
+    return 0;
+
+cleanup_and_fail:
+    if (hTar != INVALID_HANDLE_VALUE) CloseHandle(hTar);
+    OsUnloadTarball(&tar->TarballData);
+    if (pathbuf != NULL) free(pathbuf);
+    if (tar != NULL) free(tar);
+    return -1;
+}
+
+/// @summary Performs all of the common setup when creating a new mount point.
+/// @param file_system The file system the mount point is attached to.
+/// @param source_wide The NULL-terminated source directory or file path.
+/// @param source_attr The attributes of the source path, as returned by GetFileAttributes().
+/// @param mount_path The NULL-terminated UTF-8 string specifying the mount point root exposed externally.
+/// @param priority The priority of the mount point. Higher numeric values indicate higher priority.
+/// @param mount_id An application-defined unique identifier for the mount point. This is necessary if the application later wants to remove this specific mount point, but not any of the others that are mounted with the same mount_path.
+/// @return Zero if the mount point was successfully installed, or -1 if an error occurred.
+internal_function int 
+OsSetupMountpoint
+(
+    OS_FILE_SYSTEM *file_system, 
+    WCHAR          *source_wide, 
+    DWORD           source_attr, 
+    char const      *mount_path, 
+    uint32_t           priority, 
+    uintptr_t          mount_id
+)
+{   
+    OS_MOUNTPOINT *mount = NULL;
+    char     *mount_root = NULL;
+    size_t   mount_bytes = strlen(mount_path);
+    size_t  source_chars = wcslen(source_wide);
+    
+    // create the mount point record in the prioritized list.
+    AcquireSRWLockExclusive(&file_system->MountpointLock);
+    if ((mount = OsAddMountpoint(&file_system->MountpointTable, mount_id, priority)) == NULL)
+    {   // most likely, the mountpoint table is full.
+        OsLayerError("ERROR: %S(%u): Unable to insert mountpoint %S (%Iu/%Iu mountpoints used.)\n", __FUNCTION__, GetCurrentThreadId(), mount_path, file_system->MountpointTable.Count, file_system->MountpointTable.Capacity);
+        goto cleanup_and_fail;
+    }
+
+    // initialize the basic mount point properties:
+    mount->Id              = mount_id;
+    mount->Root            = NULL;
+    mount->RootLength      = mount_bytes;
+    mount->LocalPath       = NULL;
+    mount->LocalPathLength = 0;
+
+    // create version of mount_path with trailing slash.
+    if (mount_bytes && mount_path[mount_bytes-1] != '/')
+    {   // it's necessary to append the trailing slash.
+        if ((mount_root = (char*) malloc(mount_bytes  + 2)) == NULL)
+        {
+            OsLayerError("ERROR: %S(%u): Unable to allocate memory for mount point root path string.\n", __FUNCTION__, GetCurrentThreadId());
+            goto cleanup_and_fail;
+        }
+        memcpy(mount_root, mount_path, mount_bytes);
+        mount_root[mount_bytes+0] = '/';
+        mount_root[mount_bytes+1] =  0 ;
+        mount->Root = mount_root;
+    }
+    else
+    {   // the mount path has the trailing slash; copy the string.
+        if ((mount_root = (char*) malloc(mount_bytes  + 1)) == NULL)
+        {
+            OsLayerError("ERROR: %S(%u): Unable to allocate memory for mount point root path string.\n", __FUNCTION__, GetCurrentThreadId());
+            goto cleanup_and_fail;
+        }
+        memcpy(mount_root, mount_path, mount_bytes);
+        mount_root[mount_bytes] = 0;
+        mount->Root = mount_root;
+    }
+
+    // initialize the mount point internals based on the source type.
+    if (source_attr & FILE_ATTRIBUTE_DIRECTORY)
+    {   // set up a filesystem-based mount point.
+        if (OsCreateMount_Filesystem(mount, source_wide) < 0)
+        {   // OsVfsCreateMount_Filesystem outputs its own errors.
+            goto cleanup_and_fail;
+        }
+        ReleaseSRWLockExclusive(&file_system->MountpointLock);
+        return 0;
+    }
+    else
+    {   // this is an archive file. extract the file extension.
+        WCHAR *ext = source_wide + source_chars;
+        while (ext > source_wide)
+        {   // search for the final period character.
+            if (*ext == L'.')
+            {   // ext points to the first character of the extension.
+                ext++;
+                break;
+            }
+            else ext--;
+        }
+        // now a bunch of if (wcsicmp(ext, L"zip") { ... } etc.
+        if (!_wcsicmp(ext, L"tar"))
+        {   // set up a tarball-based mount point.
+            if (OsCreateMount_Tarball(mount, source_wide) < 0)
+            {   // OsVfsCreateMount_Tarball outputs its own errors.
+                goto cleanup_and_fail;
+            }
+            ReleaseSRWLockExclusive(&file_system->MountpointLock);
+            return 0;
+        }
+        // ...
+        else
+        {
+            OsLayerError("ERROR: %S(%u): Mountpoint extension %s has no associated driver.\n", __FUNCTION__, GetCurrentThreadId(), ext);
+            goto cleanup_and_fail;
+        }
+    }
+
+cleanup_and_fail:
+    if (mount != NULL) OsRemoveMountpointId(&file_system->MountpointTable, mount_id);
+    ReleaseSRWLockExclusive(&file_system->MountpointLock);
+    if (mount_root) free(mount_root);
+    return -1;
+}
+
+/// @summary Resolves a virtual path to a filesystem mount point, and then converts the path to an absolute path on the filesystem. Non-filesystem mount points are skipped.
+/// @param file_system The file system to search.
+/// @param path The virtual path to translate to a filesystem path.
+/// @param pathbuf The buffer that will receive the filesystem path.
+/// @param buflen The maximum number of wide characters to write to pathbuf.
+/// @return Zero if the path was successfully resolved, or -1 if an error occurred.
+internal_function int 
+OsResolveFilesystemPath
+(
+    OS_FILE_SYSTEM *file_system, 
+    char const            *path, 
+    WCHAR              *pathbuf, 
+    size_t               buflen
+)
+{   // iterate over the mount points, which are stored in priority order.
+    AcquireSRWLockShared(&file_system->MountpointLock);
+    OS_MOUNTPOINT *mounts = file_system->MountpointTable.MountpointData;
+    for (size_t i = 0,  n = file_system->MountpointTable.Count; i < n; ++i)
+    {
+        OS_MOUNTPOINT *m  = &mounts[i];
+        if (OsMountPointMatchStart(m->Root, path, m->RootLength) && m->OpenFile == OsOpenFile_Filesystem)
+        {   // resolve the absolute path of the file on the filesystem.
+            char const *relative_path = path + m->RootLength + 1;
+            size_t             offset = m->LocalPathLength;
+            int                nchars = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, relative_path, -1, NULL, 0);
+            if (nchars == 0 || buflen < (nchars + offset + 1))
+            {   // the path cannot be converted from UTF-8 to UCS-2.
+                OsLayerError("ERROR: %S(%u): Unable to retrieve UCS2 path length for file %S (%08X).\n", __FUNCTION__, GetCurrentThreadId(), path, GetLastError());
+                ReleaseSRWLockShared(&file_system->MountpointLock);
+                return -1;
+            }
+            // start with the local root, and then append the relative path portion.
+            memcpy(pathbuf, m->LocalPath, m->LocalPathLength * sizeof(WCHAR));
+            pathbuf[m->LocalPathLength] = L'\\';
+            if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, relative_path, -1, &pathbuf[m->LocalPathLength+1], nchars) == 0)
+            {   // the path cannot be converted from UTF-8 to UCS-2.
+                OsLayerError("ERROR: %S(%u): Unable to convert UTF8 path to UCS2 for file %S (%08X).\n", __FUNCTION__, GetCurrentThreadId(), path, GetLastError());
+                ReleaseSRWLockShared(&file_system->MountpointLock);
+                return -1;
+            }
+            ReleaseSRWLockShared(&file_system->MountpointLock);
+            // normalize the directory separator characters to the system default.
+            // on Windows, this is not strictly necessary, but on other OS's it is.
+            for (size_t ch = offset + 1, nch = offset + nchars; ch < nch; ++ch)
+            {
+                if (pathbuf[ch] == L'/')
+                    pathbuf[ch]  = L'\\';
+            }
+            return 0;
+        }
+    }
+    OsLayerError("ERROR: %S(%u): Unable to find filesystem mountpoint for file %S.\n", __FUNCTION__, GetCurrentThreadId(), path);
+    ReleaseSRWLockShared(&file_system->MountpointLock);
+    return -1;
+}
+
+/// @summary Opens a file for access. Information necessary to access the file is written to the OS_FILE structure. This function tests each mount point matching the path, in priority order, until one is successful at opening the file or all matching mount points have been tested.
+/// @param file_system The file system interface to query.
+/// @param path The absolute virtual path of the file to open.
+/// @param usage One of OS_FILE_USAGE specifying the intended use of the file.
+/// @param hints One or more of OS_FILE_USAGE_HINTS.
+/// @param file On return, this structure should be populated with the data necessary to access the file. If the file cannot be opened, check the OSError field.
+/// @param relative_path On return, this pointer is updated to point into path, at the start of the portion of the path representing the path to the file, relative to the mount point root path.
+/// @return One of OS_IO_RESULT.
+internal_function int 
+OsResolveAndOpenFile
+(
+    OS_FILE_SYSTEM *file_system, 
+    char const            *path, 
+    int                   usage, 
+    uint32_t              hints, 
+    OS_FILE               *file, 
+    char const  **relative_path
+)
+{   // iterate over the mount points, which are stored in priority order.
+    AcquireSRWLockShared(&file_system->MountpointLock);
+    int            result = OS_IO_RESULT_OSERROR;
+    OS_MOUNTPOINT *mounts = file_system->MountpointTable.MountpointData;
+    for (size_t i = 0,  n = file_system->MountpointTable.Count; i < n; ++i)
+    {
+        OS_MOUNTPOINT *m  = &mounts[i];
+        if (OsMountPointMatchStart(m->Root, path, m->RootLength))
+        {   // attempt to open the file on the mount point.
+            if  ((result = m->OpenFile(m, path + m->RootLength + 1, usage, hints, file)) == OS_IO_RESULT_SUCCESS)
+            {   // the file was successfully opened, so we're done.
+                if (relative_path != NULL)
+                {
+                    *relative_path =  path + m->RootLength + 1;
+                }
+                ReleaseSRWLockShared(&file_system->MountpointLock);
+                return result;
+            }
+            if (result == OS_IO_RESULT_NOT_SUPPORTED)
+            {   // continue checking downstream mount points. one might support the operation.
+                continue;
+            }
+            else if (file->OSError == ERROR_NOT_FOUND || file->OSError == ERROR_FILE_NOT_FOUND)
+            {   // continue checking downstream mount points. one might be able to open the file.
+                continue;
+            }
+            else
+            {   // an actual error was returned; push it upstream.
+                ReleaseSRWLockShared(&file_system->MountpointLock);
+                return result;
+            }
+        }
+    }
+    ReleaseSRWLockShared(&file_system->MountpointLock);
+    file->OSError = ERROR_FILE_NOT_FOUND;
+    return OS_IO_RESULT_OSERROR;
+}
+
+/// @summary Synchronously writes a file. If the file exists, its contents are overwritten; otherwise a new file is created. This operation is generally not supported by archive-based mount points. This function tests each mount point matching the path, in priority order, until one is successful at saving the file or until all matching mount points have been tested.
+/// @param file_system The file system interface.
+/// @param path The virtual path of the file to save.
+/// @param buffer The buffer containing the data to write to the file.
+/// @param amount The number of bytes to copy from the buffer into the file.
+/// @param relative_path On return, this pointer is updated to point into path, at the start of the portion of the path representing the path to the file, relative to the mount point root path.
+/// @return One of OS_IO_RESULT.
+internal_function int 
+OsResolveAndSaveFile
+(
+    OS_FILE_SYSTEM *file_system, 
+    char const            *path, 
+    void const          *buffer, 
+    int64_t              amount, 
+    char const  **relative_path
+)
+{   // iterate over the mount points, which are stored in priority order.
+    AcquireSRWLockShared(&file_system->MountpointLock);
+    int            result = ERROR_NOT_SUPPORTED;
+    OS_MOUNTPOINT *mounts = file_system->MountpointTable.MountpointData;
+    for (size_t i = 0,  n = file_system->MountpointTable.Count; i < n; ++i)
+    {
+        OS_MOUNTPOINT  *m = &mounts[i];
+        if (OsMountPointMatchStart(m->Root, path, m->RootLength))
+        {   // attempt to save the file on the mount point.
+            if ((result = m->SaveFile(m, path + m->RootLength + 1, buffer, amount)) == OS_IO_RESULT_SUCCESS)
+            {   // the file was successfully opened, so we're done.
+                if (relative_path != NULL)
+                {
+                    *relative_path =  path + m->RootLength + 1;
+                }
+                ReleaseSRWLockShared(&file_system->MountpointLock);
+                return result;
+            }
+            if (result == OS_IO_RESULT_NOT_SUPPORTED)
+            {   // continue checking downstream mount points. one might support the operation.
+                continue;
+            }
+            else
+            {   // an actual error was returned; push it upstream.
+                ReleaseSRWLockShared(&file_system->MountpointLock);
+                return result;
+            }
+        }
+    }
+    ReleaseSRWLockShared(&file_system->MountpointLock);
+    return OS_IO_RESULT_NOT_SUPPORTED;
 }
 
 /// @summary Search a list of layers for a given layer name to determine if a layer is supported.
@@ -3401,7 +4592,7 @@ OsMemoryArenaAllocate
 /// @param count The number of items to allocate.
 /// @return A pointer to the start of the array, or nullptr if the arena could not satisfy the allocation request.
 template <typename T>
-public_function inline T*
+public_function T*
 OsMemoryArenaAllocateArray
 (
     OS_MEMORY_ARENA *arena, 
@@ -6177,162 +7368,6 @@ OsKnownPath
     return false;
 }
 
-/// @summary Allocate storage for a mountpoint table.
-/// @param table The OS_VFS_MOUNT_TABLE to initialize.
-/// @param arena The OS_MEMORY_ARENA from which the storage will be allocated.
-/// @param capcity The table capacity, in mount points.
-/// @return Zero if the table is successfully initialized, or -1 if memory allocation failed.
-internal_function int
-OsCreateVfsMountpointTable
-(
-    OS_VFS_MOUNT_TABLE *table, 
-    OS_MEMORY_ARENA    *arena, 
-    size_t           capacity
-)
-{
-    os_arena_marker_t marker = OsMemoryArenaMark(arena);
-
-    // initialize all fields of the mount table instance.
-    ZeroMemory(table, sizeof(OS_VFS_MOUNT_TABLE));
-
-    // allocate storage for the specified number of items.
-    table->Count               = 0;
-    table->Capacity            = capacity;
-    table->MountpointIds       = OsMemoryArenaAllocateArray<uintptr_t   >(arena, capacity);
-    table->MountpointData      = OsMemoryArenaAllocateArray<OS_VFS_MOUNT>(arena, capacity);
-    table->MountpointPriority  = OsMemoryArenaAllocateArray<uint32_t    >(arena, capacity);
-    if (table->MountpointIds  == NULL || table->MountpointData == NULL || table->MountpointPriority == NULL)
-    {
-        ZeroMemory(table, sizeof(OS_VFS_MOUNT_TABLE));
-        OsMemoryArenaResetToMarker(arena, marker);
-        return -1;
-    }
-    return 0;
-}
-
-/// @summary Update a mountpoint table with a new mount point.
-/// @param table The OS_VFS_MOUNT_TABLE to update.
-/// @param id The application-defined identifier of the new mount point.
-/// @param priority The priority value of the mount point being added.
-/// @return A pointer to the mount point data to populate, or NULL if the table is full.
-internal_function OS_VFS_MOUNT*
-OsInsertVfsMountpoint
-(
-    OS_VFS_MOUNT_TABLE *table, 
-    uintptr_t              id, 
-    uint32_t         priority
-)
-{
-    intptr_t ins_idx  = 0;
-    intptr_t min_idx  = 0;
-    intptr_t max_idx  = 0;
-    intptr_t end_idx  =(intptr_t) table->Count;
-
-    if (table->Count == table->Capacity)
-    {
-        return NULL;
-    }
-
-    // perform a binary search to determine where the new item should be inserted.
-    while (min_idx <= max_idx)
-    {   // expect that many items will have the same priority value.
-        intptr_t mid  =(min_idx + max_idx) / 2;
-        uint32_t pri  = table->MountpointPriority[mid];
-        if (priority == pri)
-        {   // find the end of this run so that the new item appears last.
-            ins_idx   = mid;
-            while (priority == table->MountpointPriority[ins_idx])
-            {
-                ins_idx++;
-            }
-            break;
-        }
-        else if (priority > pri)
-        {   // continue searching the lower half of the range.
-            max_idx = mid - 1;
-        }
-        else
-        {   // continue searching the upper half of the range.
-            min_idx = mid + 1;
-        }
-    }
-    // insert the new item into the mount point table at the designated location.
-    if (ins_idx != end_idx)
-    {   // shift the other list items down by one.
-        intptr_t dst = end_idx;
-        intptr_t src = end_idx - 1;
-        do {
-            table->MountpointIds     [dst] = table->MountpointIds     [src];
-            table->MountpointData    [dst] = table->MountpointData    [src];
-            table->MountpointPriority[dst] = table->MountpointPriority[src];
-            dst  = src--;
-        } while (src >= ins_idx);
-        // insert the new item into the list.
-        table->MountpointIds[ins_idx] = id;
-        table->MountpointPriority[ins_idx] = priority;
-        table->Count++;
-    }
-    else
-    {   // insert the item at the end of the list.
-        ins_idx = end_idx++;
-        table->MountpointIds[ins_idx] = id;
-        table->MountpointPriority[ins_idx] = priority;
-        table->Count++;
-    }
-    return &table->MountpointData[ins_idx];
-}
-
-/// @summary Remove a mountpoint at a given location within the mount point table.
-/// @param table The OS_VFS_MOUNT_TABLE to update.
-/// @param index The zero-based index of the item to remove.
-internal_function void
-OsRemoveVfsMountpointAt
-(
-    OS_VFS_MOUNT_TABLE *table, 
-    size_t              index
-)
-{   assert(index <= table->Count && table->Count > 0);
-    if (table->Count > 0)
-    {   
-        size_t dst = index;
-        size_t src = index + 1;
-
-        // release resources associated with the item being unmounted.
-        table->MountpointData[index].Unmount(&table->MountpointData[index]);
-        free(table->MountpointData[index].Root);
-        ZeroMemory(&table->MountpointData[index], sizeof(OS_VFS_MOUNT));
-
-        // shift all of the other items up on top of the removed item.
-        for (size_t i = index, n = table->Count - 1; i < n; ++i, ++dst, ++src)
-        {
-            table->MountpointIds     [dst] = table->MountpointIds     [src];
-            table->MountpointData    [dst] = table->MountpointData    [src];
-            table->MountpointPriority[dst] = table->MountpointPriority[src];
-        }
-        table->Count--;
-    }
-}
-
-/// @summary Removes a mount point with a given ID from a prioritized mount list.
-/// @param table The OS_VFS_MOUNT_TABLE to update.
-/// @param id The unique application identifier of the mount point to remove.
-internal_function void
-OsRemoveVfsMountpointId
-(
-    OS_VFS_MOUNT_TABLE *table, 
-    uintptr_t              id
-)
-{
-    for (size_t i = 0, n = table->Count; i < n; ++i)
-    {
-        if (table->MountpointIds[i] == id)
-        {
-            OsRemoveVfsMountpointAt(table, i);
-            break;
-        }
-    }
-}
-
 /// @summary Retrieve the physical sector size for a block-access device.
 /// @param file The handle to an open file on the device.
 /// @return The size of a physical sector on the specified device.
@@ -6356,928 +7391,6 @@ OsPhysicalSectorSize
     return result ? desc.BytesPerPhysicalSector : DefaultPhysicalSectorSize;
 }
 
-/// @summary Synchronously open a file for access. The information necessary to access the file is written to @a file.
-/// @param mount The mount point performing the file open operation.
-/// @param path The zero-terminated UTF-8 path of the file to open, relative to the mount point root.
-/// @param usage One of OS_VFS_USAGE specifying the intended use of the file by the application.
-/// @param hints One or more of OS_VFS_USAGE_HINTS specifying additional desired behaviors.
-/// @param file If the call returns OS_VFS_RESULT_SUCCESS, this structure should be populated with file data.
-/// @return One of OS_VFS_RESULT indicating the result of the operation.
-internal_function int 
-OsVfsOpenFile_Filesystem
-(
-    OS_VFS_MOUNT *mount, 
-    char const    *path, 
-    int           usage, 
-    uint32_t      hints, 
-    OS_VFS_FILE   *file
-)
-{
-    LARGE_INTEGER     fsize = {0};
-    OS_VFS_MOUNT_FS     *fs =(OS_VFS_MOUNT_FS*) mount->StateData;
-    WCHAR          *pathbuf = OsVfsMakeSystemPath(fs, path);
-    HANDLE            hFile = INVALID_HANDLE_VALUE;
-    HANDLE         hFileMap = NULL;
-    DWORD            access = 0;
-    DWORD             share = 0;
-    DWORD            create = 0;
-    DWORD             flags = 0;
-    DWORD           protect = 0;
-    size_t            ssize = 0;
-
-    // initialize the fields of the file object.
-    ZeroMemory(file, sizeof(OS_VFS_FILE));
-
-    // figure out access flags, share modes, etc. based on the intended usage.
-    switch (usage)
-    {
-    case OS_VFS_USAGE_STREAM_IN:
-        {
-            access = GENERIC_READ;
-            share  = FILE_SHARE_READ;
-            create = OPEN_EXISTING;
-            flags  = FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OVERLAPPED;
-            if (hints & OS_VFS_USAGE_HINT_UNBUFFERED)
-            {
-                flags |= FILE_FLAG_NO_BUFFERING;
-            }
-        } break;
-    case OS_VFS_USAGE_STREAM_OUT:
-        {
-            access = GENERIC_READ | GENERIC_WRITE;
-            share  = FILE_SHARE_READ;
-            create = CREATE_ALWAYS;
-            flags  = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OVERLAPPED;
-            if (hints & OS_VFS_USAGE_HINT_UNBUFFERED)
-            {
-                flags |= FILE_FLAG_NO_BUFFERING;
-            }
-        } break;
-    case OS_VFS_USAGE_MMAP_READ:
-        {
-            access  = GENERIC_READ;
-            share   = FILE_SHARE_READ;
-            create  = OPEN_EXISTING;
-            flags   = FILE_FLAG_SEQUENTIAL_SCAN;
-            protect = PAGE_READONLY;
-        } break;
-    case OS_VFS_USAGE_MMAP_WRITE:
-        {
-            access  = GENERIC_READ | GENERIC_WRITE;
-            share   = 0;
-            create  = OPEN_ALWAYS;
-            flags   = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN;
-            protect = PAGE_READWRITE;
-        } break;
-    case OS_VFS_USAGE_MANUAL_IO:
-        {
-            access = GENERIC_READ | GENERIC_WRITE;
-            share  = FILE_SHARE_READ;
-            create = OPEN_ALWAYS;
-            flags  = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN;
-            if (hints & OS_VFS_USAGE_HINT_UNBUFFERED)
-            {
-                flags |= FILE_FLAG_NO_BUFFERING;
-            }
-            if (hints & OS_VFS_USAGE_HINT_ASYNCHRONOUS)
-            {
-                flags |= FILE_FLAG_OVERLAPPED;
-            }
-            if (hints & OS_VFS_USAGE_HINT_OVERWRITE)
-            {
-                create = CREATE_ALWAYS;
-            }
-        } break;
-    default:
-        return OS_VFS_RESULT_NOT_SUPPORTED;
-    }
-
-    // open the file as specified by the caller.
-    if ((hFile = CreateFileW(pathbuf, access, share, NULL, create, flags, NULL)) == INVALID_HANDLE_VALUE)
-    {   // the file cannot be opened.
-        OsLayerError("ERROR: %S(%u): Unable to open file %s (user path %S) (%08X).\n", __FUNCTION__, GetCurrentThreadId(), pathbuf, path, GetLastError());
-        goto cleanup_and_fail;
-    }
-
-    // retrieve basic file attributes.
-    ssize = OsPhysicalSectorSize(hFile);
-    if (!GetFileSizeEx(hFile, &fsize))
-    {   // the file size cannot be retrieved.
-        OsLayerError("ERROR: %S(%u): Unable to retrieve size for file %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), pathbuf, GetLastError());
-        goto cleanup_and_fail;
-    }
-
-    // clean up temporary buffers.
-    free(pathbuf); pathbuf = NULL;
-
-    // if the file is being opened for memory-mapped I/O, create the mapping.
-    if (usage == OS_VFS_USAGE_MMAP_READ || usage == OS_VFS_USAGE_MMAP_WRITE)
-    {   // create the file mapping over the entire file.
-        if ((hFileMap = CreateFileMapping(hFile, NULL, protect, 0, 0, NULL)) == NULL)
-        {
-            OsLayerError("ERROR: %S(%u): Unable to create file mapping for file %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), pathbuf, GetLastError());
-            goto cleanup_and_fail;
-        }
-    }
-
-    // set output parameters and clean up.
-    file->Filedes    = hFile;
-    file->Filemap    = hFileMap;
-    file->SectorSize = ssize;
-    file->BaseOffset = 0;
-    file->BaseSize   = fsize.QuadPart;
-    file->FileSize   = fsize.QuadPart;
-    file->FileHints  = hints;
-    file->FileFlags  = 0;
-    file->OSError    = ERROR_SUCCESS;
-    file->OpenFlags  = flags;
-    return OS_VFS_RESULT_SUCCESS;
-
-cleanup_and_fail:
-    if (hFileMap != NULL) CloseHandle(hFileMap);
-    if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
-    if (pathbuf != NULL) free(pathbuf);
-    ZeroMemory(file, sizeof(OS_VFS_FILE));
-    file->OpenFlags  = flags;
-    file->Filedes    = INVALID_HANDLE_VALUE;
-    file->Filemap    = NULL;
-    file->FileHints  = hints;
-    file->OSError    = GetLastError();
-    return OS_VFS_RESULT_OSERROR;
-}
-
-/// @summary Synchronously write an entire file to disk. If the file exists, its contents are overwritten; otherwise, a new file is created.
-/// @param mount The mount point performing the file save operation.
-/// @param path The zero-terminated UTF-8 path of the file to write, relative to the mount point root.
-/// @param data The buffer containing the data to write to the file.
-/// @param file_size The number of bytes to read from the data buffer and write to the file.
-/// @return One of OS_VFS_RESULT indicating the result of the operation.
-internal_function int
-OsVfsSaveFile_Filesystem
-(
-    OS_VFS_MOUNT *mount, 
-    char    const *path, 
-    void    const *data, 
-    int64_t const  size
-)
-{
-    FILE_END_OF_FILE_INFO eof;
-    FILE_ALLOCATION_INFO  sec;
-    OS_VFS_MOUNT_FS       *fs = (OS_VFS_MOUNT_FS*) mount->StateData;
-    uint8_t const     *buffer = (uint8_t const  *) data;
-    SYSTEM_INFO       sysinfo = {0};
-    HANDLE                 fd = INVALID_HANDLE_VALUE;
-    DWORD           mem_flags = MEM_RESERVE  | MEM_COMMIT;
-    DWORD         mem_protect = PAGE_READWRITE;
-    DWORD              access = GENERIC_READ | GENERIC_WRITE;
-    DWORD               share = FILE_SHARE_READ;
-    DWORD              create = CREATE_ALWAYS;
-    DWORD               flags = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING;
-    WCHAR          *file_path = NULL;
-    size_t      file_path_len = 0;
-    WCHAR          *temp_path = NULL;
-    WCHAR           *temp_ext = NULL;
-    size_t       temp_ext_len = 0;
-    DWORD           page_size = 4096;
-    int64_t         file_size = 0;
-    uint8_t    *sector_buffer = NULL;
-    size_t       sector_count = 0;
-    int64_t      sector_bytes = 0;
-    size_t        sector_over = 0;
-    size_t        sector_size = 0;
-
-    // get the system page size, and allocate a single-page buffer. to support
-    // unbuffered I/O, the buffer must be allocated on a sector-size boundary
-    // and must also be a multiple of the physical disk sector size. allocating
-    // a virtual memory page using VirtualAlloc will satisfy these constraints.
-    GetNativeSystemInfo(&sysinfo); page_size = sysinfo.dwPageSize;
-    if ((sector_buffer = (uint8_t*) VirtualAlloc(NULL, page_size, mem_flags, mem_protect)) == NULL)
-    {   // unable to allocate the overage buffer; check GetLastError().
-        OsLayerError("ERROR: %S(%u): Unable to allocate overage buffer for file %S (%08X).\n", __FUNCTION__, GetCurrentThreadId(), path, GetLastError());
-        goto cleanup_and_fail;
-    }
-
-    // generate a temporary filename in the same location as the output file.
-    // this prevents the file from being copied when it is moved, which happens
-    // if the temp file isn't on the same volume as the output file.
-    if ((file_path = OsVfsMakeSystemPath(fs, path)) == NULL)
-    {   // unable to allocate the output path buffer.
-        OsLayerError("ERROR: %S(%u): Unable to allocate system path buffer for file %S.\n", __FUNCTION__, GetCurrentThreadId(), path);
-        goto cleanup_and_fail;
-    }
-    temp_ext_len   =  4; // wcslen(L".tmp")
-    file_path_len  =  wcslen(file_path);
-    if ((temp_path = (WCHAR*) malloc((file_path_len + temp_ext_len + 1) * sizeof(WCHAR))) == NULL)
-    {   // unable to allocate temporary path memory.
-        OsLayerError("ERROR: %S(%u): Unable to allocate temporary path buffer for file %s (%S).\n", __FUNCTION__, GetCurrentThreadId(), file_path, path);
-        goto cleanup_and_fail;
-    }
-    temp_ext  = temp_path + file_path_len;
-    memcpy(temp_path, file_path, file_path_len   * sizeof(WCHAR));
-    memcpy(temp_ext , L".tmp"  ,(temp_ext_len+1) * sizeof(WCHAR));
-
-    // create the temporary file, and get the physical disk sector size.
-    // pre-allocate storage for the file contents, which should improve performance.
-    if ((fd = CreateFile(temp_path, access, share, NULL, create, flags, NULL)) == INVALID_HANDLE_VALUE)
-    {   // unable to create the new file; check GetLastError().
-        OsLayerError("ERROR: %S(%u): Unable to create staging file %s for file %S (%08X).\n", __FUNCTION__, GetCurrentThreadId(), temp_path, path, GetLastError());
-        goto cleanup_and_fail;
-    }
-    sector_size = OsPhysicalSectorSize(fd);
-    file_size   = OsAlignUp(size, sector_size);
-    sec.AllocationSize.QuadPart = file_size;
-    SetFileInformationByHandle(fd, FileAllocationInfo , &sec, sizeof(sec));
-
-    // copy the data extending into the tail sector into the overage buffer.
-    sector_count = size_t (size / sector_size);
-    sector_bytes = int64_t(sector_size) * sector_count;
-    sector_over  = size_t (size - sector_bytes);
-    if (sector_over > 0)
-    {   // buffer the overlap amount. note that the page will have been zeroed.
-        memcpy(sector_buffer, &buffer[sector_bytes], sector_over);
-    }
-
-    // write the data to the file.
-    if (sector_bytes > 0)
-    {   // write the bulk of the data, if the data is > 1 sector.
-        int64_t amount = 0;
-        DWORD   nwrite = 0;
-        while  (amount < sector_bytes)
-        {
-            DWORD n = (sector_bytes - amount) < 0xFFFFFFFFU ? DWORD(sector_bytes - amount) : 0xFFFFFFFFU;
-            if (!WriteFile(fd, &buffer[amount], n, &nwrite, NULL))
-            {
-                OsLayerError("ERROR: %S(%u): Failed write to staging file %s for file %S (%08X).\n", __FUNCTION__, GetCurrentThreadId(), temp_path, path, GetLastError());
-                goto cleanup_and_fail;
-            }
-            amount += nwrite;
-        }
-    }
-    if (sector_over > 0)
-    {   // write the remaining sector-sized chunk of data.
-        DWORD n = (DWORD) sector_size;
-        DWORD w = (DWORD) 0;
-        if (!WriteFile(fd, sector_buffer, n, &w, NULL))
-        {
-            OsLayerError("ERROR: %S(%u): Failed last-sector write to staging file %s for file %S (%08X).\n", __FUNCTION__, GetCurrentThreadId(), temp_path, path, GetLastError());
-            goto cleanup_and_fail;
-        }
-    }
-
-    // set the correct end-of-file marker.
-    eof.EndOfFile.QuadPart = size;
-    SetFileInformationByHandle(fd, FileEndOfFileInfo, &eof, sizeof(eof));
-    SetFileValidData(fd, eof.EndOfFile.QuadPart);
-
-    // close the file, and move it to the destination path.
-    CloseHandle(fd); fd = INVALID_HANDLE_VALUE;
-    if (!MoveFileEx(temp_path, file_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-    {   // the file could not be moved into place; check GetLastError().
-        OsLayerError("ERROR: %S(%u): Unable to move staging file %s to %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), temp_path, file_path, GetLastError());
-        goto cleanup_and_fail;
-    }
-
-    // clean up our temporary buffers; we're done.
-    free(temp_path); temp_path =  NULL;
-    free(file_path); file_path =  NULL;
-    VirtualFree(sector_buffer, 0, MEM_RELEASE);
-    return OS_VFS_RESULT_SUCCESS;
-
-cleanup_and_fail:
-    if (fd != INVALID_HANDLE_VALUE) CloseHandle(fd);
-    if (temp_path     != NULL)      DeleteFile(temp_path);
-    if (temp_path     != NULL)      free(temp_path);
-    if (file_path     != NULL)      free(file_path);
-    if (sector_buffer != NULL)      VirtualFree(sector_buffer, 0, MEM_RELEASE);
-    return OS_VFS_RESULT_OSERROR;
-}
-
-/// @summary Determine whether a given mount point supports a particular type of file access.
-/// @param mount The mount point to query.
-/// @param usage One of OS_VFS_USAGE specifying the intended use of the file by the application.
-/// @return OS_VFS_RESULT_SUCCESS if the usage is supported, or OS_VFS_RESULT_NOT_SUPPORTED.
-internal_function int
-OsVfsSupportsUsage_Filesystem
-(
-    OS_VFS_MOUNT *mount, 
-    int           usage
-)
-{
-    switch (usage)
-    {
-        case OS_VFS_USAGE_STREAM_IN : return OS_VFS_RESULT_SUCCESS;
-        case OS_VFS_USAGE_STREAM_OUT: return OS_VFS_RESULT_SUCCESS;
-        case OS_VFS_USAGE_MMAP_READ : return OS_VFS_RESULT_SUCCESS;
-        case OS_VFS_USAGE_MMAP_WRITE: return OS_VFS_RESULT_SUCCESS;
-        case OS_VFS_USAGE_MANUAL_IO : return OS_VFS_RESULT_SUCCESS;
-        default: return OS_VFS_RESULT_NOT_SUPPORTED;
-    }
-    UNREFERENCED_PARAMETER(mount);
-}
-
-/// @summary Define the signature for the callback invoked when a mount point is being removed.
-/// @param mount The mount point being unmounted.
-internal_function void
-OsVfsUnmount_Filesystem
-(
-    OS_VFS_MOUNT *mount
-)
-{
-    if (mount != NULL)
-    {   // free the internal state data.
-        free(mount->StateData);
-    }
-}
-
-/// @summary Initialize a filesystem-based mountpoint and allocate the private state data.
-/// @param mount The OS_VFS_MOUNT instance to initialize.
-/// @param local_path The NULL-terminated string specifying the local path that functions as the root of the mount point. This directory must exist.
-/// @return true if the mount point was initialized successfully.
-internal_function int
-OsVfsCreateMount_Filesystem
-(
-    OS_VFS_MOUNT     *mount, 
-    WCHAR const *local_path
-)
-{
-    OS_VFS_MOUNT_FS *fs = NULL;
-    uint8_t     *buffer = NULL;
-    DWORD         share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-    DWORD         flags = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS;
-    HANDLE         hDir = INVALID_HANDLE_VALUE;
-    DWORD        length = 0;
-
-    // to get a consistent, fully-resolved path to use as the base path, 
-    // open the directory, and then retrieve the path from the resulting handle.
-    if ((hDir = CreateFile(local_path, 0, share, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL)) == INVALID_HANDLE_VALUE)
-    {
-        OsLayerError("ERROR: %S(%u): Unable to initialize filesystem mount point %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), local_path, GetLastError());
-        goto cleanup_and_fail;
-    }
-    // supposedly GetFinalPathNameByHandleW will return the length in TCHARS, including the zero terminator.
-    if ((length = GetFinalPathNameByHandleW(hDir, NULL, 0, flags)) == 0)
-    {
-        OsLayerError("ERROR: %S(%u): Unable to retrieve path name length for filesystem mount point %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), local_path, GetLastError());
-        goto cleanup_and_fail;
-    }
-    if ((buffer = (uint8_t*) malloc(sizeof(OS_VFS_MOUNT_FS) + (length * sizeof(WCHAR)))) == NULL)
-    {
-        OsLayerError("ERROR: %S(%u): Unable to allocate memory for filesystem mount point %s.\n", __FUNCTION__, GetCurrentThreadId(), local_path);
-        goto cleanup_and_fail;
-    }
-    fs = (OS_VFS_MOUNT_FS*)   buffer;
-    fs->LocalPath = (WCHAR*)  buffer + sizeof(OS_VFS_MOUNT_FS);
-    fs->LocalPathLength     = length;
-    ZeroMemory(fs->LocalPath, length * sizeof(WCHAR));
-    // supposedly cchFilePath is the length of fs->LocalPath in TCHARs, **not** including the zero terminator.
-    // in the success case, the return value is the number of TCHARs written, **not** including the zero terminator.
-    if (GetFinalPathNameByHandleW(hDir, fs->LocalPath, length - 1, flags) != (length - 1))
-    {
-        OsLayerError("ERROR: %S(%u): Unable to retrieve path name for filesystem mount point %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), local_path, GetLastError());
-        goto cleanup_and_fail;
-    }
-    CloseHandle(hDir);
-
-    // everything was successful; set up the mount point fields.
-    // the Id, Root and RootLength fields are set up by the caller.
-    mount->StateData     = fs;
-    mount->OpenFile      = OsVfsOpenFile_Filesystem;
-    mount->SaveFile      = OsVfsSaveFile_Filesystem;
-    mount->SupportsUsage = OsVfsSupportsUsage_Filesystem;
-    mount->Unmount       = OsVfsUnmount_Filesystem;
-    return 0;
-
-cleanup_and_fail:
-    if (hDir != INVALID_HANDLE_VALUE) CloseHandle(hDir);
-    if (fs != NULL) free(fs);
-    return -1;
-}
-
-/// @summary Synchronously open a file for access. The information necessary to access the file is written to @a file.
-/// @param mount The mount point performing the file open operation.
-/// @param path The zero-terminated UTF-8 path of the file to open, relative to the mount point root.
-/// @param usage One of OS_VFS_USAGE specifying the intended use of the file by the application.
-/// @param hints One or more of OS_VFS_USAGE_HINTS specifying additional desired behaviors.
-/// @param file If the call returns OS_VFS_RESULT_SUCCESS, this structure should be populated with file data.
-/// @return One of OS_VFS_RESULT indicating the result of the operation.
-internal_function int 
-OsVfsOpenFile_Tarball
-(
-    OS_VFS_MOUNT *mount, 
-    char const    *path, 
-    int           usage, 
-    uint32_t      hints, 
-    OS_VFS_FILE   *file
-)
-{
-    OS_VFS_MOUNT_TAR     *tar =(OS_VFS_MOUNT_TAR*) mount->StateData;
-    uint32_t const *hash_list = tar->TarballData.EntryHash;
-    HANDLE              hFile = INVALID_HANDLE_VALUE;
-    HANDLE           hFileMap = NULL;
-    DWORD              access = 0;
-    DWORD               share = 0;
-    DWORD              create = 0;
-    DWORD               flags = 0;
-    DWORD             protect = 0;
-    uint32_t             hash = OsHashPath(path);
-
-    // initialize the fields of the file object.
-    ZeroMemory(file, sizeof(OS_VFS_FILE));
-
-    // figure out access flags, share modes, etc. based on the intended usage.
-    switch (usage)
-    {
-    case OS_VFS_USAGE_STREAM_IN:
-        {
-            access = GENERIC_READ;
-            share  = FILE_SHARE_READ;
-            create = OPEN_EXISTING;
-            flags  = FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OVERLAPPED;
-            // alignment restrictions can't be guaranteed, so unbuffered I/O isn't supported.
-        } break;
-    case OS_VFS_USAGE_STREAM_OUT:
-        { // stream out is not supported.
-        } return OS_VFS_RESULT_NOT_SUPPORTED;
-    case OS_VFS_USAGE_MMAP_READ:
-        {
-            access  = GENERIC_READ;
-            share   = FILE_SHARE_READ;
-            create  = OPEN_EXISTING;
-            flags   = FILE_FLAG_SEQUENTIAL_SCAN;
-            protect = PAGE_READONLY;
-        } break;
-    case OS_VFS_USAGE_MMAP_WRITE:
-        { // mmap-for-write is not supported.
-        } return OS_VFS_RESULT_NOT_SUPPORTED;
-    case OS_VFS_USAGE_MANUAL_IO:
-        { // manual I/O is not supported (writing is not supported.)
-        } return OS_VFS_RESULT_NOT_SUPPORTED;
-    default:
-        return OS_VFS_RESULT_NOT_SUPPORTED;
-    }
-
-    // locate the file within the tarball by comparing hashes.
-    for (size_t i = 0, n = tar->TarballData.EntryCount; i < n; ++i)
-    {
-        if (hash_list[i] == hash)
-        {   // hashes match, confirm by comparing strings.
-            if (_stricmp(path, tar->TarballData.EntryInfo[i].FullPath) == 0)
-            {   // found an exact match for the path; duplicate the file handle(s) for the caller.
-                HANDLE p = GetCurrentProcess();
-                if (!DuplicateHandle(p, tar->TarFiledes, p, &hFile, 0, FALSE, DUPLICATE_SAME_ACCESS))
-                {
-                    OsLayerError("ERROR: %S(%u): Unable to duplicate TAR file handle for file %S (%08X).\n", __FUNCTION__, GetCurrentThreadId(), path, GetLastError());
-                    goto cleanup_and_fail;
-                }
-                if (usage == OS_VFS_USAGE_MMAP_READ)
-                {   // also create a new read-only file mapping object.
-                    if ((hFileMap = CreateFileMapping(hFile, NULL, PAGE_READONLY, 0, 0, NULL)) == NULL)
-                    {
-                        OsLayerError("ERROR: %S(%u): Unable to create file mapping object for file %S (%08X).\n", __FUNCTION__, GetCurrentThreadId(), path, GetLastError());
-                        goto cleanup_and_fail;
-                    }
-                }
-                file->Filedes    = hFile;
-                file->Filemap    = hFileMap;
-                file->SectorSize = tar->SectorSize;
-                file->BaseOffset = tar->TarballData.EntryInfo[i].DataOffset;
-                file->BaseSize   = tar->TarballData.EntryInfo[i].FileSize;
-                file->FileSize   = tar->TarballData.EntryInfo[i].FileSize;
-                file->FileHints  = hints;
-                file->FileFlags  = 0;
-                file->OSError    = ERROR_SUCCESS;
-                file->OpenFlags  = flags;
-                return OS_VFS_RESULT_SUCCESS;
-            }
-        }
-    }
-
-    // else, the file was not found in the tarball.
-    // fall-through to cleanup_and_fail.
-    SetLastError(ERROR_FILE_NOT_FOUND);
-
-cleanup_and_fail:
-    if (hFileMap != NULL) CloseHandle(hFileMap);
-    if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
-    ZeroMemory(file, sizeof(OS_VFS_FILE));
-    file->OpenFlags  = flags;
-    file->Filedes    = INVALID_HANDLE_VALUE;
-    file->Filemap    = NULL;
-    file->FileHints  = hints;
-    file->OSError    = GetLastError();
-    return OS_VFS_RESULT_OSERROR;
-}
-
-/// @summary Synchronously write an entire file to disk. If the file exists, its contents are overwritten; otherwise, a new file is created.
-/// @param mount The mount point performing the file save operation.
-/// @param path The zero-terminated UTF-8 path of the file to write, relative to the mount point root.
-/// @param data The buffer containing the data to write to the file.
-/// @param file_size The number of bytes to read from the data buffer and write to the file.
-/// @return One of OS_VFS_RESULT indicating the result of the operation.
-internal_function int
-OsVfsSaveFile_Tarball
-(
-    OS_VFS_MOUNT *mount, 
-    char    const *path, 
-    void    const *data, 
-    int64_t const  size
-)
-{
-    UNREFERENCED_PARAMETER(mount);
-    UNREFERENCED_PARAMETER(path);
-    UNREFERENCED_PARAMETER(data);
-    UNREFERENCED_PARAMETER(size);
-    return OS_VFS_RESULT_NOT_SUPPORTED;
-}
-
-/// @summary Determine whether a given mount point supports a particular type of file access.
-/// @param mount The mount point to query.
-/// @param usage One of OS_VFS_USAGE specifying the intended use of the file by the application.
-/// @return OS_VFS_RESULT_SUCCESS if the usage is supported, or OS_VFS_RESULT_NOT_SUPPORTED.
-internal_function int
-OsVfsSupportsUsage_Tarball
-(
-    OS_VFS_MOUNT *mount, 
-    int           usage
-)
-{
-    switch (usage)
-    {
-        case OS_VFS_USAGE_STREAM_IN : return OS_VFS_RESULT_SUCCESS;
-        case OS_VFS_USAGE_STREAM_OUT: return OS_VFS_RESULT_NOT_SUPPORTED;
-        case OS_VFS_USAGE_MMAP_READ : return OS_VFS_RESULT_SUCCESS;
-        case OS_VFS_USAGE_MMAP_WRITE: return OS_VFS_RESULT_NOT_SUPPORTED;
-        case OS_VFS_USAGE_MANUAL_IO : return OS_VFS_RESULT_NOT_SUPPORTED;
-        default: return OS_VFS_RESULT_NOT_SUPPORTED;
-    }
-    UNREFERENCED_PARAMETER(mount);
-}
-
-/// @summary Define the signature for the callback invoked when a mount point is being removed.
-/// @param mount The mount point being unmounted.
-internal_function void
-OsVfsUnmount_Tarball
-(
-    OS_VFS_MOUNT *mount
-)
-{
-    if (mount != NULL)
-    {   // free the internal state data.
-        if (mount->StateData != NULL)
-        {
-            OS_VFS_MOUNT_TAR *tar = (OS_VFS_MOUNT_TAR*) mount->StateData;
-            OsUnloadTarball(&tar->TarballData);
-            CloseHandle(tar->TarFiledes);
-        }
-        free(mount->StateData);
-    }
-}
-
-/// @summary Initialize a tarball-based mountpoint and allocate the private state data.
-/// @param mount The OS_VFS_MOUNT instance to initialize.
-/// @param local_path The NULL-terminated string specifying the local path that functions as the root of the mount point. This directory must exist.
-/// @return Zero if the mount point was initialized successfully, or -1 if an error occurred.
-internal_function int
-OsVfsCreateMount_Tarball
-(
-    OS_VFS_MOUNT     *mount, 
-    WCHAR const *local_path
-)
-{
-    OS_VFS_MOUNT_TAR *tar = NULL;
-    uint8_t       *buffer = NULL;
-    DWORD          access = GENERIC_READ;
-    DWORD          create = OPEN_EXISTING;
-    DWORD           share = FILE_SHARE_READ;
-    DWORD           flags = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS;
-    HANDLE           hTar = INVALID_HANDLE_VALUE;
-    DWORD          result = ERROR_SUCCESS;
-    DWORD          length = 0;
-
-    // to get a consistent, fully-resolved path to use as the base path, 
-    // open the file, and then retrieve the path from the resulting handle.
-    if ((hTar = CreateFile(local_path, access, share, NULL, create, FILE_FLAG_SEQUENTIAL_SCAN, NULL)) == INVALID_HANDLE_VALUE)
-    {
-        OsLayerError("ERROR: %S(%u): Unable to initialize tarball mount point %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), local_path, GetLastError());
-        goto cleanup_and_fail;
-    }
-    // supposedly GetFinalPathNameByHandleW will return the length in TCHARS, including the zero terminator.
-    if ((length = GetFinalPathNameByHandleW(hTar, NULL, 0, flags)) == 0)
-    {
-        OsLayerError("ERROR: %S(%u): Unable to retrieve path name length for tarball mount point %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), local_path, GetLastError());
-        goto cleanup_and_fail;
-    }
-    if ((buffer = (uint8_t*) malloc(sizeof(OS_VFS_MOUNT_TAR) + (length * sizeof(WCHAR)))) == NULL)
-    {
-        OsLayerError("ERROR: %S(%u): Unable to allocate memory for tarball mount point %s.\n", __FUNCTION__, GetCurrentThreadId(), local_path);
-        goto cleanup_and_fail;
-    }
-    tar = (OS_VFS_MOUNT_TAR*)  buffer;
-    tar->LocalPath = (WCHAR*)  buffer + sizeof(OS_VFS_MOUNT_TAR);
-    tar->LocalPathLength     = length;
-    ZeroMemory(tar->LocalPath, length * sizeof(WCHAR));
-    // supposedly cchFilePath is the length of fs->LocalPath in TCHARs, **not** including the zero terminator.
-    // in the success case, the return value is the number of TCHARs written, **not** including the zero terminator.
-    if (GetFinalPathNameByHandleW(hTar, tar->LocalPath, length - 1, flags) != (length - 1))
-    {
-        OsLayerError("ERROR: %S(%u): Unable to retrieve path name for tarball mount point %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), local_path, GetLastError());
-        goto cleanup_and_fail;
-    }
-    if (OsLoadTarball(&tar->TarballData, hTar, result) < 0)
-    {
-        OsLayerError("ERROR: %S(%u): Unable to parse tarball for mount point %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), local_path, result);
-        goto cleanup_and_fail;
-    }
-
-    // everything was successful; set up the mount point fields.
-    // the Id, Root and RootLength fields are set up by the caller.
-    tar->TarFiledes      = hTar;
-    tar->SectorSize      = OsPhysicalSectorSize(hTar);
-    mount->StateData     = tar;
-    mount->OpenFile      = OsVfsOpenFile_Tarball;
-    mount->SaveFile      = OsVfsSaveFile_Tarball;
-    mount->SupportsUsage = OsVfsSupportsUsage_Tarball;
-    mount->Unmount       = OsVfsUnmount_Tarball;
-    return 0;
-
-cleanup_and_fail:
-    if (hTar != INVALID_HANDLE_VALUE) CloseHandle(hTar);
-    OsUnloadTarball(&tar->TarballData);
-    if (tar != NULL) free(tar);
-    return -1;
-}
-
-/// @summary Performs all of the common setup when creating a new mount point.
-/// @param driver The VFS driver instance the mount point is attached to.
-/// @param source_wide The NULL-terminated source directory or file path.
-/// @param source_attr The attributes of the source path, as returned by GetFileAttributes().
-/// @param mount_path The NULL-terminated UTF-8 string specifying the mount point root exposed externally.
-/// @param priority The priority of the mount point. Higher numeric values indicate higher priority.
-/// @param mount_id An application-defined unique identifier for the mount point. This is necessary if the application later wants to remove this specific mount point, but not any of the others that are mounted with the same mount_path.
-/// @return Zero if the mount point was successfully installed, or -1 if an error occurred.
-internal_function int 
-OsVfsSetupMountpoint
-(
-    OS_FILE_SYSTEM  *driver, 
-    WCHAR      *source_wide, 
-    DWORD       source_attr, 
-    char const  *mount_path, 
-    uint32_t       priority, 
-    uintptr_t      mount_id
-)
-{   
-    OS_VFS_MOUNT *mount        = NULL;
-    char         *mount_root   = NULL;
-    size_t        mount_bytes  = strlen(mount_path);
-    size_t        source_chars = wcslen(source_wide);
-    
-    // create the mount point record in the prioritized list.
-    AcquireSRWLockExclusive(&driver->MountpointLock);
-    if ((mount = OsInsertVfsMountpoint(&driver->MountpointTable, mount_id, priority)) == NULL)
-    {   // most likely, the mountpoint table is full.
-        OsLayerError("ERROR: %S(%u): Unable to insert mountpoint %S (%Iu/%Iu mountpoints used.)\n", __FUNCTION__, GetCurrentThreadId(), mount_path, driver->MountpointTable.Count, driver->MountpointTable.Capacity);
-        goto cleanup_and_fail;
-    }
-
-    // initialize the basic mount point properties:
-    mount->Id         = mount_id;
-    mount->Root       = NULL;
-    mount->RootLength = mount_bytes;
-
-    // create version of mount_path with trailing slash.
-    if (mount_bytes && mount_path[mount_bytes-1] != '/')
-    {   // it's necessary to append the trailing slash.
-        if ((mount_root = (char*) malloc(mount_bytes  + 2)) == NULL)
-        {
-            OsLayerError("ERROR: %S(%u): Unable to allocate memory for mount point root path string.\n", __FUNCTION__, GetCurrentThreadId());
-            goto cleanup_and_fail;
-        }
-        memcpy(mount_root, mount_path, mount_bytes);
-        mount_root[mount_bytes+0] = '/';
-        mount_root[mount_bytes+1] =  0 ;
-        mount->Root = mount_root;
-    }
-    else
-    {   // the mount path has the trailing slash; copy the string.
-        if ((mount_root = (char*) malloc(mount_bytes  + 1)) == NULL)
-        {
-            OsLayerError("ERROR: %S(%u): Unable to allocate memory for mount point root path string.\n", __FUNCTION__, GetCurrentThreadId());
-            goto cleanup_and_fail;
-        }
-        memcpy(mount_root, mount_path, mount_bytes);
-        mount_root[mount_bytes] = 0;
-        mount->Root = mount_root;
-    }
-
-    // initialize the mount point internals based on the source type.
-    if (source_attr & FILE_ATTRIBUTE_DIRECTORY)
-    {   // set up a filesystem-based mount point.
-        if (OsVfsCreateMount_Filesystem(mount, source_wide) < 0)
-        {   // OsVfsCreateMount_Filesystem outputs its own errors.
-            goto cleanup_and_fail;
-        }
-        ReleaseSRWLockExclusive(&driver->MountpointLock);
-        return 0;
-    }
-    else
-    {   // this is an archive file. extract the file extension.
-        WCHAR *ext = source_wide + source_chars;
-        while (ext > source_wide)
-        {   // search for the final period character.
-            if (*ext == L'.')
-            {   // ext points to the first character of the extension.
-                ext++;
-                break;
-            }
-            else ext--;
-        }
-        // now a bunch of if (wcsicmp(ext, L"zip") { ... } etc.
-        if (!_wcsicmp(ext, L"tar"))
-        {   // set up a tarball-based mount point.
-            if (OsVfsCreateMount_Tarball(mount, source_wide) < 0)
-            {   // OsVfsCreateMount_Tarball outputs its own errors.
-                goto cleanup_and_fail;
-            }
-            ReleaseSRWLockExclusive(&driver->MountpointLock);
-            return 0;
-        }
-        // ...
-        else
-        {
-            OsLayerError("ERROR: %S(%u): Mountpoint extension %s has no associated driver.\n", __FUNCTION__, GetCurrentThreadId(), ext);
-            goto cleanup_and_fail;
-        }
-    }
-
-cleanup_and_fail:
-    if (mount != NULL) OsRemoveVfsMountpointId(&driver->MountpointTable, mount_id);
-    ReleaseSRWLockExclusive(&driver->MountpointLock);
-    if (mount_root) free(mount_root);
-    return -1;
-}
-
-/// @summary Resolves a virtual path to a filesystem mount point, and then converts the path to an absolute path on the filesystem. Non-filesystem mount points are skipped.
-/// @param driver The virtual file system driver to search.
-/// @param path The virtual path to translate to a filesystem path.
-/// @param pathbuf The buffer that will receive the filesystem path.
-/// @param buflen The maximum number of wide characters to write to pathbuf.
-/// @return Zero if the path was successfully resolved, or -1 if an error occurred.
-internal_function int 
-OsVfsResolveFilesystemPath
-(
-    OS_FILE_SYSTEM *driver, 
-    char const       *path, 
-    WCHAR         *pathbuf, 
-    size_t          buflen
-)
-{   // iterate over the mount points, which are stored in priority order.
-    AcquireSRWLockShared(&driver->MountpointLock);
-    OS_VFS_MOUNT *mounts = driver->MountpointTable.MountpointData;
-    for (size_t i = 0, n = driver->MountpointTable.Count; i < n; ++i)
-    {
-        OS_VFS_MOUNT *m  = &mounts[i];
-        if (OsMountPointMatchStart(m->Root, path, m->RootLength) && m->OpenFile == OsVfsOpenFile_Filesystem)
-        {   // resolve the absolute path of the file on the filesystem.
-            OS_VFS_MOUNT_FS       *fs =(OS_VFS_MOUNT_FS*) m->StateData;
-            char const *relative_path = path + m->RootLength + 1;
-            size_t             offset        = fs->LocalPathLength;
-            int                nchars        = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, relative_path, -1, NULL, 0);
-            if (nchars == 0 || buflen < (nchars + offset + 1))
-            {   // the path cannot be converted from UTF-8 to UCS-2.
-                OsLayerError("ERROR: %S(%u): Unable to retrieve UCS2 path length for file %S (%08X).\n", __FUNCTION__, GetCurrentThreadId(), path, GetLastError());
-                ReleaseSRWLockShared(&driver->MountpointLock);
-                return -1;
-            }
-            // start with the local root, and then append the relative path portion.
-            memcpy(pathbuf, fs->LocalPath, fs->LocalPathLength * sizeof(WCHAR));
-            pathbuf[fs->LocalPathLength] = L'\\';
-            if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, relative_path, -1, &pathbuf[fs->LocalPathLength+1], nchars) == 0)
-            {   // the path cannot be converted from UTF-8 to UCS-2.
-                OsLayerError("ERROR: %S(%u): Unable to convert UTF8 path to UCS2 for file %S (%08X).\n", __FUNCTION__, GetCurrentThreadId(), path, GetLastError());
-                ReleaseSRWLockShared(&driver->MountpointLock);
-                return -1;
-            }
-            ReleaseSRWLockShared(&driver->MountpointLock);
-            // normalize the directory separator characters to the system default.
-            // on Windows, this is not strictly necessary, but on other OS's it is.
-            for (size_t ch = offset + 1, nch = offset + nchars; ch < nch; ++ch)
-            {
-                if (pathbuf[ch] == L'/')
-                    pathbuf[ch]  = L'\\';
-            }
-            return 0;
-        }
-    }
-    OsLayerError("ERROR: %S(%u): Unable to find filesystem mountpoint for file %S.\n", __FUNCTION__, GetCurrentThreadId(), path);
-    ReleaseSRWLockShared(&driver->MountpointLock);
-    return -1;
-}
-
-/// @summary Opens a file for access. Information necessary to access the file is written to the OS_VFS_FILE structure. This function tests each mount point matching the path, in priority order, until one is successful at opening the file or all matching mount points have been tested.
-/// @param driver The virtual file system driver to query.
-/// @param path The absolute virtual path of the file to open.
-/// @param usage One of OS_VFS_USAGE specifying the intended use of the file.
-/// @param hints One or more of OS_VFS_USAGE_HINTS.
-/// @param file On return, this structure should be populated with the data necessary to access the file. If the file cannot be opened, check the OSError field.
-/// @param relative_path On return, this pointer is updated to point into path, at the start of the portion of the path representing the path to the file, relative to the mount point root path.
-/// @return One of OS_VFS_RESULT.
-internal_function int 
-OsVfsResolveAndOpenFile
-(
-    OS_FILE_SYSTEM     *driver, 
-    char const           *path, 
-    int                  usage, 
-    uint32_t             hints, 
-    OS_VFS_FILE          *file, 
-    char const **relative_path
-)
-{   // iterate over the mount points, which are stored in priority order.
-    AcquireSRWLockShared(&driver->MountpointLock);
-    int           result = OS_VFS_RESULT_OSERROR;
-    OS_VFS_MOUNT *mounts = driver->MountpointTable.MountpointData;
-    for (size_t i = 0, n = driver->MountpointTable.Count; i < n; ++i)
-    {
-        OS_VFS_MOUNT *m  = &mounts[i];
-        if (OsMountPointMatchStart(m->Root, path, m->RootLength))
-        {   // attempt to open the file on the mount point.
-            if  ((result = m->OpenFile(m, path + m->RootLength + 1, usage, hints, file)) == OS_VFS_RESULT_SUCCESS)
-            {   // the file was successfully opened, so we're done.
-                if (relative_path != NULL)
-                {
-                    *relative_path =  path + m->RootLength + 1;
-                }
-                ReleaseSRWLockShared(&driver->MountpointLock);
-                return result;
-            }
-            if (result == OS_VFS_RESULT_NOT_SUPPORTED)
-            {   // continue checking downstream mount points. one might support the operation.
-                continue;
-            }
-            else if (file->OSError == ERROR_NOT_FOUND || file->OSError == ERROR_FILE_NOT_FOUND)
-            {   // continue checking downstream mount points. one might be able to open the file.
-                continue;
-            }
-            else
-            {   // an actual error was returned; push it upstream.
-                ReleaseSRWLockShared(&driver->MountpointLock);
-                return result;
-            }
-        }
-    }
-    ReleaseSRWLockShared(&driver->MountpointLock);
-    file->OSError = ERROR_FILE_NOT_FOUND;
-    return OS_VFS_RESULT_OSERROR;
-}
-
-/// @summary Synchronously writes a file. If the file exists, its contents are overwritten; otherwise a new file is created. This operation is generally not supported by archive-based mount points. This function tests each mount point matching the path, in priority order, until one is successful at saving the file or until all matching mount points have been tested.
-/// @param driver The virtual file system driver.
-/// @param path The virtual path of the file to save.
-/// @param buffer The buffer containing the data to write to the file.
-/// @param amount The number of bytes to copy from the buffer into the file.
-/// @param relative_path On return, this pointer is updated to point into path, at the start of the portion of the path representing the path to the file, relative to the mount point root path.
-/// @return One of OS_VFS_RESULT.
-internal_function int 
-OsVfsResolveAndSaveFile
-(
-    OS_FILE_SYSTEM     *driver, 
-    char const           *path, 
-    void const         *buffer, 
-    int64_t             amount, 
-    char const **relative_path
-)
-{   // iterate over the mount points, which are stored in priority order.
-    AcquireSRWLockShared(&driver->MountpointLock);
-    int           result = ERROR_NOT_SUPPORTED;
-    OS_VFS_MOUNT *mounts = driver->MountpointTable.MountpointData;
-    for (size_t i = 0, n = driver->MountpointTable.Count; i < n; ++i)
-    {
-        OS_VFS_MOUNT  *m = &mounts[i];
-        if (OsMountPointMatchStart(m->Root, path, m->RootLength))
-        {   // attempt to save the file on the mount point.
-            if ((result = m->SaveFile(m, path + m->RootLength + 1, buffer, amount)) == OS_VFS_RESULT_SUCCESS)
-            {   // the file was successfully opened, so we're done.
-                if (relative_path != NULL)
-                {
-                    *relative_path =  path + m->RootLength + 1;
-                }
-                ReleaseSRWLockShared(&driver->MountpointLock);
-                return result;
-            }
-            if (result == OS_VFS_RESULT_NOT_SUPPORTED)
-            {   // continue checking downstream mount points. one might support the operation.
-                continue;
-            }
-            else
-            {   // an actual error was returned; push it upstream.
-                ReleaseSRWLockShared(&driver->MountpointLock);
-                return result;
-            }
-        }
-    }
-    ReleaseSRWLockShared(&driver->MountpointLock);
-    return OS_VFS_RESULT_NOT_SUPPORTED;
-}
-
 /// @summary Initializes a file system driver.
 /// @param driver The file system driver to initialize.
 /// @param init Configuration data used to initialize the filesystem implementation.
@@ -7298,7 +7411,7 @@ OsCreateFilesystem
     
     // create the table used for storing mount point data.
     InitializeSRWLock(&fs->MountpointLock);
-    if (OsCreateVfsMountpointTable(&fs->MountpointTable, arena, init->MaxMountPoints) < 0)
+    if (OsCreateMountpointTable(&fs->MountpointTable, init->MaxMountPoints) < 0)
     {
         OsLayerError("ERROR: %S(%u): Unable to allocate memory for %Iu-entry mount point table.\n", __FUNCTION__, GetCurrentThreadId(), init->MaxMountPoints);
         goto cleanup_and_fail;
@@ -7337,7 +7450,7 @@ OsMountKnownPath
     {   // unrecognized folder_id.
         return -1;
     }
-    if (OsVfsSetupMountpoint(fs, source_wide, FILE_ATTRIBUTE_DIRECTORY, mount_path, priority, mount_id) < 0)
+    if (OsSetupMountpoint(fs, source_wide, FILE_ATTRIBUTE_DIRECTORY, mount_path, priority, mount_id) < 0)
     {   // unable to finish internal setup of the mount point.
         return -1;
     }
@@ -7378,7 +7491,7 @@ OsMountPhysicalPath
         OsLayerError("ERROR: %S(%u): Unable to retrieve attributes for path %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), source_wide, GetLastError());
         goto cleanup_and_fail;
     }
-    if (OsVfsSetupMountpoint(fs, source_wide, source_attr, mount_path, priority, mount_id) < 0)
+    if (OsSetupMountpoint(fs, source_wide, source_attr, mount_path, priority, mount_id) < 0)
     {   // unable to finish internal setup of the mount point.
         goto cleanup_and_fail;
     }
@@ -7412,7 +7525,7 @@ OsMountVirtualPath
     size_t const      MAX_PATH_CHARS = 32768;
     DWORD                source_attr = 0;
     WCHAR source_wide[MAX_PATH_CHARS]; // 64KB - probably overkill
-    if (OsVfsResolveFilesystemPath(fs, virtual_path, source_wide, MAX_PATH_CHARS) < 0)
+    if (OsResolveFilesystemPath(fs, virtual_path, source_wide, MAX_PATH_CHARS) < 0)
     {   // cannot resolve the virtual path to a filesystem mount point.
         return -1;
     }
@@ -7425,7 +7538,7 @@ OsMountVirtualPath
         OsLayerError("ERROR: %S(%u): Unable to retrieve attributes for path %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), source_wide, GetLastError());
         return -1;
     }
-    if (OsVfsSetupMountpoint(fs, source_wide, source_attr, mount_path, priority, mount_id) < 0)
+    if (OsSetupMountpoint(fs, source_wide, source_attr, mount_path, priority, mount_id) < 0)
     {   // unable to finish internal setup of the mount point.
         return -1;
     }
@@ -7443,7 +7556,7 @@ OsUnmount
 )
 {
     AcquireSRWLockExclusive(&fs->MountpointLock);
-    OsRemoveVfsMountpointId(&fs->MountpointTable, mount_id);
+    OsRemoveMountpointId(&fs->MountpointTable, mount_id);
     ReleaseSRWLockExclusive(&fs->MountpointLock);
 }
 
@@ -7473,7 +7586,7 @@ OsUnmountAll
     {
         if (OsMountPointMatchExact(fs->MountpointTable.MountpointData[i].Root, mount_root))
         {   // the mount point paths match, so remove this item.
-            OsRemoveVfsMountpointAt(&fs->MountpointTable, i);
+            OsRemoveMountpointAt(&fs->MountpointTable, i);
         }
     }
     ReleaseSRWLockExclusive(&fs->MountpointLock);
@@ -7484,7 +7597,7 @@ OsUnmountAll
 public_function void 
 OsCloseFile
 (
-    OS_VFS_FILE *file_info
+    OS_FILE *file_info
 )
 {
     if (file_info->Filemap != NULL)
@@ -7502,10 +7615,10 @@ OsCloseFile
 /// @summary Open a file. Close the file using OsCloseFile().
 /// @param fs The file system driver.
 /// @param path A NULL-terminated UTF-8 string specifying the virtual file path.
-/// @param usage One of OS_VFS_USAGE specifying how the file will be accessed.
-/// @param hints One or more of OS_VFS_USAGE_HINTS specifying how to open the file. The file is opened for reading and writing.
+/// @param usage One of OS_FILE_USAGE specifying how the file will be accessed.
+/// @param hints One or more of OS_FILE_USAGE_HINTS specifying how to open the file. The file is opened for reading and writing.
 /// @param file On return, this structure is populated with file information.
-/// @return One of OS_VFS_RESULT indicating the result of the operation.
+/// @return One of OS_IO_RESULT indicating the result of the operation.
 public_function int 
 OsOpenFile
 (
@@ -7513,14 +7626,14 @@ OsOpenFile
     char const    *path, 
     int           usage,
     uint32_t      hints, 
-    OS_VFS_FILE   *file
+    OS_FILE       *file
 )
 {
     char const  *relpath = NULL;
-    int           result = OS_VFS_RESULT_SUCCESS;
-    if ((result = OsVfsResolveAndOpenFile(fs, path, usage, hints, file, &relpath)) == OS_VFS_RESULT_SUCCESS)
+    int           result = OS_IO_RESULT_SUCCESS;
+    if ((result = OsResolveAndOpenFile(fs, path, usage, hints, file, &relpath)) == OS_IO_RESULT_SUCCESS)
     {
-        if (hints & OS_VFS_USAGE_HINT_ASYNCHRONOUS)
+        if (hints & OS_FILE_USAGE_HINT_ASYNCHRONOUS)
         {   // associate the file handle with the I/O completion port managed by the AIO driver.
             /*DWORD    asio_result = aio_driver_prepare(driver->AIO, file->Fildes);
             if (!SUCCESS(asio_result))
@@ -7539,11 +7652,11 @@ OsOpenFile
 /// @param buffer The buffer into which data will be written.
 /// @param size The maximum number of bytes to read.
 /// @param bytes_read On return, this value is set to the number of bytes actually read. This may be less than the number of bytes requested, or 0 at end-of-file.
-/// @return One of OS_VFS_RESULT.
+/// @return One of OS_IO_RESULT.
 public_function int 
 OsReadFile
 (
-    OS_VFS_FILE  *file, 
+    OS_FILE      *file, 
     int64_t     offset, 
     void       *buffer, 
     size_t        size, 
@@ -7558,7 +7671,7 @@ OsReadFile
     {   // unable to seek to the specified offset.
         bytes_read    = 0;
         file->OSError = GetLastError();
-        return OS_VFS_RESULT_OSERROR;
+        return OS_IO_RESULT_OSERROR;
     }
     // safely read the requested number of bytes. for very large reads,
     // size > UINT32_MAX, the result is undefined, so possibly split the
@@ -7580,10 +7693,10 @@ OsReadFile
         else
         {   // an error occurred; save the error code.
             file->OSError = GetLastError();
-            return OS_VFS_RESULT_OSERROR;
+            return OS_IO_RESULT_OSERROR;
         }
     }
-    return OS_VFS_RESULT_SUCCESS;
+    return OS_IO_RESULT_SUCCESS;
 }
 
 /// @summary Synchronously writes data to a file opened for manual I/O.
@@ -7592,11 +7705,11 @@ OsReadFile
 /// @param buffer The data to be written to the file.
 /// @param size The number of bytes to write to the file.
 /// @param bytes_written On return, this value is set to the number of bytes actually written to the file.
-/// @return One of OS_VFS_RESULT.
+/// @return One of OS_IO_RESULT.
 public_function int 
 OsWriteFile
 (
-    OS_VFS_FILE     *file, 
+    OS_FILE         *file, 
     int64_t        offset, 
     void const    *buffer, 
     size_t           size, 
@@ -7611,7 +7724,7 @@ OsWriteFile
     {   // unable to seek to the specified offset.
         bytes_written = 0;
         file->OSError = GetLastError();
-        return OS_VFS_RESULT_OSERROR;
+        return OS_IO_RESULT_OSERROR;
     }
     // safely write the requested number of bytes. for very large writes,
     // size > UINT32_MAX, the result is undefined, so possibly split the
@@ -7633,28 +7746,35 @@ OsWriteFile
         else
         {   // an error occurred; save the error code.
             file->OSError = GetLastError();
-            return OS_VFS_RESULT_OSERROR;
+            return OS_IO_RESULT_OSERROR;
         }
     }
-    return OS_VFS_RESULT_SUCCESS;
+    return OS_IO_RESULT_SUCCESS;
 }
 
 /// @summary Flush any buffered writes to the file and update file metadata.
 /// @param file The file state populated by OsOpenFile().
-/// @return One of OS_VFS_RESULT.
+/// @return One of OS_IO_RESULT.
 public_function int 
 OsFlushFile
 (
-    OS_VFS_FILE *file
+    OS_FILE *file
 )
 {
     if (!FlushFileBuffers(file->Filedes))
     {
         file->OSError = GetLastError();
-        return OS_VFS_RESULT_OSERROR;
+        return OS_IO_RESULT_OSERROR;
     }
-    return OS_VFS_RESULT_SUCCESS;
+    return OS_IO_RESULT_SUCCESS;
 }
+
+// TODO(rlk): mmap I/O synchronous functions
+// TODO(rlk): bounded MPSC FIFO for async, prioritized I/O ops => feeds
+// TODO(rlk): bounded LPLC priority queue of non-submitted ops => feeds
+// TODO(rlk): bounded small array of in-flight async I/O ops
+// TODO(rlk): typically, each async I/O op will be for entire set of needed data
+// TODO(rlk): no crazy streaming modes or anything - that's all handled by app
 
 // start with VFS implementation. know that we want to support prioritized ASIO.
 // each op has callback to run when complete.
