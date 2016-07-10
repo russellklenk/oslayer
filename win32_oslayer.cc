@@ -291,6 +291,7 @@ struct OS_THREAD_POOL;
 struct OS_THREAD_POOL_INIT;
 
 struct OS_FILE;
+struct OS_PATH_PARTS;
 struct OS_MOUNTPOINT;
 struct OS_FILE_REGION;
 
@@ -465,7 +466,7 @@ struct OS_TAR_ENTRY
     int64_t             DataOffset;                  /// The absolute byte offset to the start of the file data.
     uint32_t            Checksum;                    /// The checksum of the file data.
     uint32_t            Reserved;                    /// Reserved for future use. Set to 0.
-    char                FileType;                    /// One of the values of the tar_entry_type_e enumeration.
+    char                FileType;                    /// One of the values of the OS_TAR_ENTRY_TYPE enumeration.
     char                FullPath[257];               /// The full path of the file, "<FileBase>/<FileName>\0".
     char                LinkName[101];               /// The filename of the linked file, zero-terminated.
     char                Padding;                     /// One extra byte of padding. Set to 0.
@@ -477,6 +478,33 @@ struct OS_TARBALL
     size_t              EntryCount;                  /// The number of regular file entries defined in the tarball.
     uint32_t           *EntryHash;                   /// An array where each item [Entry] specifies the hash of the entry filename.
     OS_TAR_ENTRY       *EntryInfo;                   /// An array where each item [Entry] specifies information about a single file entry.
+};
+
+/// @summary Define the information maintained in-memory for a file known to the file system.
+struct OS_FILE_INFO
+{
+    DWORD               Attributes;                  /// The file attributes, as would be returned by GetFileAttributes().
+    int64_t             FileSize;                    /// The size of the file data, in bytes. 
+    int64_t             BaseOffset;                  /// The offset of the file data from the start of the file (for files contained within archives).
+    FILETIME            LastWrite;                   /// The last write time of the file.
+};
+
+/// @summary Define the data stored with a fixed-size chunk of file information.
+struct OS_FILE_INFO_CHUNK
+{   static size_t const CAPACITY = 128;              /// The maximum number of file information entries stored in a single chunk.
+    SRWLOCK             RWLock;                      /// The reader-writer lock protecting the chunk contents.
+    OS_FILE_INFO_CHUNK *NextChunk;                   /// The next chunk in the list, or NULL if this is the last chunk in the block.
+    uint16_t            RecordCount;                 /// The number of items used within this chunk.
+    uint32_t            PathHash[CAPACITY];          /// The 32-bit hash of the absolute path of each file within the chunk.
+    OS_FILE_INFO        FileInfo[CAPACITY];          /// Information about each file contained within the chunk.
+};
+
+/// @summary Define the data associated with an allocator for OS_FILE_INFO_CHUNK instances. Chunks are recycled using a free list.
+struct OS_FSIC_ALLOCATOR
+{
+    CRITICAL_SECTION    AllocatorLock;               /// Critical section held for the duration of an allocation or free operation.
+    OS_MEMORY_ARENA    *MemoryArena;                 /// The memory arena used for allocating new chunks if the free list is empty.
+    OS_FILE_INFO_CHUNK *FreeList;                    /// The first chunk in the free list, or NULL if the free list is empty.
 };
 
 /// @summary Define the signature for the callback invoked to synchronously open a file for access. The information necessary to access the file is written to @a file.
@@ -528,6 +556,19 @@ struct OS_FILE_REGION
     uint8_t            *SystemBase;                  /// The pointer to the start of the mapped region, aligned to the system allocation granularity.
     uint8_t            *UserBase;                    /// The pointer to the start of the mapped region requested by the user.
     int64_t             RegionSize;                  /// The number of bytes mapped, starting at UserBase.
+};
+
+/// @summary Define the data used to represent the various parts of a native path string.
+struct OS_PATH_PARTS
+{
+    WCHAR              *Root;                        /// Pointer to the first character of the root, share or drive portion of the path.
+    WCHAR              *RootEnd;                     /// Pointer to the last character of the root, share or drive portion of the path.
+    WCHAR              *Path;                        /// Pointer to the first character of the directory portion of the path.
+    WCHAR              *PathEnd;                     /// Pointer to the last character of the directory portion of the path.
+    WCHAR              *Filename;                    /// Pointer to the first character of the filename portion of the path.
+    WCHAR              *FilenameEnd;                 /// Pointer to the last character of the filename portion of the path.
+    WCHAR              *Extension;                   /// Pointer to the first character of the extension portion of the path.
+    WCHAR              *ExtensionEnd;                /// Pointer to the last character of the extension portion of the path.
 };
 
 /// @summary Define the data associated with a mountpoint, which represents a single mounted file system within the larger virtualized file system.
@@ -1245,92 +1286,111 @@ global_variable GUID const TaskProfilerGUID = { 0x349ce0e9, 0x6df5, 0x4c25, { 0x
 /*////////////////////////////
 //   Forward Declarations   //
 ////////////////////////////*/
-public_function void              OsZeroMemory(void *dst, size_t len);
-public_function void              OsSecureZeroMemory(void *dst, size_t len);
-public_function void              OsCopyMemory(void * __restrict dst, void const * __restrict src, size_t len);
-public_function void              OsMoveMemory(void *dst, void const *src, size_t len);
-public_function void              OsFillMemory(void *dst, size_t len, uint8_t val);
-public_function size_t            OsAlignUp(size_t size, size_t pow2);
-public_function int               OsCreateMemoryArena(OS_MEMORY_ARENA *arena, size_t arena_size, bool commit_all, bool guard_page);
-public_function void              OsDeleteMemoryArena(OS_MEMORY_ARENA *arena);
-public_function size_t            OsMemoryArenaBytesReserved(OS_MEMORY_ARENA *arena);
-public_function size_t            OsMemoryArenaBytesUncommitted(OS_MEMORY_ARENA *arena);
-public_function size_t            OsMemoryArenaBytesCommitted(OS_MEMORY_ARENA *arena);
-public_function size_t            OsMemoryArenaBytesInActiveReservation(OS_MEMORY_ARENA *arena);
-public_function size_t            OsMemoryArenaPageSize(OS_MEMORY_ARENA *arena);
-public_function size_t            OsMemoryArenaSystemGranularity(OS_MEMORY_ARENA *arena);
-public_function bool              OsMemoryArenaCanSatisfyAllocation(OS_MEMORY_ARENA *arena, size_t alloc_size, size_t alloc_alignment);
-public_function void*             OsMemoryArenaAllocate(OS_MEMORY_ARENA *arena, size_t alloc_size, size_t alloc_alignment);
-public_function void*             OsMemoryArenaReserve(OS_MEMORY_ARENA *arena, size_t reserve_size, size_t alloc_alignment);
-public_function int               OsMemoryArenaCommit(OS_MEMORY_ARENA *arena, size_t commit_size);
-public_function void              OsMemoryArenaCancel(OS_MEMORY_ARENA *arena);
-public_function os_arena_marker_t OsMemoryArenaMark(OS_MEMORY_ARENA *arena);
-public_function void              OsMemoryArenaResetToMarker(OS_MEMORY_ARENA *arena, os_arena_marker_t arena_marker);
-public_function void              OsMemoryArenaReset(OS_MEMORY_ARENA *arena);
-public_function void              OsMemoryArenaDecommitToMarker(OS_MEMORY_ARENA *arena, os_arena_marker_t arena_marker);
-public_function void              OsMemoryArenaDecommit(OS_MEMORY_ARENA *arena);
+public_function void                 OsZeroMemory(void *dst, size_t len);
+public_function void                 OsSecureZeroMemory(void *dst, size_t len);
+public_function void                 OsCopyMemory(void * __restrict dst, void const * __restrict src, size_t len);
+public_function void                 OsMoveMemory(void *dst, void const *src, size_t len);
+public_function void                 OsFillMemory(void *dst, size_t len, uint8_t val);
+public_function size_t               OsAlignUp(size_t size, size_t pow2);
+public_function int                  OsCreateMemoryArena(OS_MEMORY_ARENA *arena, size_t arena_size, bool commit_all, bool guard_page);
+public_function void                 OsDeleteMemoryArena(OS_MEMORY_ARENA *arena);
+public_function size_t               OsMemoryArenaBytesReserved(OS_MEMORY_ARENA *arena);
+public_function size_t               OsMemoryArenaBytesUncommitted(OS_MEMORY_ARENA *arena);
+public_function size_t               OsMemoryArenaBytesCommitted(OS_MEMORY_ARENA *arena);
+public_function size_t               OsMemoryArenaBytesInActiveReservation(OS_MEMORY_ARENA *arena);
+public_function size_t               OsMemoryArenaPageSize(OS_MEMORY_ARENA *arena);
+public_function size_t               OsMemoryArenaSystemGranularity(OS_MEMORY_ARENA *arena);
+public_function bool                 OsMemoryArenaCanSatisfyAllocation(OS_MEMORY_ARENA *arena, size_t alloc_size, size_t alloc_alignment);
+public_function void*                OsMemoryArenaAllocate(OS_MEMORY_ARENA *arena, size_t alloc_size, size_t alloc_alignment);
+public_function void*                OsMemoryArenaReserve(OS_MEMORY_ARENA *arena, size_t reserve_size, size_t alloc_alignment);
+public_function int                  OsMemoryArenaCommit(OS_MEMORY_ARENA *arena, size_t commit_size);
+public_function void                 OsMemoryArenaCancel(OS_MEMORY_ARENA *arena);
+public_function os_arena_marker_t    OsMemoryArenaMark(OS_MEMORY_ARENA *arena);
+public_function void                 OsMemoryArenaResetToMarker(OS_MEMORY_ARENA *arena, os_arena_marker_t arena_marker);
+public_function void                 OsMemoryArenaReset(OS_MEMORY_ARENA *arena);
+public_function void                 OsMemoryArenaDecommitToMarker(OS_MEMORY_ARENA *arena, os_arena_marker_t arena_marker);
+public_function void                 OsMemoryArenaDecommit(OS_MEMORY_ARENA *arena);
 
-public_function uint64_t          OsTimestampInTicks(void);
-public_function uint64_t          OsTimestampInNanoseconds(void);
-public_function uint64_t          OsNanosecondSliceOfSecond(uint64_t fraction);
-public_function uint64_t          OsElapsedNanoseconds(uint64_t start_ticks, uint64_t end_ticks);
-public_function uint64_t          OsMillisecondsToNanoseconds(uint32_t milliseconds);
-public_function uint32_t          OsNanosecondsToWholeMillisecons(uint64_t nanoseconds);
-public_function bool              OsQueryHostCpuLayout(OS_CPU_INFO *cpu_info, OS_MEMORY_ARENA *arena);
+public_function uint64_t             OsTimestampInTicks(void);
+public_function uint64_t             OsTimestampInNanoseconds(void);
+public_function uint64_t             OsNanosecondSliceOfSecond(uint64_t fraction);
+public_function uint64_t             OsElapsedNanoseconds(uint64_t start_ticks, uint64_t end_ticks);
+public_function uint64_t             OsMillisecondsToNanoseconds(uint32_t milliseconds);
+public_function uint32_t             OsNanosecondsToWholeMillisecons(uint64_t nanoseconds);
+public_function bool                 OsQueryHostCpuLayout(OS_CPU_INFO *cpu_info, OS_MEMORY_ARENA *arena);
 
-public_function uint32_t __cdecl  OsWorkerThreadMain(void *argp);
-public_function size_t            OsCalculateMemoryForThreadPool(size_t thread_count);
-public_function int               OsCreateThreadPool(OS_THREAD_POOL *pool, OS_THREAD_POOL_INIT *init, OS_MEMORY_ARENA *arena, char const *name);
-public_function void              OsLaunchThreadPool(OS_THREAD_POOL *pool);
-public_function void              OsTerminateThreadPool(OS_THREAD_POOL *pool);
-public_function void              OsDestroyThreadPool(OS_THREAD_POOL *pool);
-public_function bool              OsSignalWorkerThreads(OS_WORKER_THREAD *sender, uintptr_t signal_arg, size_t thread_count);
-public_function bool              OsSignalWorkerThreads(OS_THREAD_POOL *pool, uintptr_t signal_arg, size_t thread_count);
+public_function unsigned int __cdecl OsWorkerThreadMain(void *argp);
+public_function size_t               OsCalculateMemoryForThreadPool(size_t thread_count);
+public_function int                  OsCreateThreadPool(OS_THREAD_POOL *pool, OS_THREAD_POOL_INIT *init, OS_MEMORY_ARENA *arena, char const *name);
+public_function void                 OsLaunchThreadPool(OS_THREAD_POOL *pool);
+public_function void                 OsTerminateThreadPool(OS_THREAD_POOL *pool);
+public_function void                 OsDestroyThreadPool(OS_THREAD_POOL *pool);
+public_function bool                 OsSignalWorkerThreads(OS_WORKER_THREAD *sender, uintptr_t signal_arg, size_t thread_count);
+public_function bool                 OsSignalWorkerThreads(OS_THREAD_POOL *pool, uintptr_t signal_arg, size_t thread_count);
 
-public_function int               OsLoadTarball(OS_TARBALL *tar, HANDLE tarfd, DWORD result);
-public_function void              OsUnloadTarball(OS_TARBALL *tar);
+public_function int                  OsLoadTarball(OS_TARBALL *tar, HANDLE tarfd, DWORD result);
+public_function void                 OsUnloadTarball(OS_TARBALL *tar);
 
-public_function void              OsResetInputSystem(OS_INPUT_SYSTEM *system);
-public_function void              OsPushRawInput(OS_INPUT_SYSTEM *system, RAWINPUT const *input);
-public_function void              OsPushRawInputDeviceChange(OS_INPUT_SYSTEM *system, WPARAM wparam, LPARAM lparam);
-public_function void              OsSimulateKeyPress(OS_INPUT_SYSTEM *system, HANDLE device, UINT virtual_key);
-public_function void              OsSimulateKeyRelease(OS_INPUT_SYSTEM *system, HANDLE device, UINT virtual_key);
-public_function void              OsConsumeInputEvents(OS_INPUT_EVENTS *events, OS_INPUT_SYSTEM *system, uint64_t tick_time);
+public_function void                 OsResetInputSystem(OS_INPUT_SYSTEM *system);
+public_function void                 OsPushRawInput(OS_INPUT_SYSTEM *system, RAWINPUT const *input);
+public_function void                 OsPushRawInputDeviceChange(OS_INPUT_SYSTEM *system, WPARAM wparam, LPARAM lparam);
+public_function void                 OsSimulateKeyPress(OS_INPUT_SYSTEM *system, HANDLE device, UINT virtual_key);
+public_function void                 OsSimulateKeyRelease(OS_INPUT_SYSTEM *system, HANDLE device, UINT virtual_key);
+public_function void                 OsConsumeInputEvents(OS_INPUT_EVENTS *events, OS_INPUT_SYSTEM *system, uint64_t tick_time);
 
-public_function VkResult          OsLoadVulkanRuntime(OS_VULKAN_RUNTIME *runtime);
-public_function VkResult          OsQueryVulkanRuntimeProperties(OS_VULKAN_RUNTIME_PROPERTIES *props, OS_VULKAN_RUNTIME *runtime, OS_MEMORY_ARENA *arena);
-public_function VkResult          OsCreateVulkanInstance(OS_VULKAN_INSTANCE *instance, OS_VULKAN_RUNTIME *runtime, VkInstanceCreateInfo const *create_info, VkAllocationCallbacks const *allocation_callbacks);
-public_function bool              OsIsPrimaryDisplay(OS_VULKAN_PHYSICAL_DEVICE_LIST const *device_list, size_t display_index);
-public_function int32_t           OsDisplayRefreshRate(OS_VULKAN_PHYSICAL_DEVICE_LIST const *device_list, size_t display_index);
-public_function char const*       OsSupportsVulkanInstanceLayer(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const *layer_name, size_t *layer_index);
-public_function bool              OsSupportsAllVulkanInstanceLayers(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const **layer_name, size_t const layer_count);
-public_function char const*       OsSupportsVulkanInstanceExtension(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const *extension_name, size_t *extension_index);
-public_function bool              OsSupportsAllVulkanInstanceExtensions(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const **extension_names, size_t const extension_count);
-public_function VkResult          OsEnumerateVulkanPhysicalDevices(OS_VULKAN_PHYSICAL_DEVICE_LIST *device_list, OS_VULKAN_INSTANCE *instance, OS_MEMORY_ARENA *arena, HINSTANCE exe_instance);
-public_function VkResult          OsCreateVulkanLogicalDevice(OS_VULKAN_DEVICE *device, OS_VULKAN_INSTANCE *instance, VkPhysicalDevice physical_Device, VkDeviceCreateInfo const *create_info, VkAllocationCallbacks const *allocation_callbacks);
+public_function VkResult             OsLoadVulkanRuntime(OS_VULKAN_RUNTIME *runtime);
+public_function VkResult             OsQueryVulkanRuntimeProperties(OS_VULKAN_RUNTIME_PROPERTIES *props, OS_VULKAN_RUNTIME *runtime, OS_MEMORY_ARENA *arena);
+public_function VkResult             OsCreateVulkanInstance(OS_VULKAN_INSTANCE *instance, OS_VULKAN_RUNTIME *runtime, VkInstanceCreateInfo const *create_info, VkAllocationCallbacks const *allocation_callbacks);
+public_function bool                 OsIsPrimaryDisplay(OS_VULKAN_PHYSICAL_DEVICE_LIST const *device_list, size_t display_index);
+public_function int32_t              OsDisplayRefreshRate(OS_VULKAN_PHYSICAL_DEVICE_LIST const *device_list, size_t display_index);
+public_function char const*          OsSupportsVulkanInstanceLayer(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const *layer_name, size_t *layer_index);
+public_function bool                 OsSupportsAllVulkanInstanceLayers(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const **layer_name, size_t const layer_count);
+public_function char const*          OsSupportsVulkanInstanceExtension(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const *extension_name, size_t *extension_index);
+public_function bool                 OsSupportsAllVulkanInstanceExtensions(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const **extension_names, size_t const extension_count);
+public_function VkResult             OsEnumerateVulkanPhysicalDevices(OS_VULKAN_PHYSICAL_DEVICE_LIST *device_list, OS_VULKAN_INSTANCE *instance, OS_MEMORY_ARENA *arena, HINSTANCE exe_instance);
+public_function VkResult             OsCreateVulkanLogicalDevice(OS_VULKAN_DEVICE *device, OS_VULKAN_INSTANCE *instance, VkPhysicalDevice physical_Device, VkDeviceCreateInfo const *create_info, VkAllocationCallbacks const *allocation_callbacks);
 
-public_function int               OsInitializeAudio(OS_AUDIO_SYSTEM *audio_system);
-public_function int               OsEnumerateAudioDevices(OS_AUDIO_DEVICE_LIST *device_list, OS_AUDIO_SYSTEM *audio_system, OS_MEMORY_ARENA *arena);
-public_function void              OsDisableAudioOutput(OS_AUDIO_SYSTEM *audio_system);
-public_function int               OsEnableAudioOutput(OS_AUDIO_SYSTEM *audio_system, WCHAR *device_id, uint32_t samples_per_second, uint32_t buffer_size);
-public_function int               OsRecoverLostAudioOutputDevice(OS_AUDIO_SYSTEM *audio_system);
-public_function uint32_t          OsAudioSamplesToWrite(OS_AUDIO_SYSTEM *audio_system);
-public_function int               OsWriteAudioSamples(OS_AUDIO_SYSTEM *audio_system, void const *sample_data, uint32_t const sample_count);
+public_function int                  OsInitializeAudio(OS_AUDIO_SYSTEM *audio_system);
+public_function int                  OsEnumerateAudioDevices(OS_AUDIO_DEVICE_LIST *device_list, OS_AUDIO_SYSTEM *audio_system, OS_MEMORY_ARENA *arena);
+public_function void                 OsDisableAudioOutput(OS_AUDIO_SYSTEM *audio_system);
+public_function int                  OsEnableAudioOutput(OS_AUDIO_SYSTEM *audio_system, WCHAR *device_id, uint32_t samples_per_second, uint32_t buffer_size);
+public_function int                  OsRecoverLostAudioOutputDevice(OS_AUDIO_SYSTEM *audio_system);
+public_function uint32_t             OsAudioSamplesToWrite(OS_AUDIO_SYSTEM *audio_system);
+public_function int                  OsWriteAudioSamples(OS_AUDIO_SYSTEM *audio_system, void const *sample_data, uint32_t const sample_count);
 
-public_function bool              OsShellFolderPath(WCHAR *buf, size_t buf_bytes, size_t &bytes_needed, REFKNOWNFOLDERID folder_id);
-public_function bool              OsKnownPath(WCHAR *buf, size_t buf_bytes, size_t &bytes_needed, int folder_id);
-public_function size_t            OsPhysicalSectorSize(HANDLE file);
-public_function int               OsCreateFilesystem(OS_FILE_SYSTEM *file_system, OS_FILE_SYSTEM_INIT const *init, OS_MEMORY_ARENA *arena);
-public_function int               OsMountKnownPath(OS_FILE_SYSTEM *file_system, int folder_id, char const *mount_path, uint32_t priority, uintptr_t mount_id);
-public_function int               OsMountPhysicalPath(OS_FILE_SYSTEM *file_system, char const *source_path, char const *mount_path, uint32_t priority, uintptr_t mount_id);
-public_function int               OsMountVirtualPath(OS_FILE_SYSTEM *file_system, char const *virtual_path, char const *mount_path, uint32_t priority, uintptr_t mount_id);
-public_function void              OsUnmount(OS_FILE_SYSTEM *file_system, uintptr_t mount_id);
-public_function void              OsUnmountAll(OS_FILE_SYSTEM *file_system, char const *mount_path);
-public_function void              OsCloseFile(OS_FILE *file);
-public_function int               OsOpenFile(OS_FILE_SYSTEM *file_system, char const *path, int usage, uint32_t hints, OS_FILE *file);
-public_function int               OsReadFile(OS_FILE *file, int64_t offset, void *buffer, size_t size, size_t &bytes_read);
-public_function int               OsWriteFile(OS_FILE *file, int64_t offset, void const *buffer, size_t size, size_t &bytes_written);
-public_function int               OsFlushFile(OS_FILE *file);
+public_function FILETIME             OsUnixTimeToFILETIME(uint64_t unix_time_t);
+public_function uint64_t             OsFILETIMEtoUnixTime(FILETIME filetime);
+public_function size_t               OsShellFolderPath(WCHAR *buf, size_t buf_bytes, WCHAR **buf_end, size_t &bytes_needed, REFKNOWNFOLDERID folder_id);
+public_function size_t               OsKnownPath(WCHAR *buf, size_t buf_bytes, WCHAR **buf_end, size_t &bytes_needed, int folder_id);
+public_function size_t               OsNativePathForHandle(WCHAR *buf, size_t buf_bytes, WCHAR **buf_end, size_t &bytes_needed, HANDLE handle);
+public_function size_t               OsNativePathAppend(WCHAR *buf, size_t buf_bytes, WCHAR **buf_end, size_t &bytes_needed, WCHAR const *append);
+public_function size_t               OsNativePathChangeExtension(WCHAR *buf, size_t buf_bytes, WCHAR **buf_end, size_t &bytes_needed, WCHAR const *new_ext);
+public_function size_t               OsNativePathAppendExtension(WCHAR *buf, size_t buf_bytes, WCHAR **buf_end, size_t &bytes_needed, WCHAR const *new_ext);
+public_function void                 OsNativePathParse(WCHAR *buf, WCHAR *buf_end, OS_PATH_PARTS *parts);
+public_function size_t               OsPhysicalSectorSize(HANDLE file);
+public_function void                 OsInitFileSystemInfoChunkAllocator(OS_FSIC_ALLOCATOR *alloc);
+public_function OS_FILE_INFO_CHUNK*  OsNewFileInfoChunk(OS_FSIC_ALLOCATOR *alloc);
+public_function void                 OsFreeFileInfoChunkList(OS_FSIC_ALLOCATOR *alloc, OS_FILE_INFO_CHUNK *chunk);
+public_function void                 OsLockFileInfoChunkRead(OS_FILE_INFO_CHUNK *chunk);
+public_function void                 OsUnlockFileInfoChunkRead(OS_FILE_INFO_CHUNK *chunk);
+public_function void                 OsLockFileInfoChunkWrite(OS_FILE_INFO_CHUNK *chunk);
+public_function void                 OsUnlockFileInfoChunkWrite(OS_FILE_INFO_CHUNK *chunk);
+public_function bool                 OsOpenNativeDirectory(WCHAR const *fspath, HANDLE &dir);
+public_function OS_FILE_INFO_CHUNK*  OsNativeDirectoryFindFiles(HANDLE dir, WCHAR const *filter, bool recurse, size_t &total_count, OS_FSIC_ALLOCATOR *alloc);
+public_function void                 OsCloseNativeDirectory(HANDLE dir);
+public_function bool                 OsCreateNativeDirectory(WCHAR const *abspath); 
+
+public_function int                  OsCreateFilesystem(OS_FILE_SYSTEM *file_system, OS_FILE_SYSTEM_INIT const *init, OS_MEMORY_ARENA *arena);
+public_function int                  OsMountKnownPath(OS_FILE_SYSTEM *file_system, int folder_id, char const *mount_path, uint32_t priority, uintptr_t mount_id);
+public_function int                  OsMountPhysicalPath(OS_FILE_SYSTEM *file_system, char const *source_path, char const *mount_path, uint32_t priority, uintptr_t mount_id);
+public_function int                  OsMountVirtualPath(OS_FILE_SYSTEM *file_system, char const *virtual_path, char const *mount_path, uint32_t priority, uintptr_t mount_id);
+public_function void                 OsUnmount(OS_FILE_SYSTEM *file_system, uintptr_t mount_id);
+public_function void                 OsUnmountAll(OS_FILE_SYSTEM *file_system, char const *mount_path);
+public_function void                 OsCloseFile(OS_FILE *file);
+public_function int                  OsOpenFile(OS_FILE_SYSTEM *file_system, char const *path, int usage, uint32_t hints, OS_FILE *file);
+public_function int                  OsReadFile(OS_FILE *file, int64_t offset, void *buffer, size_t size, size_t &bytes_read);
+public_function int                  OsWriteFile(OS_FILE *file, int64_t offset, void const *buffer, size_t size, size_t &bytes_written);
+public_function int                  OsFlushFile(OS_FILE *file);
 
 /*//////////////////////////
 //   Internal Functions   //
@@ -7243,53 +7303,108 @@ OsWriteAudioSamples
     return 0;
 }
 
+/// @summary Convert a 64-bit UNIX timestamp, specifying the number of seconds elapsed since Jan 1 1970 00:00 UTC, to a Windows FILETIME.
+/// @param unix_time_t The source UNIX timestamp value.
+/// @return The Windows FILETIME value.
+public_function FILETIME
+OsUnixTimeToFILETIME
+(
+    uint64_t unix_time_t
+)
+{   // 10000000 is the number of 100ns intervals in one second.
+    // 116444736000000000 is the number of 100ns intervals between Jan 1 1601 00:00 and Jan 1 1970 00:00 UTC (the epoch difference.)
+    FILETIME  filetime;
+    ULONGLONG ll = (unix_time_t * 10000000ULL) + 116444736000000000ULL;
+    filetime.dwLowDateTime  = (DWORD) ll;
+    filetime.dwHighDateTime = (DWORD)(ll >> 32);
+}
+
+/// @summary Convert a Windows FILETIME value, specifying the number of 100ns intervals elapsed since Jan 1 1601 00:00 UTC, to a UNIX timestamp value representing the number of seconds elapsed since Jan 1 1970 00:00 UTC.
+/// @param filetime The source Windows FILETIME value.
+/// @return The UNIX timestamp value.
+public_function uint64_t
+OsFILETIMEtoUnixTime
+(
+    FILETIME filetime
+)
+{   // 10000000 is the number of 100ns intervals in one second.
+    // 11644473600 is the number of seconds between Jan 1 1601 00:00 and Jan 1 1970 00:00 UTC (the epoch difference.)
+    ULARGE_INTEGER ll;
+    ll.LowPart  = filetime.dwLowDateTime;
+    ll.HighPart = filetime.dwHighDateTime;
+    return ll.QuadPart / 10000000ULL - 11644473600ULL;
+}
+
 /// @summary Retrieve a system known folder path using SHGetKnownFolderPath.
 /// @param buf The buffer to which the path will be copied.
 /// @param buf_bytes The maximum number of bytes that can be written to buf.
+/// @param buf_end On input, a pointer to the end of the destination buffer. On return, this value points to the zero terminator of the destination buffer.
 /// @param bytes_needed On return, this location stores the number of bytes required to store the path string, including the zero terminator.
 /// @param folder_id The Windows Shell known folder identifier.
-/// @return true if the requested path was retrieved.
-public_function bool 
+/// @return The number of characters written to the destination buffer, not including the zero terminator.
+public_function size_t
 OsShellFolderPath
 (
     WCHAR                 *buf, 
     size_t           buf_bytes, 
+    WCHAR            **buf_end,
     size_t       &bytes_needed, 
     REFKNOWNFOLDERID folder_id
 )
 {
-    WCHAR *sysbuf = NULL;
-    if (SUCCEEDED(SHGetKnownFolderPath(folder_id, KF_FLAG_NO_ALIAS, NULL, &sysbuf)))
-    {   // calculate bytes needed and copy to user buffer.
-        if (buf != NULL)  memset(buf, 0, buf_bytes);
-        else buf_bytes =  0;
-        bytes_needed   = (wcslen(sysbuf) + 1) * sizeof(WCHAR);
-        if (buf_bytes >= (bytes_needed + 1))
-        {   // the path will fit, so copy it over.
-            memcpy(buf, sysbuf, bytes_needed);
-            buf[bytes_needed] = 0;
+    HRESULT result = S_OK;
+    WCHAR  *sysbuf = NULL;
+    if (SUCCEEDED((result = SHGetKnownFolderPath(folder_id, KF_FLAG_NO_ALIAS, NULL, &sysbuf))))
+    {   // calculate bytes needed, including the zero terminator.
+        if ((bytes_needed = (wcslen(sysbuf) + 1) * sizeof(WCHAR)) > buf_bytes)
+        {   // in the case of insufficient space, do not print an error. this is expected behavior.
+            if (buf      != NULL) *buf = 0;
+            if (buf_end  != NULL) *buf_end = buf;
+            CoTaskMemFree(sysbuf);
+            return 0;
         }
-        CoTaskMemFree(sysbuf);
-        return true;
+        if (buf != NULL)
+        {   // copy the system-allocated string over to the destination buffer.
+            // the system-allocated string is already zero-terminated.
+            size_t chars_written  = bytes_needed / sizeof(WCHAR) - sizeof(WCHAR);
+            CopyMemory(buf, sysbuf, bytes_needed);
+            CoTaskMemFree(sysbuf);
+            if (buf_end != NULL)
+            {   // chars_written does not include the zero-terminator, so +1 to include it.
+               *buf_end = buf + chars_written + 1;
+            }
+            return chars_written;
+        }
+        else
+        {   // the caller didn't supply an input buffer.
+            if (buf_end != NULL) *buf_end = NULL;
+            CoTaskMemFree(sysbuf);
+            return 0;
+        }
     }
     else
-    {   // unable to retrieve the specified path.
+    {   // unable to retrieve the specified path for some reason - the problem is NOT that the destination buffer is NULL.
+        OsLayerError("ERROR: %S(%u): Unable to retrieve known folder path (HRESULT = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
+        if (buf     != NULL) *buf = 0;
+        if (buf_end != NULL) *buf_end = buf;
         bytes_needed = 0;
-        return false;
+        return 0;
     }
 }
 
-/// @summary Retrieve a special system folder path.
+/// @summary Retrieve a special system folder path. 
 /// @param buf The buffer to which the path will be copied.
 /// @param buf_bytes The maximum number of bytes that can be written to buf.
+/// @param buf_end On input, a pointer to the end of the destination buffer. On return, this value points to the zero terminator of the destination buffer.
 /// @param bytes_needed On return, this location stores the number of bytes required to store the path string, including the zero terminator.
 /// @param folder_id One of OS_KNOWN_PATH identifying the folder.
-/// @return true if the requested path was retrieved.
-public_function bool 
+/// @return The number of characters written to the destination buffer, not including the zero terminator.
+public_function size_t 
 OsKnownPath
 (
     WCHAR           *buf, 
     size_t     buf_bytes, 
+    WCHAR      **buf_end,
     size_t &bytes_needed, 
     int        folder_id
 )
@@ -7297,69 +7412,100 @@ OsKnownPath
     switch (folder_id)
     {
     case OS_KNOWN_PATH_EXECUTABLE:
-        {   // zero out the path buffer, and retrieve the EXE path.
+        {   // allocate a temporary heap buffer for the executable path string.
+            // do this on the heap because the returned string could be a long-format string with "\\?\" prefix.
+            // these strings can be up to 32767 characters in length, plus one for the zero terminator.
+            size_t buflen =  0; // in characters
             size_t bufsiz =  32768 *  sizeof(WCHAR);
             WCHAR *sysbuf = (WCHAR *) malloc(bufsiz);
+            WCHAR *bufitr =  NULL;
             if (sysbuf == NULL)
-            {   // unable to allocate enough space for the temporary buffer.
+            {
+                OsLayerError("ERROR: %S(%u): Unable to allocate temporary memory for executable path string.\n", __FUNCTION__, GetCurrentThreadId());
+                if (buf     != NULL) *buf = 0;
+                if (buf_end != NULL) *buf_end = buf;
                 bytes_needed = 0;
-                return false;
+                return 0;
             }
-            memset(sysbuf, 0, bufsiz);
-            size_t buflen = GetModuleFileNameW(GetModuleHandle(NULL), sysbuf, 32768 * sizeof(WCHAR));
-            bytes_needed  =(buflen + 1) * sizeof(WCHAR); // convert characters to bytes, add null byte
-            // now strip off the name of the executable.
-            WCHAR *bufitr = sysbuf + buflen - 1;
+            if ((buflen = GetModuleFileNameW(NULL, sysbuf, 32768)) == 0)
+            {
+                OsLayerError("ERROR: %S(%u): Unable to retrieve the executable path (%08X).\n", __FUNCTION__, GetCurrentThreadId(), GetLastError());
+                if (buf     != NULL) *buf = 0;
+                if (buf_end != NULL) *buf_end = buf;
+                bytes_needed = 0;
+                free(sysbuf);
+                return 0;
+            }
+            // the path sitting in sysbuf contains the name of the executable. 
+            // when the loop terminates, bufitr points at the zero-terminator.
+            // replace the trailing slash with a zero-terminator.
+            bytes_needed  =(buflen + 1) * sizeof(WCHAR);
+            bufitr        = sysbuf + buflen;
             while (bufitr > sysbuf)
             {
-                if (*bufitr == L'\\' || *bufitr == L'/')
-                {   // replace the trailing slash with a NULL terminator.
-                    *bufitr  = 0;
+                if (*bufitr == L'\\')
+                {   // replace the trailing slash with a zero terminator.
+                    *bufitr = 0;
                     break;
                 }
-                --bytes_needed;
-                --bufitr; 
+                bytes_needed -= sizeof(WCHAR);
+                bufitr--;
             }
-            // finally, copy the path and directory name into the output buffer.
-            if  (buf != NULL) memset(buf, 0 ,  buf_bytes);
-            else buf_bytes  = 0;
-            if  (buf_bytes >= bytes_needed)
-            {   // the path will fit, so copy it over.
-                memcpy(buf, sysbuf, bytes_needed);
+            if (buf_bytes < bytes_needed)
+            {   // don't print an error in this case, as this is expected usage.
+                if (buf     != NULL) *buf = 0;
+                if (buf_end != NULL) *buf_end = buf;
+                free(sysbuf);
+                return 0;
             }
-            free(sysbuf);
-            return true;
+            if (buf != NULL)
+            {   // copy the path string to the destination buffer.
+                size_t chars_written  = bytes_needed / sizeof(WCHAR) - sizeof(WCHAR);
+                CopyMemory(buf, sysbuf, bytes_needed);
+                free(sysbuf);
+                if (buf_end != NULL)
+                {   // chars_written does not include the zero-terminator, so +1 to include it.
+                   *buf_end = buf + chars_written + 1;
+                }
+                return chars_written;
+            }
+            else
+            {   // the caller didn't supply an input buffer.
+                if (buf_end != NULL) *buf_end = NULL;
+                free(sysbuf);
+                return 0;
+            }
         }
     case OS_KNOWN_PATH_USER_HOME:
-        return OsShellFolderPath(buf, buf_bytes, bytes_needed, FOLDERID_Profile);
+        return OsShellFolderPath(buf, buf_bytes, buf_end, bytes_needed, FOLDERID_Profile);
     case OS_KNOWN_PATH_USER_DESKTOP:
-        return OsShellFolderPath(buf, buf_bytes, bytes_needed, FOLDERID_Desktop);
+        return OsShellFolderPath(buf, buf_bytes, buf_end, bytes_needed, FOLDERID_Desktop);
     case OS_KNOWN_PATH_USER_DOCUMENTS:
-        return OsShellFolderPath(buf, buf_bytes, bytes_needed, FOLDERID_Documents);
+        return OsShellFolderPath(buf, buf_bytes, buf_end, bytes_needed, FOLDERID_Documents);
     case OS_KNOWN_PATH_USER_DOWNLOADS:
-        return OsShellFolderPath(buf, buf_bytes, bytes_needed, FOLDERID_Downloads);
+        return OsShellFolderPath(buf, buf_bytes, buf_end, bytes_needed, FOLDERID_Downloads);
     case OS_KNOWN_PATH_USER_MUSIC:
-        return OsShellFolderPath(buf, buf_bytes, bytes_needed, FOLDERID_Music);
+        return OsShellFolderPath(buf, buf_bytes, buf_end, bytes_needed, FOLDERID_Music);
     case OS_KNOWN_PATH_USER_PICTURES:
-        return OsShellFolderPath(buf, buf_bytes, bytes_needed, FOLDERID_Pictures);
+        return OsShellFolderPath(buf, buf_bytes, buf_end, bytes_needed, FOLDERID_Pictures);
     case OS_KNOWN_PATH_USER_SAVE_GAMES:
-        return OsShellFolderPath(buf, buf_bytes, bytes_needed, FOLDERID_SavedGames);
+        return OsShellFolderPath(buf, buf_bytes, buf_end, bytes_needed, FOLDERID_SavedGames);
     case OS_KNOWN_PATH_USER_VIDEOS:
-        return OsShellFolderPath(buf, buf_bytes, bytes_needed, FOLDERID_Videos);
+        return OsShellFolderPath(buf, buf_bytes, buf_end, bytes_needed, FOLDERID_Videos);
     case OS_KNOWN_PATH_USER_PREFERENCES:
-        return OsShellFolderPath(buf, buf_bytes, bytes_needed, FOLDERID_LocalAppData);
+        return OsShellFolderPath(buf, buf_bytes, buf_end, bytes_needed, FOLDERID_LocalAppData);
     case OS_KNOWN_PATH_PUBLIC_DOCUMENTS:
-        return OsShellFolderPath(buf, buf_bytes, bytes_needed, FOLDERID_PublicDocuments);
+        return OsShellFolderPath(buf, buf_bytes, buf_end, bytes_needed, FOLDERID_PublicDocuments);
     case OS_KNOWN_PATH_PUBLIC_DOWNLOADS:
-        return OsShellFolderPath(buf, buf_bytes, bytes_needed, FOLDERID_PublicDownloads);
+        return OsShellFolderPath(buf, buf_bytes, buf_end, bytes_needed, FOLDERID_PublicDownloads);
     case OS_KNOWN_PATH_PUBLIC_MUSIC:
-        return OsShellFolderPath(buf, buf_bytes, bytes_needed, FOLDERID_PublicMusic);
+        return OsShellFolderPath(buf, buf_bytes, buf_end, bytes_needed, FOLDERID_PublicMusic);
     case OS_KNOWN_PATH_PUBLIC_PICTURES:
-        return OsShellFolderPath(buf, buf_bytes, bytes_needed, FOLDERID_PublicPictures);
+        return OsShellFolderPath(buf, buf_bytes, buf_end, bytes_needed, FOLDERID_PublicPictures);
     case OS_KNOWN_PATH_PUBLIC_VIDEOS:
-        return OsShellFolderPath(buf, buf_bytes, bytes_needed, FOLDERID_PublicVideos);
+        return OsShellFolderPath(buf, buf_bytes, buf_end, bytes_needed, FOLDERID_PublicVideos);
     case OS_KNOWN_PATH_SYSTEM_FONTS:
-        return OsShellFolderPath(buf, buf_bytes, bytes_needed, FOLDERID_Fonts);
+        return OsShellFolderPath(buf, buf_bytes, buf_end, bytes_needed, FOLDERID_Fonts);
 
     default:
         break;
@@ -7367,6 +7513,414 @@ OsKnownPath
     bytes_needed = 0;
     return false;
 }
+
+/// @summary Retrieve a fully resolved and normalized path for a file or directory, given a file or directory object.
+/// @param buf The destination buffer.
+/// @param buf_bytes The maximum number of bytes that can be written to the destination buffer.
+/// @param buf_end On input, a pointer to the end of the destination buffer. On return, this value points to the zero terminator of the destination buffer.
+/// @param bytes_needed On return, this value specifies the number of bytes needed to store the path string, including the zero terminator.
+/// @param handle The handle to the file or directory, or INVALID_HANDLE_VALUE.
+/// @return The number of characters written to the destination buffer, not including the zero terminator.
+public_function size_t
+OsNativePathForHandle
+(
+    WCHAR           *buf, 
+    size_t     buf_bytes, 
+    WCHAR      **buf_end,
+    size_t &bytes_needed, 
+    HANDLE        handle
+)
+{
+    size_t chars_written = 0;
+    // GetFinalPathNameByHandle returns the required buffer length, in TCHARs, including zero-terminator.
+    if ((bytes_needed = (GetFinalPathNameByHandleW(handle, NULL, 0, VOLUME_NAME_DOS | FILE_NAME_NORMALIZED) * sizeof(WCHAR))) == 0)
+    {   // in this case, bytes_needed cannot be determined, so it is set to zero.
+        OsLayerError("ERROR: %S(%u): Failed to retrieve absolute path for handle %p (%08X).\n", __FUNCTION__, GetCurrentThreadId(), handle, GetLastError());
+        if (buf     != NULL) *buf = 0;
+        if (buf_end != NULL) *buf_end = buf;
+        bytes_needed = 0;
+        return 0;
+    }
+    if (buf_bytes < bytes_needed || buf == NULL)
+    {   // in the case of insufficient space, don't output any error message (this is an expected path.)
+        // preserve the bytes_needed value for the caller.
+        if (buf     != NULL) *buf = 0;
+        if (buf_end != NULL) *buf_end = buf;
+        return 0;
+    }
+    if ((chars_written = GetFinalPathNameByHandleW(handle, buf, (DWORD)(buf_bytes / sizeof(WCHAR) - sizeof(WCHAR)), VOLUME_NAME_DOS | FILE_NAME_NORMALIZED)) == 0)
+    {   // preserve the bytes_needed value for the caller.
+        OsLayerError("ERROR: %S(%u): Failed to retrieve absolute path for handle %p (%08X).\n", __FUNCTION__, GetCurrentThreadId(), handle, GetLastError());
+        if (buf     != NULL) *buf = 0;
+        if (buf_end != NULL) *buf_end = buf;
+        return 0;
+    }
+    if (buf_end != NULL) 
+    {   // chars_written does not include the zero terminator, so +1 to include it.
+        *buf_end = buf + chars_written + 1;
+    }
+    return chars_written;
+}
+
+/// @summary Append a directory fragment, filename, or directory and filename to an existing native path string.
+/// @param buf The destination buffer.
+/// @param buf_bytes The maximum number of bytes that can be written to the destination buffer.
+/// @param buf_end On input, a pointer to the end of the destination buffer. On return, this value points to the zero terminator of the destination buffer.
+/// @param bytes_needed On return, this value specifies the number of bytes needed to store the entire path string, including the zero terminator.
+/// @param append A pointer to a zero-terminated string specifying the directory fragment, filename, or directory and filename to append.
+/// @return The number of characters in the destination buffer, not including the zero terminator.
+public_function size_t
+OsNativePathAppend
+(
+    WCHAR           *buf, 
+    size_t     buf_bytes, 
+    WCHAR      **buf_end, 
+    size_t &bytes_needed,
+    WCHAR const  *append
+)
+{
+    WCHAR const *app_end = NULL;
+    WCHAR       *inp_end = NULL;
+    size_t     inp_chars = 0; // the number of characters in string buf, not including zero terminator
+    size_t     inp_bytes = 0; // the number of bytes in string buf, including zero terminator
+    size_t     app_chars = 0; // the number of characters in string append, not including zero terminator
+    size_t     app_bytes = 0; // the number of bytes in string append, including zero terminator
+    size_t     sep_chars = 0; // 1 if a path separator is needed
+
+    if (buf_end != NULL && *buf_end != NULL && *buf_end > buf)
+    {   // *buf_end points to the zero-terminator of the existing string.
+        inp_end    = *buf_end;
+        inp_bytes  =((uint8_t*)*buf_end) - ((uint8_t*)buf);
+        inp_chars  =(*buf_end - 1 - buf);
+    }
+    else if (buf != NULL && buf_bytes > sizeof(WCHAR))
+    {   // determine the length of the input by scanning for the zero terminator.
+        if (SUCCEEDED(StringCchLengthW(buf, buf_bytes, &inp_chars)))
+        {
+            if (buf_end != NULL) *buf_end = buf + inp_chars + 1;
+            inp_end   = buf + inp_chars;
+            inp_bytes =(inp_chars + 1) * sizeof(WCHAR); 
+        }
+        else
+        {   // unable to determine the length of the input string.
+            OsLayerError("ERROR: %S(%u): Unable to determine length of input buffer. Is buf_bytes (%Iu) set correctly?\n", __FUNCTION__, GetCurrentThreadId(), buf_bytes);
+            if (buf_end != NULL) *buf_end = buf;
+            bytes_needed = 0;
+            return 0;
+        }
+    }
+    else
+    {   // no input buffer was supplied, which is unusual.
+        OsLayerError("%S(%u): No input buffer supplied.\n", __FUNCTION__, GetCurrentThreadId());
+        if (buf_end != NULL) *buf_end = NULL;
+        bytes_needed = 0;
+        return 0;
+    }
+    if (append != NULL)
+    {   // retieve the length of the string to append.
+        if (SUCCEEDED(StringCchLengthW(append, STRSAFE_MAX_CCH, &app_chars)))
+        {
+            app_end   = append + app_chars + 1;
+            app_bytes =(app_chars  +1) * sizeof(WCHAR);
+        }
+        else
+        {   // unable to determine the length of the fragment string.
+            OsLayerError("ERROR: %S(%u): Unable to determine length of fragment buffer %p.\n", __FUNCTION__, GetCurrentThreadId(), append);
+            if (buf_end != NULL) *buf_end = inp_end;
+            bytes_needed = inp_bytes;
+            return inp_chars;
+        }
+    }
+    else
+    {   // there's no string to append, so just return data for the existing buffer.
+        if (buf_end != NULL) *buf_end = inp_end;
+        bytes_needed = inp_bytes;
+        return inp_chars;
+    }
+    if (*(inp_end - 1) != L'\\' && *(inp_end - 1) != L'/')
+    {   // a trailing directory separator is required.
+        sep_chars = 1;
+    }
+    else if (*(inp_end - 1) == L'/')
+    {   // normalize the trailing separator to the OS-preferred format.
+        *(inp_end - 1) = L'\\';
+    }
+    
+    // we have enough information to determine the number of bytes required in the destination buffer.
+    bytes_needed  =(inp_chars + sep_chars + app_chars + 1) * sizeof(WCHAR);
+    if (buf_bytes < bytes_needed)
+    {   // insufficient space in the input buffer. this is an expected occurrence.
+        if (buf_end != NULL) *buf_end = inp_end;
+        return inp_chars;
+    }
+    if (sep_chars > 0)
+    {   // append a directory separator character.
+        *inp_end++ = L'\\';
+    }
+    // append the fragment to the native path string, including the zero-terminator.
+    while (append <= app_end)
+    {
+        if (*append != L'/')
+        {   // append the character to the destination buffer as-is.
+            *inp_end++ = *append++;
+        }
+        else
+        {   // convert to the preferred native path separator character.
+            *inp_end++ = L'\\';
+            ++append;
+        }
+    }
+    // all finished; set output parameters.
+    if (buf_end != NULL) *buf_end = inp_end;
+    return (inp_chars + sep_chars + app_chars);
+}
+
+/// @summary Change (or remove) the file extension of a native platform path string.
+/// @param buf The destination buffer.
+/// @param buf_bytes The maximum number of bytes that can be written to the destination buffer.
+/// @param buf_end On input, a pointer to the end of the destination buffer. On return, this value points to the zero terminator of the destination buffer.
+/// @param bytes_needed On return, this value specifies the number of bytes needed to store the entire path string, including the zero terminator.
+/// @param new_ext A pointer to a zero-terminated string specifying the new file extension, or NULL (or an empty string) to remove the existing extension.
+/// @return The number of characters in the destination buffer, not including the zero terminator.
+public_function size_t
+OsNativePathChangeExtension
+(
+    WCHAR           *buf, 
+    size_t     buf_bytes, 
+    WCHAR      **buf_end, 
+    size_t &bytes_needed, 
+    WCHAR const *new_ext
+)
+{
+    WCHAR const *ext_end = NULL;
+    WCHAR       *inp_end = NULL;
+    WCHAR       *inp_ext = NULL;
+    WCHAR       *inp_itr = NULL;
+    size_t     inp_chars = 0; // the number of characters in string buf, not including zero terminator
+    size_t     inp_bytes = 0; // the number of bytes in string buf, including zero terminator
+    size_t     ext_chars = 0; // the number of characters in string append, not including zero terminator
+    size_t     ext_bytes = 0; // the number of bytes in string append, including zero terminator
+    size_t     sep_chars = 0; // 1 if an extension separator is needed
+
+    if (buf_end != NULL && *buf_end != NULL && *buf_end > buf)
+    {   // *buf_end points to the zero-terminator of the existing string.
+        inp_end    = *buf_end;
+        inp_bytes  =((uint8_t*)*buf_end) - ((uint8_t*)buf);
+        inp_chars  =(*buf_end - 1 - buf);
+    }
+    else if (buf != NULL && buf_bytes > sizeof(WCHAR))
+    {   // determine the length of the input by scanning for the zero terminator.
+        if (SUCCEEDED(StringCchLengthW(buf, buf_bytes, &inp_chars)))
+        {
+            if (buf_end != NULL) *buf_end = buf + inp_chars + 1;
+            inp_end   = buf + inp_chars;
+            inp_bytes =(inp_chars + 1) * sizeof(WCHAR); 
+        }
+        else
+        {   // unable to determine the length of the input string.
+            OsLayerError("ERROR: %S(%u): Unable to determine length of input buffer. Is buf_bytes (%Iu) set correctly?\n", __FUNCTION__, GetCurrentThreadId(), buf_bytes);
+            if (buf_end != NULL) *buf_end = buf;
+            bytes_needed = 0;
+            return 0;
+        }
+    }
+    else
+    {   // no input buffer was supplied, which is unusual.
+        OsLayerError("%S(%u): No input buffer supplied.\n", __FUNCTION__, GetCurrentThreadId());
+        if (buf_end != NULL) *buf_end = NULL;
+        bytes_needed = 0;
+        return 0;
+    }
+
+    // find the first period after the last path separator.
+    inp_itr = inp_end - 1;
+    while (inp_itr > buf)
+    {
+        if (*inp_itr == L'.')
+        {   // save the position of the extension separator.
+            inp_ext = inp_itr;
+        }
+        else if (*inp_itr == L'\\' || *inp_itr == L'/')
+        {   // found a path separator; terminate the search.
+            break;
+        }
+        inp_itr--;
+    }
+    if (inp_ext == NULL)
+    {   // the input string currently has no extension, so append one.
+        inp_ext = inp_end;
+    }
+
+    if (new_ext == NULL || *new_ext == 0)
+    {   // the current extension is being removed; truncate the existing string.
+        if (buf_end != NULL) *buf_end = inp_ext;
+        bytes_needed = ((uint8_t*)inp_ext) - ((uint8_t*)buf);
+        *inp_ext = 0;
+        return (inp_ext - 1 - buf);
+    }
+    else
+    {   // a new extension is being appended; retrieve its length.
+        if (SUCCEEDED(StringCchLengthW(new_ext, STRSAFE_MAX_CCH, &ext_chars)))
+        {
+            ext_end   = new_ext + ext_chars + 1;
+            ext_bytes =(ext_chars  +1) * sizeof(WCHAR);
+        }
+        else
+        {   // unable to determine the length of the new extension string.
+            OsLayerError("ERROR: %S(%u): Unable to determine length of extension buffer %p.\n", __FUNCTION__, GetCurrentThreadId(), new_ext);
+            if (buf_end != NULL) *buf_end = inp_end;
+            bytes_needed = inp_bytes;
+            return inp_chars;
+        }
+    }
+    if (*new_ext != L'.')
+    {   // a leading extension separator is required.
+        sep_chars = 1;
+    }
+
+    // we have enough information to determine the number of bytes required in the destination buffer.
+    bytes_needed  =(inp_chars - (inp_end - inp_ext) + sep_chars + ext_chars + 1) * sizeof(WCHAR);
+    if (buf_bytes < bytes_needed)
+    {   // insufficient space in the input buffer. this is an expected occurrence.
+        if (buf_end != NULL) *buf_end = inp_end;
+        return inp_chars;
+    }
+    if (sep_chars > 0)
+    {   // append an extension separator character.
+        *inp_ext++ = L'.';
+    }
+    // append the extension to the native path string, including the zero-terminator.
+    CopyMemory(inp_ext, new_ext, ext_bytes);
+    inp_ext += ext_chars;
+    // all finished; set output parameters.
+    if (buf_end != NULL) *buf_end = inp_ext;
+    return ((inp_ext - 1 - buf) + sep_chars + ext_chars);
+}
+
+/// @summary Append an extension value to a native path string.
+/// @param buf The destination buffer.
+/// @param buf_bytes The maximum number of bytes that can be written to the destination buffer.
+/// @param buf_end On input, a pointer to the end of the destination buffer. On return, this value points to the zero terminator of the destination buffer.
+/// @param bytes_needed On return, this value specifies the number of bytes needed to store the entire path string, including the zero terminator.
+/// @param new_ext A pointer to a zero-terminated string specifying the file extension to append.
+/// @return The number of characters in the destination buffer, not including the zero terminator.
+public_function size_t
+OsNativePathAppendExtension
+(
+    WCHAR           *buf, 
+    size_t     buf_bytes, 
+    WCHAR      **buf_end, 
+    size_t &bytes_needed, 
+    WCHAR const *new_ext
+)
+{
+    WCHAR const *ext_end = NULL;
+    WCHAR       *inp_end = NULL;
+    size_t     inp_chars = 0; // the number of characters in string buf, not including zero terminator
+    size_t     inp_bytes = 0; // the number of bytes in string buf, including zero terminator
+    size_t     ext_chars = 0; // the number of characters in string append, not including zero terminator
+    size_t     ext_bytes = 0; // the number of bytes in string append, including zero terminator
+    size_t     sep_chars = 0; // 1 if an extension separator is needed
+
+    if (buf_end != NULL && *buf_end != NULL && *buf_end > buf)
+    {   // *buf_end points to the zero-terminator of the existing string.
+        inp_end    = *buf_end;
+        inp_bytes  =((uint8_t*)*buf_end) - ((uint8_t*)buf);
+        inp_chars  =(*buf_end - 1 - buf);
+    }
+    else if (buf != NULL && buf_bytes > sizeof(WCHAR))
+    {   // determine the length of the input by scanning for the zero terminator.
+        if (SUCCEEDED(StringCchLengthW(buf, buf_bytes, &inp_chars)))
+        {
+            if (buf_end != NULL) *buf_end = buf + inp_chars + 1;
+            inp_end   = buf + inp_chars;
+            inp_bytes =(inp_chars + 1) * sizeof(WCHAR); 
+        }
+        else
+        {   // unable to determine the length of the input string.
+            OsLayerError("ERROR: %S(%u): Unable to determine length of input buffer. Is buf_bytes (%Iu) set correctly?\n", __FUNCTION__, GetCurrentThreadId(), buf_bytes);
+            if (buf_end != NULL) *buf_end = buf;
+            bytes_needed = 0;
+            return 0;
+        }
+    }
+    else
+    {   // no input buffer was supplied, which is unusual.
+        OsLayerError("%S(%u): No input buffer supplied.\n", __FUNCTION__, GetCurrentThreadId());
+        if (buf_end != NULL) *buf_end = NULL;
+        bytes_needed = 0;
+        return 0;
+    }
+
+    if (new_ext == NULL || *new_ext == 0)
+    {   // no extension was supplied; don't make any changes.
+        if (buf_end != NULL) *buf_end = inp_end;
+        bytes_needed = inp_bytes;
+        return inp_chars;
+    }
+    else
+    {   // a new extension is being appended; retrieve its length.
+        if (SUCCEEDED(StringCchLengthW(new_ext, STRSAFE_MAX_CCH, &ext_chars)))
+        {
+            ext_end   = new_ext + ext_chars + 1;
+            ext_bytes =(ext_chars + 1) * sizeof(WCHAR);
+        }
+        else
+        {   // unable to determine the length of the new extension string.
+            OsLayerError("ERROR: %S(%u): Unable to determine length of extension buffer %p.\n", __FUNCTION__, GetCurrentThreadId(), new_ext);
+            if (buf_end != NULL) *buf_end = inp_end;
+            bytes_needed = inp_bytes;
+            return inp_chars;
+        }
+    }
+    if (*new_ext != L'.')
+    {   // a leading extension separator is required.
+        sep_chars = 1;
+    }
+
+    // we have enough information to determine the number of bytes required in the destination buffer.
+    bytes_needed  =(inp_chars + sep_chars + ext_chars + 1) * sizeof(WCHAR);
+    if (buf_bytes < bytes_needed)
+    {   // insufficient space in the input buffer. this is an expected occurrence.
+        if (buf_end != NULL) *buf_end = inp_end;
+        return inp_chars;
+    }
+    if (sep_chars > 0)
+    {   // append an extension separator character.
+        *inp_end++ = L'.';
+    }
+    // append the extension to the native path string, including the zero-terminator.
+    CopyMemory(inp_end, new_ext, ext_bytes);
+    inp_end += ext_chars;
+    // all finished; set output parameters.
+    if (buf_end != NULL) *buf_end = inp_end;
+    return (inp_chars + sep_chars + ext_chars);
+}
+
+/*
+public_function void
+OsNativePathParse
+(
+    WCHAR           *buf, 
+    WCHAR       *buf_end, 
+    OS_PATH_PARTS *parts
+)
+{
+    // initialize the output.
+    parts->Root = buf;
+    parts->RootEnd = buf;
+    parts->Path = buf;
+    parts->PathEnd = buf;
+    parts->Filename = buf;
+    parts->FilenameEnd = buf;
+    parts->Extension = buf;
+    parts->ExtensionEnd = buf;
+
+    // root may be "C:", "\\?\C:", "\\UNC", "\\?\UNC.
+    // path starts at the first character after the first '\' after RootEnd
+    // holy monkeys this is going to be a pain to get right.
+}
+*/
 
 /// @summary Retrieve the physical sector size for a block-access device.
 /// @param file The handle to an open file on the device.
@@ -7391,6 +7945,176 @@ OsPhysicalSectorSize
     return result ? desc.BytesPerPhysicalSector : DefaultPhysicalSectorSize;
 }
 
+/// @summary Initialize a file system information chunk allocator.
+/// @param alloc The OS_FSIC_ALLOCATOR instance to initialize.
+/// @param arena The memory arena from which chunks will be allocated. This arena must exist for the lifetime of the allocator.
+public_function void
+OsInitFileSystemInfoChunkAllocator
+(
+    OS_FSIC_ALLOCATOR *alloc, 
+    OS_MEMORY_ARENA   *arena
+)
+{
+    InitializeCriticalSectionAndSpinCount(&alloc->AllocatorLock, 0x1000);
+    alloc->MemoryArena = arena;
+    alloc->FreeList = NULL;
+}
+
+/// @summary Allocate a single OS_FILE_INFO_CHUNK. This function blocks the calling thread.
+/// @param alloc The OS_FSIC_ALLOCATOR from which the chunk will be allocated.
+/// @return A pointer to the OS_FILE_INFO_CHUNK, or NULL if the allocation failed.
+public_function OS_FILE_INFO_CHUNK*
+OsNewFileInfoChunk
+(
+    OS_FSIC_ALLOCATOR *alloc
+)
+{
+    OS_FILE_INFO_CHUNK  *chunk = NULL;
+    EnterCriticalSection(&alloc->AllocatorLock);
+    {
+        if (alloc->FreeList != NULL)
+        {   // return a block from the free list.
+            chunk            = alloc->FreeList;
+            alloc->FreeList  = alloc->FreeList->NextChunk;
+        }
+        else
+        {   // allocate a new block from the memory arena.
+            chunk = OsMemoryArenaAllocate<OS_FILE_INFO_CHUNK>(alloc->MemoryArena);
+        }
+    }
+    LeaveCriticalSection(&alloc->AllocatorLock);
+
+    // initialize the chunk outside of the critical section.
+    if (chunk != NULL)
+    {
+        InitializeSRWLock(&chunk->RWLock);
+        chunk->NextChunk   = NULL;
+        chunk->RecordCount = 0;
+    }
+    return chunk;
+}
+
+/// @summary Free a list of OS_FILE_INFO_CHUNK objects. This function blocks the calling thread.
+/// @param alloc The OS_FSIC_ALLOCATOR to which the chunk will be returned.
+/// @param chunk The OS_FILE_INFO_CHUNK defining the head of the list to free.
+public_function void
+OsFreeFileInfoChunkList
+(
+    OS_FSIC_ALLOCATOR  *alloc, 
+    OS_FILE_INFO_CHUNK *chunk
+)
+{
+    EnterCriticalSection(&alloc->AllocatorLock);
+    {
+        while (chunk != NULL)
+        {
+            OS_FILE_INFO_CHUNK *next = chunk->NextChunk;
+            chunk->NextChunk = alloc->FreeList;
+            alloc->FreeList  = chunk;
+            chunk            = next;
+        }
+    }
+    LeaveCriticalSection(&alloc->AllocatorLock);
+}
+
+/// @summary Acquire a read lock on a file metadata chunk to guard against concurrent modification. Multiple threads may read the chunk concurrently.
+/// @param chunk The OS_FILE_INFO_CHUNK to lock for read-only access.
+public_function void
+OsLockFileInfoChunkRead
+(
+    OS_FILE_INFO_CHUNK *chunk
+)
+{
+    AcquireSRWLockShared(&chunk->RWLock);
+}
+
+/// @summary Release a previously acquired read lock on a file metadata chunk.
+/// @param chunk The OS_FILE_INFO_CHUNK locked for read-only access.
+public_function void
+OsUnlockFileInfoChunkRead
+(
+    OS_FILE_INFO_CHUNK *chunk
+)
+{
+    ReleaseSRWLockShared(&chunk->RWLock);
+}
+
+/// @summary Acquire a read-write lock on a file metadata chunk to guard against concurrent modification. Only one thread may read or write the chunk.
+/// @param chunk The OS_FILE_INFO_CHUNK to lock for read-write access.
+public_function void
+OsLockFileInfoChunkWrite
+(
+    OS_FILE_INFO_CHUNK *chunk
+)
+{
+    AcquireSRWLockExclusive(&chunk->RWLock);
+}
+
+/// @summary Release a previously acquired read-write lock on a file metadata chunk.
+/// @param chunk The OS_FILE_INFO_CHUNK locked for read-write access.
+public_function void
+OsUnlockFileInfoChunkWrite
+(
+    OS_FILE_INFO_CHUNK *chunk
+)
+{
+    ReleaseSRWLockExclusive(&chunk->RWLock);
+}
+
+/// @summary Open a directory for access on the native file system. The directory may be local or remote. The directory must exist.
+/// @param path A zero-terminated native path string specifying the directory to open.
+/// @param dir On return, this location is updated with the native handle used to access the directory.
+/// @return true if the directory is successfully opened.
+public_function bool
+OsOpenNativeDirectory
+(
+    WCHAR const *path, 
+    HANDLE       &dir
+)
+{
+    if ((dir = CreateFile(path, 0, FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL)) == INVALID_HANDLE_VALUE)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to open directory %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), path, GetLastError());
+        return false;
+    }
+    return true;
+}
+
+/// @summary Close a native directory handle, indicating that the application no longer requires access.
+/// @param dir The handle returned by OsOpenNativeDirectory.
+public_function void
+OsCloseNativeDirectory
+(
+    HANDLE dir
+)
+{
+    if (dir != INVALID_HANDLE_VALUE)
+        CloseHandle(dir);
+}
+
+/*
+public_function OS_FILE_INFO_CHUNK*
+OsNativeDirectoryFindFiles
+(
+    HANDLE               dir, 
+    WCHAR const      *filter, 
+    bool             recurse,
+    size_t      &total_files, 
+    OS_FSIC_ALLOCATOR *alloc
+)
+{
+}
+
+public_function bool
+OsCreateNativeDirectory
+(
+    WCHAR const *path
+)
+{
+}
+*/
+
+/*
 /// @summary Initializes a file system driver.
 /// @param driver The file system driver to initialize.
 /// @param init Configuration data used to initialize the filesystem implementation.
@@ -7635,12 +8359,12 @@ OsOpenFile
     {
         if (hints & OS_FILE_USAGE_HINT_ASYNCHRONOUS)
         {   // associate the file handle with the I/O completion port managed by the AIO driver.
-            /*DWORD    asio_result = aio_driver_prepare(driver->AIO, file->Fildes);
-            if (!SUCCESS(asio_result))
-            {   // could not associate the file handle with the I/O completion port.
-                OsCloseFile(file);
-                return asio_result;
-            }*/
+            //DWORD    asio_result = aio_driver_prepare(driver->AIO, file->Fildes);
+            //if (!SUCCESS(asio_result))
+            //{   // could not associate the file handle with the I/O completion port.
+            //    OsCloseFile(file);
+            //    return asio_result;
+            //}
         }
     }
     return result;
@@ -7768,6 +8492,7 @@ OsFlushFile
     }
     return OS_IO_RESULT_SUCCESS;
 }
+*/
 
 // TODO(rlk): mmap I/O synchronous functions
 // TODO(rlk): bounded MPSC FIFO for async, prioritized I/O ops => feeds
