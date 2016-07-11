@@ -569,6 +569,7 @@ struct OS_PATH_PARTS
     WCHAR              *FilenameEnd;                 /// Pointer to the last character of the filename portion of the path.
     WCHAR              *Extension;                   /// Pointer to the first character of the extension portion of the path.
     WCHAR              *ExtensionEnd;                /// Pointer to the last character of the extension portion of the path.
+    uint32_t            PathFlags;                   /// One or more of OS_PATH_FLAGS specifying attributes of the path.
 };
 
 /// @summary Define the data associated with a mountpoint, which represents a single mounted file system within the larger virtualized file system.
@@ -1037,7 +1038,7 @@ enum OS_WORKER_THREAD_WAKE_REASON    : int
 };
 
 /// @summary Define the recognized categories of file system mount points.
-enum OS_MOUNTPOINT_TYPE              : int32_t
+enum OS_MOUNTPOINT_TYPE              : int
 {
     OS_MOUNTPOINT_TYPE_DIRECTORY     = 0,            /// The mount point is a directory on the filesystem.
     OS_MOUNTPOINT_TYPE_ARCHIVE       = 1,            /// The mount point is an archive file (like a TAR.)
@@ -1045,7 +1046,7 @@ enum OS_MOUNTPOINT_TYPE              : int32_t
 };
 
 /// @summary Define the recognized types of file system entities.
-enum OS_FILE_ENTRY_TYPE              : int32_t
+enum OS_FILE_ENTRY_TYPE              : int
 {
     OS_FILE_ENTRY_TYPE_UNKNOWN       = 0,            /// The entry type is not yet known or could not be determined.
     OS_FILE_ENTRY_TYPE_FILE          = 1,            /// The entry is a regular file.
@@ -1117,6 +1118,21 @@ enum OS_VULKAN_LOADER_RESULT         : int
     OS_VULKAN_LOADER_RESULT_NOMEMORY =-2,            /// The supplied memory arena does not have sufficient space.
     OS_VULKAN_LOADER_RESULT_NOENTRY  =-3,            /// One or more required Vulkan API entry points are missing.
     OS_VULKAN_LOADER_RESULT_VKERROR  =-4,            /// A Vulkan API call returned an error.
+};
+
+/// @summary Define the valid flags that can be set on the OS_PATH_PARTS::PathFlags field.
+enum OS_PATH_FLAGS                   : uint32_t
+{
+    OS_PATH_FLAGS_INVALID            = (0 << 0),     /// No flags are specified for the path, or the path cannot be parsed.
+    OS_PATH_FLAG_ABSOLUTE            = (1 << 0),     /// The path string specifies an absolute path.
+    OS_PATH_FLAG_RELATIVE            = (1 << 1),     /// The path string specifies a relative path.
+    OS_PATH_FLAG_UNC                 = (1 << 2),     /// The path string specifies a path in UNC format.
+    OS_PATH_FLAG_DEVICE              = (1 << 3),     /// The path string specifies a device path.
+    OS_PATH_FLAG_LONG                = (1 << 4),     /// The path string specifies a long path, with a maximum length of 32767 characters.
+    OS_PATH_FLAG_ROOT                = (1 << 5),     /// The path string has a root component.
+    OS_PATH_FLAG_PATH                = (1 << 6),     /// The path string has a directory path component.
+    OS_PATH_FLAG_FILENAME            = (1 << 7),     /// The path string has a filename component.
+    OS_PATH_FLAG_EXTENSION           = (1 << 8),     /// The path string has a file extension component.
 };
 
 /// @summary Define flags used to optimize file accesses for a particular usage scenario.
@@ -1366,7 +1382,7 @@ public_function size_t               OsNativePathForHandle(WCHAR *buf, size_t bu
 public_function size_t               OsNativePathAppend(WCHAR *buf, size_t buf_bytes, WCHAR **buf_end, size_t &bytes_needed, WCHAR const *append);
 public_function size_t               OsNativePathChangeExtension(WCHAR *buf, size_t buf_bytes, WCHAR **buf_end, size_t &bytes_needed, WCHAR const *new_ext);
 public_function size_t               OsNativePathAppendExtension(WCHAR *buf, size_t buf_bytes, WCHAR **buf_end, size_t &bytes_needed, WCHAR const *new_ext);
-public_function void                 OsNativePathParse(WCHAR *buf, WCHAR *buf_end, OS_PATH_PARTS *parts);
+public_function bool                 OsNativePathParse(WCHAR *buf, WCHAR *buf_end, OS_PATH_PARTS *parts);
 public_function size_t               OsPhysicalSectorSize(HANDLE file);
 public_function void                 OsInitFileSystemInfoChunkAllocator(OS_FSIC_ALLOCATOR *alloc);
 public_function OS_FILE_INFO_CHUNK*  OsNewFileInfoChunk(OS_FSIC_ALLOCATOR *alloc);
@@ -7597,7 +7613,7 @@ OsNativePathAppend
     {   // determine the length of the input by scanning for the zero terminator.
         if (SUCCEEDED(StringCchLengthW(buf, buf_bytes, &inp_chars)))
         {
-            if (buf_end != NULL) *buf_end = buf + inp_chars + 1;
+            if (buf_end != NULL) *buf_end = buf + inp_chars;
             inp_end   = buf + inp_chars;
             inp_bytes =(inp_chars + 1) * sizeof(WCHAR); 
         }
@@ -7620,7 +7636,7 @@ OsNativePathAppend
     {   // retieve the length of the string to append.
         if (SUCCEEDED(StringCchLengthW(append, STRSAFE_MAX_CCH, &app_chars)))
         {
-            app_end   = append + app_chars + 1;
+            app_end   = append + app_chars;
             app_bytes =(app_chars  +1) * sizeof(WCHAR);
         }
         else
@@ -7712,7 +7728,7 @@ OsNativePathChangeExtension
     {   // determine the length of the input by scanning for the zero terminator.
         if (SUCCEEDED(StringCchLengthW(buf, buf_bytes, &inp_chars)))
         {
-            if (buf_end != NULL) *buf_end = buf + inp_chars + 1;
+            if (buf_end != NULL) *buf_end = buf + inp_chars;
             inp_end   = buf + inp_chars;
             inp_bytes =(inp_chars + 1) * sizeof(WCHAR); 
         }
@@ -7762,8 +7778,8 @@ OsNativePathChangeExtension
     {   // a new extension is being appended; retrieve its length.
         if (SUCCEEDED(StringCchLengthW(new_ext, STRSAFE_MAX_CCH, &ext_chars)))
         {
-            ext_end   = new_ext + ext_chars + 1;
-            ext_bytes =(ext_chars  +1) * sizeof(WCHAR);
+            ext_end   = new_ext + ext_chars;
+            ext_bytes =(ext_chars + 1) * sizeof(WCHAR);
         }
         else
         {   // unable to determine the length of the new extension string.
@@ -7832,7 +7848,7 @@ OsNativePathAppendExtension
     {   // determine the length of the input by scanning for the zero terminator.
         if (SUCCEEDED(StringCchLengthW(buf, buf_bytes, &inp_chars)))
         {
-            if (buf_end != NULL) *buf_end = buf + inp_chars + 1;
+            if (buf_end != NULL) *buf_end = buf + inp_chars;
             inp_end   = buf + inp_chars;
             inp_bytes =(inp_chars + 1) * sizeof(WCHAR); 
         }
@@ -7862,7 +7878,7 @@ OsNativePathAppendExtension
     {   // a new extension is being appended; retrieve its length.
         if (SUCCEEDED(StringCchLengthW(new_ext, STRSAFE_MAX_CCH, &ext_chars)))
         {
-            ext_end   = new_ext + ext_chars + 1;
+            ext_end   = new_ext + ext_chars;
             ext_bytes =(ext_chars + 1) * sizeof(WCHAR);
         }
         else
@@ -7897,8 +7913,88 @@ OsNativePathAppendExtension
     return (inp_chars + sep_chars + ext_chars);
 }
 
-/*
-public_function void
+/// @summary Figure out the starting and ending points of the directory path, filename and extension information in a path string.
+/// @param buf The zero-terminated path string to parse. Any forward slashes are converted to backslashes.
+/// @param buf_end A pointer to the zero terminator character of the input path string. This value must be valid.
+/// @param parts The OS_PATH_PARTS to update. The Root, RootEnd and PathFlags fields must be set.
+/// @return This function always returns true.
+internal_function bool
+OsExtractNativePathParts
+(
+    WCHAR           *buf, 
+    WCHAR       *buf_end, 
+    OS_PATH_PARTS *parts
+)
+{   // initialize the components of the path parts to known values.
+    parts->Path         = parts->RootEnd;
+    parts->PathEnd      = parts->RootEnd;
+    parts->Filename     = parts->RootEnd;
+    parts->FilenameEnd  = parts->RootEnd;
+    parts->Extension    = buf_end;
+    parts->ExtensionEnd = buf_end;
+
+    while (parts->FilenameEnd < buf_end)
+    {
+        if (parts->FilenameEnd[0] == L'/')
+            parts->FilenameEnd[0]  = L'\\';
+        if (parts->FilenameEnd[0] == L'\\')
+        {   // encountered a path separator.
+            // update the end of the directory path string.
+            // reset the filename string to be zero-length.
+            parts->PathEnd     = parts->FilenameEnd;
+            parts->PathFlags  |= OS_PATH_FLAG_PATH;
+            parts->Filename    = parts->FilenameEnd + 1;
+            parts->FilenameEnd = parts->FilenameEnd + 1;
+        }
+        else
+        {   // this is a regular character; consider it part of the filename.
+            parts->FilenameEnd++;
+        }
+    }
+    if (parts->Path[0] == L'\\')
+    {   // skip the leading path separator.
+        if (parts->Path == parts->PathEnd)
+            parts->PathEnd++;
+        parts->Path++;
+    }
+
+    if (parts->Filename != parts->FilenameEnd)
+    {   // figure out whether this last bit is a filename or part of the directory path.
+        WCHAR *iter  = buf_end;
+        while (iter >= parts->Filename)
+        {   // consider 'a.b', '.a.b' and 'a.' to be a filename, but not '.a'.
+            if (*iter == L'.' && iter != parts->Filename)
+            {
+                parts->FilenameEnd = iter;
+                parts->Extension   = iter + 1;
+                parts->PathFlags  |= OS_PATH_FLAG_FILENAME;
+                parts->PathFlags  |= OS_PATH_FLAG_EXTENSION;
+            }
+            iter--;
+        }
+        if ((parts->PathFlags & OS_PATH_FLAG_FILENAME) == 0)
+        {   // consider 'a' and '.a' to be part of the directory path information.
+            parts->PathEnd     = parts->FilenameEnd;
+            parts->PathFlags  |= OS_PATH_FLAG_PATH;
+            parts->Filename    = buf_end;
+            parts->FilenameEnd = buf_end;
+        }
+    }
+    else
+    {   // if there's no filename present, make sure that it points to an empty string.
+        parts->Filename    = buf_end;
+        parts->FilenameEnd = buf_end;
+    }
+    UNREFERENCED_PARAMETER(buf);
+    return true;
+}
+
+/// @summary Parse an absolute or relative native path string into its constituent parts.
+/// @param buf The buffer to parse containing the native path string. All forward slashes are replaced with backslash.
+/// @param buf_end A pointer to the zero-terminator byte of the input path string, or NULL to scan the input buffer for a zero terminator.
+/// @param parts The OS_PATH_PARTS to populate with path information.
+/// @return true if the path string is successfully parsed.
+public_function bool
 OsNativePathParse
 (
     WCHAR           *buf, 
@@ -7906,21 +8002,155 @@ OsNativePathParse
     OS_PATH_PARTS *parts
 )
 {
-    // initialize the output.
-    parts->Root = buf;
-    parts->RootEnd = buf;
-    parts->Path = buf;
-    parts->PathEnd = buf;
-    parts->Filename = buf;
-    parts->FilenameEnd = buf;
-    parts->Extension = buf;
-    parts->ExtensionEnd = buf;
+    size_t inp_chars = 0; // the number of characters in string buf, not including zero terminator
+    size_t inp_bytes = 0; // the number of bytes in string buf, including zero terminator
 
-    // root may be "C:", "\\?\C:", "\\UNC", "\\?\UNC.
-    // path starts at the first character after the first '\' after RootEnd
-    // holy monkeys this is going to be a pain to get right.
+    // initialize the output to valid zero-length strings.
+    parts->Root      = buf;     parts->RootEnd      = buf_end;
+    parts->Path      = buf_end; parts->PathEnd      = buf_end;
+    parts->Filename  = buf_end; parts->FilenameEnd  = buf_end;
+    parts->Extension = buf_end; parts->ExtensionEnd = buf_end;
+
+    // figure out the length of the input path string.
+    if (buf_end != NULL && buf_end > buf)
+    {   // buf_end points to the zero-terminator of the existing string.
+        inp_bytes = ((uint8_t*)buf_end) - ((uint8_t*)buf);
+        inp_chars = (buf_end - 1 - buf);
+    }
+    else if (buf != NULL)
+    {   // determine the length of the input by scanning for the zero terminator.
+        StringCchLengthW(buf, STRSAFE_MAX_CCH, &inp_chars);
+        buf_end   = buf + inp_chars;
+        inp_bytes = (inp_chars + 1) * sizeof(WCHAR); 
+    }
+    if (buf == NULL || inp_chars < 1)
+    {   // the input buffer is invalid; there's nothing to parse.
+        parts->PathFlags = OS_PATH_FLAGS_INVALID;
+        return false;
+    }
+
+    // determine the type of input path string and perform setup for OsExtractNativePathParts.
+    if (inp_chars >= 3)
+    {
+        if (buf[0] == L'\\' && buf[1] == L'\\')
+        {   // absolute path; may be device, UNC, long device, long UNC, or long DOS.
+            if ((inp_chars >= 5) && (buf[2] == L'?') && (buf[3] == L'\\'))
+            {   // may be long UNC or long DOS.
+                if ((inp_chars >= 6) && ((buf[4] >= L'A' && buf[4] <= L'Z') || (buf[4] >= L'a' && buf[4] <= L'z')) && (buf[5] == L':'))
+                {   // long DOS path.
+                    parts->Root      = buf + 4;
+                    parts->RootEnd   = buf + 6;
+                    parts->PathFlags = OS_PATH_FLAG_ABSOLUTE | OS_PATH_FLAG_LONG | OS_PATH_FLAG_ROOT;
+                    return OsExtractNativePathParts(buf, buf_end, parts);
+                }
+                else if ((inp_chars >= 6) && (buf[4] == L'.' && buf[5] == L'\\'))
+                {   // long device path.
+                    parts->Root      = buf + 6;
+                    parts->RootEnd   = buf + 6;
+                    parts->PathFlags = OS_PATH_FLAG_ABSOLUTE | OS_PATH_FLAG_LONG | OS_PATH_FLAG_DEVICE | OS_PATH_FLAG_ROOT;
+                    goto scan_for_end_of_root;
+                }
+                else
+                {   // long UNC path.
+                    parts->Root      = buf + 4;
+                    parts->RootEnd   = buf + 4; 
+                    parts->PathFlags = OS_PATH_FLAG_ABSOLUTE | OS_PATH_FLAG_LONG | OS_PATH_FLAG_UNC | OS_PATH_FLAG_ROOT;
+                    goto scan_for_end_of_root;
+                }
+            }
+            else if ((inp_chars >= 5) && (buf[2] == L'.') && (buf[3] == L'\\'))
+            {   // device path, limit MAX_PATH characters.
+                parts->Root      = buf + 4;
+                parts->RootEnd   = buf + 4;
+                parts->PathFlags = OS_PATH_FLAG_ABSOLUTE | OS_PATH_FLAG_DEVICE | OS_PATH_FLAG_ROOT;
+                goto scan_for_end_of_root;
+            }
+            else
+            {   // UNC path, limit MAX_PATH characters.
+                parts->Root      = buf + 2;
+                parts->RootEnd   = buf + 2;
+                parts->PathFlags = OS_PATH_FLAG_ABSOLUTE | OS_PATH_FLAG_UNC | OS_PATH_FLAG_ROOT;
+                goto scan_for_end_of_root;
+            }
+        }
+        else if (buf[0] == L'\\' || buf[0] == L'/')
+        {   // absolute path, with a root of '\' (MSDN says this is valid?)
+            if (buf[0] == L'/')
+                buf[0] = L'\\';
+            parts->Root      = buf;
+            parts->RootEnd   = buf + 1;
+            parts->PathFlags = OS_PATH_FLAG_ABSOLUTE | OS_PATH_FLAG_ROOT;
+            return OsExtractNativePathParts(buf, buf_end, parts);
+        }
+        else if (((buf[0] >= L'A' && buf[0] <= L'Z') || (buf[0] >= L'a' && buf[0] <= L'z')) && (buf[1] == L':'))
+        {   // absolute DOS path with a drive letter root.
+            parts->Root      = buf;
+            parts->RootEnd   = buf + 2;
+            parts->PathFlags = OS_PATH_FLAG_ABSOLUTE | OS_PATH_FLAG_ROOT;
+            return OsExtractNativePathParts(buf, buf_end, parts);
+        }
+        else
+        {   // assume that this is a relative path.
+            parts->Root      = buf;
+            parts->RootEnd   = buf;
+            parts->PathFlags = OS_PATH_FLAG_RELATIVE;
+            return OsExtractNativePathParts(buf, buf_end, parts);
+        }
+    }
+    else if (inp_chars == 2)
+    {   // C:, .., .\, aa, .a, etc.
+        if (((buf[0] >= L'A' && buf[0] <= L'Z') || (buf[0] >= L'a' && buf[0] <= L'z')) && (buf[1] == L':'))
+        {   // absolute DOS path with drive letter root; no path information.
+            parts->Root      = buf;
+            parts->RootEnd   = buf + 2;
+            parts->PathFlags = OS_PATH_FLAG_ABSOLUTE | OS_PATH_FLAG_ROOT;
+            return true;
+        }
+        // else, assume relative path, directory path info only.
+        parts->Root      = buf;
+        parts->RootEnd   = buf;
+        parts->Path      = buf;
+        parts->PathFlags = OS_PATH_FLAG_RELATIVE | OS_PATH_FLAG_PATH;
+        if (buf[0] == L'.' && (buf[1] == L'\\' || buf[1] == L'/'))
+        {   // relative path, directory path info only.
+            if (buf[1] == L'/')
+                buf[1] = L'\\';
+            parts->PathEnd = buf + 1;
+        }
+        else
+        {   // assume this is a relative directory path.
+            parts->PathEnd = buf + 2;
+        }
+        return true;
+    }
+    else  // inp_chars == 1
+    {   // assume this is a relative path, directory info only.
+        parts->Root      = buf;
+        parts->RootEnd   = buf;
+        parts->Path      = buf;
+        parts->PathEnd   = buf + 1;
+        parts->PathFlags = OS_PATH_FLAG_RELATIVE | OS_PATH_FLAG_PATH;
+        return true;
+    }
+
+scan_for_end_of_root:
+    while (parts->RootEnd < buf_end)
+    {
+        if (parts->RootEnd[0] == L'\\')
+            break;
+        if (parts->RootEnd[0] == L'/')
+        {
+            parts->RootEnd[0] = L'\\';
+            break;
+        }
+        parts->RootEnd++;
+    }
+    if (parts->RootEnd == buf_end)
+    {   // no additional components will be found.
+        return true;
+    }
+    return OsExtractNativePathParts(buf, buf_end, parts);
 }
-*/
 
 /// @summary Retrieve the physical sector size for a block-access device.
 /// @param file The handle to an open file on the device.

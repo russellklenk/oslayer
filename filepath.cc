@@ -23,12 +23,14 @@ static WCHAR const *InputPaths[] =
     L"C:\\foo\\", 
     L"C:\\foo.a", 
     L"C:\\foo\\bar.a.b", 
+    L"\\\\.\\SomeDevice", 
     L"\\\\?\\C:", 
     L"\\\\?\\C:\\", 
     L"\\\\?\\C:\\foo", 
     L"\\\\?\\C:\\foo\\", 
     L"\\\\?\\C:\\foo.a", 
     L"\\\\?\\C:\\foo\\bar.a.b", 
+    L"\\\\?\\.\\SomeDevice",
     L"\\\\UNC", 
     L"\\\\UNC\\", 
     L"\\\\UNC\\foo", 
@@ -47,6 +49,46 @@ static WCHAR const *InputPaths[] =
 /*//////////////////////////
 //   Internal Functions   //
 //////////////////////////*/
+internal_function void
+PrintPart
+(
+    WCHAR const *header, 
+    WCHAR const    *beg, 
+    WCHAR const    *end
+)
+{
+    wprintf(L"%s: ", header);
+    while (beg != end)
+    {
+        wprintf(L"%c", *beg++);
+    }
+    wprintf(L"\n");
+}
+
+internal_function void
+PrintPathParts
+(
+    WCHAR const *inpp,
+    OS_PATH_PARTS *pp
+)
+{
+    wprintf(L"INPP: %s\n", inpp);
+    PrintPart(L"ROOT", pp->Root, pp->RootEnd);
+    PrintPart(L"PATH", pp->Path, pp->PathEnd);
+    PrintPart(L"FNAM", pp->Filename, pp->FilenameEnd);
+    PrintPart(L"FEXT", pp->Extension, pp->ExtensionEnd);
+    wprintf(L"FLAG: ");
+    if (pp->PathFlags & OS_PATH_FLAG_ABSOLUTE) wprintf(L"A");
+    if (pp->PathFlags & OS_PATH_FLAG_RELATIVE) wprintf(L"R");
+    if (pp->PathFlags & OS_PATH_FLAG_LONG) wprintf(L"L");
+    if (pp->PathFlags & OS_PATH_FLAG_UNC) wprintf(L"U");
+    if (pp->PathFlags & OS_PATH_FLAG_DEVICE) wprintf(L"D");
+    if (pp->PathFlags & OS_PATH_FLAG_ROOT) wprintf(L"r");
+    if (pp->PathFlags & OS_PATH_FLAG_PATH) wprintf(L"p");
+    if (pp->PathFlags & OS_PATH_FLAG_FILENAME) wprintf(L"f");
+    if (pp->PathFlags & OS_PATH_FLAG_EXTENSION) wprintf(L"e");
+    wprintf(L"\n\n");
+}
 
 /*////////////////////////
 //   Public Functions   //
@@ -72,6 +114,21 @@ main
     {
         OsLayerError("ERROR: %S(%u): Unable to initialize main memory arena.\n", __FUNCTION__, GetCurrentThreadId());
         return -1;
+    }
+    {
+        size_t index = 0;
+        while (InputPaths[index] != NULL)
+        {
+            WCHAR *outpath  = NULL;
+            OS_PATH_PARTS p = {};
+
+            OsMemoryArenaReset(&arena);
+            outpath  = OsMemoryArenaAllocateArray<WCHAR>(&arena, 32768);
+            StringCchCopyW(outpath, 32768, InputPaths[index]);
+            OsNativePathParse(outpath, NULL, &p);
+            PrintPathParts(InputPaths[index],&p);
+            ++index;
+        }
     }
     {
         size_t index = 0;
