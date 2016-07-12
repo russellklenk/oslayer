@@ -1391,7 +1391,7 @@ public_function void                 OsLockFileInfoChunkRead(OS_FILE_INFO_CHUNK 
 public_function void                 OsUnlockFileInfoChunkRead(OS_FILE_INFO_CHUNK *chunk);
 public_function void                 OsLockFileInfoChunkWrite(OS_FILE_INFO_CHUNK *chunk);
 public_function void                 OsUnlockFileInfoChunkWrite(OS_FILE_INFO_CHUNK *chunk);
-public_function bool                 OsOpenNativeDirectory(WCHAR const *fspath, HANDLE &dir);
+public_function int                  OsOpenNativeDirectory(WCHAR const *fspath, HANDLE &dir);
 public_function OS_FILE_INFO_CHUNK*  OsNativeDirectoryFindFiles(HANDLE dir, WCHAR const *filter, bool recurse, size_t &total_count, OS_FSIC_ALLOCATOR *alloc);
 public_function void                 OsCloseNativeDirectory(HANDLE dir);
 public_function bool                 OsCreateNativeDirectory(WCHAR const *abspath); 
@@ -2520,8 +2520,20 @@ OsToUpper
 (
     char ch
 )
-{
-    return (ch >= 'a' && ch <= 'z') ? (ch - 32) : ch;
+{   // TODO(rlk): this works only for C locale. if locale support is needed, use toupper in ctype.h.
+    return (ch >= 'a' && ch <= 'z') ? (ch - 'a' + 'A') : ch;
+}
+
+/// @summary Convert a lowercase ASCII character 'a'-'z' to the corresponding uppercase character.
+/// @param ch The input character.
+/// @return The uppercase version of the input character.
+internal_function inline int
+OsToUpper
+(
+    WCHAR ch
+)
+{   // TODO(rlk): this works only for C locale. if locale support is needed, use towupper in ctype.h.
+    return (ch >= L'a' && ch <= L'z') ? (ch - L'a' + L'A') : ch;
 }
 
 /// @summary Convert an uppercase ASCII character 'A'-'Z' to the corresponding lowercase character.
@@ -2532,8 +2544,20 @@ OsToLower
 (
     char ch
 )
-{
-    return (ch >= 'A' && ch <= 'Z') ? (ch + 32) : ch;
+{   // TODO(rlk): this works only for C locale. if locale support is needed, use tolower in ctype.h.
+    return (ch >= 'A' && ch <= 'Z') ? (ch - 'A' + 'a') : ch;
+}
+
+/// @summary Convert an uppercase ASCII character 'A'-'Z' to the corresponding lowercase character.
+/// @param ch The input character.
+/// @return The lowercase version of the input character.
+internal_function inline int
+OsToLower
+(
+    WCHAR ch
+)
+{   // TODO(rlk): this works only for C locale. if locale support is needed, use towlower in ctype.h.
+    return (ch >= L'A' && ch <= L'Z') ? (ch - L'A' + L'a') : ch;
 }
 
 /// @summary Normalize path separators for a character.
@@ -2546,6 +2570,18 @@ OsNormalizePathSeparator
 )
 {
     return ch != '\\' ? uint32_t(OsToLower(ch)) : uint32_t('/');
+}
+
+/// @summary Normalize path separators for a character.
+/// @param ch The character to inspect.
+/// @return The forward slash if ch is a backslash, otherwise ch.
+internal_function inline uint32_t
+OsNormalizePathSeparator
+(
+    WCHAR ch
+)
+{
+    return ch != L'\\' ? uint32_t(OsToLower(ch)) : uint32_t(L'/');
 }
 
 /// @summary Calculates a 32-bit hash value for a path string. Forward and backslashes are treated as equivalent.
@@ -2566,7 +2602,29 @@ OsHashPath
             code = OsNormalizePathSeparator(*iter++);
             hash = _lrotl(hash, 7) + code;
         } while (code != 0);
+        return hash;
+    }
+    else return 0;
+}
 
+/// @summary Calculates a 32-bit hash value for a path string. Forward and backslashes are treated as equivalent.
+/// @param path A NULL-terminated UTF-8 path string.
+/// @return The hash of the specified string.
+internal_function uint32_t
+OsHashPath
+(
+    WCHAR const *path
+)
+{
+    if (path != NULL && path[0] != 0)
+    {
+        uint32_t     code = 0;
+        uint32_t     hash = 0;
+        WCHAR const *iter = path;
+        do {
+            code = OsNormalizePathSeparator(*iter++);
+            hash = _lrotl(hash, 7) + code;
+        } while (code != 0);
         return hash;
     }
     else return 0;
@@ -7386,8 +7444,8 @@ OsShellFolderPath
             CopyMemory(buf, sysbuf, bytes_needed);
             CoTaskMemFree(sysbuf);
             if (buf_end != NULL)
-            {   // chars_written does not include the zero-terminator, so +1 to include it.
-               *buf_end = buf + chars_written + 1;
+            {
+               *buf_end = buf + chars_written;
             }
             return chars_written;
         }
@@ -7481,7 +7539,7 @@ OsKnownPath
                 free(sysbuf);
                 if (buf_end != NULL)
                 {   // chars_written does not include the zero-terminator, so +1 to include it.
-                   *buf_end = buf + chars_written + 1;
+                   *buf_end = buf + chars_written;
                 }
                 return chars_written;
             }
@@ -7573,7 +7631,7 @@ OsNativePathForHandle
     }
     if (buf_end != NULL) 
     {   // chars_written does not include the zero terminator, so +1 to include it.
-        *buf_end = buf + chars_written + 1;
+        *buf_end = buf + chars_written;
     }
     return chars_written;
 }
@@ -7607,7 +7665,7 @@ OsNativePathAppend
     {   // *buf_end points to the zero-terminator of the existing string.
         inp_end    = *buf_end;
         inp_bytes  =((uint8_t*)*buf_end) - ((uint8_t*)buf);
-        inp_chars  =(*buf_end - 1 - buf);
+        inp_chars  =(*buf_end - buf);
     }
     else if (buf != NULL && buf_bytes > sizeof(WCHAR))
     {   // determine the length of the input by scanning for the zero terminator.
@@ -7637,7 +7695,7 @@ OsNativePathAppend
         if (SUCCEEDED(StringCchLengthW(append, STRSAFE_MAX_CCH, &app_chars)))
         {
             app_end   = append + app_chars;
-            app_bytes =(app_chars  +1) * sizeof(WCHAR);
+            app_bytes =(app_chars + 1) * sizeof(WCHAR);
         }
         else
         {   // unable to determine the length of the fragment string.
@@ -7673,8 +7731,8 @@ OsNativePathAppend
     {   // append a directory separator character.
         *inp_end++ = L'\\';
     }
-    // append the fragment to the native path string, including the zero-terminator.
-    while (append <= app_end)
+    // append the fragment to the native path string.
+    while (append < app_end)
     {
         if (*append != L'/')
         {   // append the character to the destination buffer as-is.
@@ -7686,6 +7744,8 @@ OsNativePathAppend
             ++append;
         }
     }
+    // zero-terminate the string.
+    *inp_end = 0;
     // all finished; set output parameters.
     if (buf_end != NULL) *buf_end = inp_end;
     return (inp_chars + sep_chars + app_chars);
@@ -7722,7 +7782,7 @@ OsNativePathChangeExtension
     {   // *buf_end points to the zero-terminator of the existing string.
         inp_end    = *buf_end;
         inp_bytes  =((uint8_t*)*buf_end) - ((uint8_t*)buf);
-        inp_chars  =(*buf_end - 1 - buf);
+        inp_chars  =(*buf_end - buf);
     }
     else if (buf != NULL && buf_bytes > sizeof(WCHAR))
     {   // determine the length of the input by scanning for the zero terminator.
@@ -7772,7 +7832,7 @@ OsNativePathChangeExtension
         if (buf_end != NULL) *buf_end = inp_ext;
         bytes_needed = ((uint8_t*)inp_ext) - ((uint8_t*)buf);
         *inp_ext = 0;
-        return (inp_ext - 1 - buf);
+        return (inp_ext - buf);
     }
     else
     {   // a new extension is being appended; retrieve its length.
@@ -7810,7 +7870,7 @@ OsNativePathChangeExtension
     inp_ext += ext_chars;
     // all finished; set output parameters.
     if (buf_end != NULL) *buf_end = inp_ext;
-    return ((inp_ext - 1 - buf) + sep_chars + ext_chars);
+    return ((inp_ext - buf) + sep_chars + ext_chars);
 }
 
 /// @summary Append an extension value to a native path string.
@@ -7842,7 +7902,7 @@ OsNativePathAppendExtension
     {   // *buf_end points to the zero-terminator of the existing string.
         inp_end    = *buf_end;
         inp_bytes  =((uint8_t*)*buf_end) - ((uint8_t*)buf);
-        inp_chars  =(*buf_end - 1 - buf);
+        inp_chars  =(*buf_end - buf);
     }
     else if (buf != NULL && buf_bytes > sizeof(WCHAR))
     {   // determine the length of the input by scanning for the zero terminator.
@@ -8295,7 +8355,7 @@ OsUnlockFileInfoChunkWrite
 /// @param path A zero-terminated native path string specifying the directory to open.
 /// @param dir On return, this location is updated with the native handle used to access the directory.
 /// @return true if the directory is successfully opened.
-public_function bool
+public_function int
 OsOpenNativeDirectory
 (
     WCHAR const *path, 
@@ -8305,9 +8365,9 @@ OsOpenNativeDirectory
     if ((dir = CreateFile(path, 0, FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL)) == INVALID_HANDLE_VALUE)
     {
         OsLayerError("ERROR: %S(%u): Unable to open directory %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), path, GetLastError());
-        return false;
+        return -1;
     }
-    return true;
+    return 0;
 }
 
 /// @summary Close a native directory handle, indicating that the application no longer requires access.
@@ -8322,7 +8382,119 @@ OsCloseNativeDirectory
         CloseHandle(dir);
 }
 
-/*
+internal_function OS_FILE_INFO_CHUNK*
+OsEnumerateDirectory
+(
+    WCHAR                *buf, 
+    size_t          buf_bytes, 
+    WCHAR            *buf_end,
+    WCHAR const       *filter, 
+    bool              recurse, 
+    size_t       &total_files, 
+    OS_FSIC_ALLOCATOR  *alloc, 
+    OS_FILE_INFO_CHUNK *chunk
+)
+{
+    HANDLE  find_handle = INVALID_HANDLE_VALUE;
+    WCHAR     *base_end = buf_end;
+    WCHAR   *filter_end = buf_end;
+    size_t filter_chars = 0;
+    size_t bytes_needed = 0;
+    WIN32_FIND_DATA  fd;
+
+    if (recurse)
+    {   // if recursion is enabled, filter with *, and recurse into all subdirectories.
+        if ((filter_chars = OsNativePathAppend(buf, buf_bytes, &filter_end, bytes_needed, L"*")) == 0)
+        {
+            OsLayerError("ERROR: %S(%u): Unable to construct * filter string for path %s.\n", __FUNCTION__, GetCurrentThreadId(), buf);
+            return chunk;
+        }
+        if ((find_handle = FindFirstFileEx(buf, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, FIND_FIRST_EX_LARGE_FETCH)) == INVALID_HANDLE_VALUE)
+        {
+            OsLayerError("ERROR: %S(%u): Search filter %s failed (%08X).\n", __FUNCTION__, GetCurrentThreadId(), buf, GetLastError());
+            return chunk;
+        }
+        do
+        {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            {
+                if ((fd.cFileName[0] == L'.' && fd.cFileName[1] == 0) || (fd.cFileName[0] == L'.' && fd.cFileName[1] == L'.' && fd.cFileName[2] == 0))
+                {   // skip the current directory and parent directory links.
+                    continue;
+                }
+                else
+                {   // build the path string for the subdirectory.
+                    *base_end = 0; filter_end = base_end;
+                    if ((filter_chars = OsNativePathAppend(buf, buf_bytes, &filter_end, bytes_needed, fd.cFileName)) == 0)
+                    {
+                        *base_end = 0; filter_end = base_end;
+                        OsLayerError("ERROR: %S(%u): Unable to recurse into subdirectory %s of path %s.\n", __FUNCTION__, GetCurrentThreadId(), fd.cFileName, buf);
+                    }
+                    // recurse into the subdirectory.
+                    chunk = OsEnumerateDirectory(buf, buf_bytes, filter_end, filter, recurse, total_files, alloc, chunk);
+                }
+            }
+        } 
+        while (FindNextFile(find_handle, &fd));
+        FindClose(find_handle); find_handle = INVALID_HANDLE_VALUE;
+    }
+
+    // now search with the actual filter applied, and look at files only.
+    *base_end = 0; filter_end = base_end;
+    if ((filter_chars = OsNativePathAppend(buf, buf_bytes, &filter_end, bytes_needed, filter)) == 0)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to construct filter string from %s and %s.\n", __FUNCTION__, GetCurrentThreadId(), buf, filter);
+        return chunk;
+    }
+    if ((find_handle = FindFirstFileEx(buf, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, FIND_FIRST_EX_LARGE_FETCH)) == INVALID_HANDLE_VALUE)
+    {
+        OsLayerError("ERROR: %S(%u): Search filter %s failed (%08X).\n", __FUNCTION__, GetCurrentThreadId(), buf, GetLastError());
+        return chunk;
+    }
+    do
+    {   // skip over anything that's not a proper file or symlink.
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DEVICE)
+            continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_VIRTUAL)
+            continue;
+
+        // build the absolute path of the file.
+        *base_end = 0; filter_end = base_end;
+        if ((filter_chars = OsNativePathAppend(buf, buf_bytes, &filter_end, bytes_needed, fd.cFileName)) == 0)
+        {
+            OsLayerError("ERROR: %S(%u): Failed to build filename for path %s, file %s.\n", __FUNCTION__, GetCurrentThreadId(), buf, fd.cFileName);
+            continue;
+        }
+        if (chunk == NULL || chunk->RecordCount == OS_FILE_INFO_CHUNK::CAPACITY)
+        {   // allocate a new chunk; the current chunk is full.
+            OS_FILE_INFO_CHUNK *new_chunk = OsNewFileInfoChunk(alloc);
+            if (new_chunk == NULL)
+            {
+                OsLayerError("ERROR: %S(%u): Failed to allocate OS_FILE_INFO_CHUNK for file %s.\n", __FUNCTION__, GetCurrentThreadId(), buf);
+                continue;
+            }
+            // entries higher up in the tree appear first.
+            new_chunk->NextChunk = chunk;
+            chunk = new_chunk;
+        }
+        // fill out the information for the file in the current chunk.
+        chunk->PathHash[chunk->RecordCount]            = OsHashPath(buf);
+        chunk->FileInfo[chunk->RecordCount].Attributes = fd.dwFileAttributes;
+        chunk->FileInfo[chunk->RecordCount].FileSize   =(((int64_t)fd.nFileSizeHigh) << 32) | ((int64_t)fd.nFileSizeLow);
+        chunk->FileInfo[chunk->RecordCount].BaseOffset = 0;
+        chunk->FileInfo[chunk->RecordCount].LastWrite  = fd.ftLastWriteTime;
+        chunk->RecordCount++;
+        total_files++;
+    } 
+    while (FindNextFile(find_handle, &fd));
+
+    // finished searching; clean up and return.
+    FindClose(find_handle); find_handle = INVALID_HANDLE_VALUE;
+    return chunk;
+}
+
 public_function OS_FILE_INFO_CHUNK*
 OsNativeDirectoryFindFiles
 (
@@ -8333,8 +8505,50 @@ OsNativeDirectoryFindFiles
     OS_FSIC_ALLOCATOR *alloc
 )
 {
+    OS_FILE_INFO_CHUNK *root = NULL;
+    WCHAR           *pathbuf = NULL;
+    WCHAR           *pathend = NULL;
+    size_t            nbytes = 32768 * sizeof(WCHAR);
+    size_t            nchars = 0;
+    size_t           nneeded = 0;
+
+    if (filter == NULL || filter[0] == 0)
+        filter = L"*";
+    if (dir == INVALID_HANDLE_VALUE)
+    {
+        OsLayerError("ERROR: %S(%u): Invalid directory handle.\n", __FUNCTION__, GetCurrentThreadId());
+        total_files = 0;
+        return NULL;
+    }
+    // allocate a temporary path buffer of the maximum allowable size.
+    if ((pathbuf = (WCHAR*) malloc(nbytes)) == NULL)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to allocate temporary path buffer.\n", __FUNCTION__, GetCurrentThreadId());
+        total_files = 0;
+        return NULL;
+    }
+    // retrieve the long-form, fully-resolved absolute path of the directory.
+    if ((nchars = OsNativePathForHandle(pathbuf, nbytes, &pathend, nneeded, dir)) == 0)
+    {   
+        OsLayerError("ERROR: %S(%u): Unable to resolve path for input directory.\n", __FUNCTION__, GetCurrentThreadId());
+        total_files = 0;
+        free(pathbuf);
+        return NULL;
+    }
+    // perform the actual enumeration. this loads metadata from the disk and may take some time.
+    if ((root = OsEnumerateDirectory(pathbuf, nbytes, pathend, filter, recurse, total_files, alloc, NULL)) == NULL)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to enumerate files at %s with filter %s.\n", __FUNCTION__, GetCurrentThreadId(), pathbuf, filter);
+        total_files = 0;
+        free(pathbuf);
+        return NULL;
+    }
+    // clean up and return.
+    free(pathbuf);
+    return root;
 }
 
+/*
 public_function bool
 OsCreateNativeDirectory
 (

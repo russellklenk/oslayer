@@ -108,6 +108,10 @@ main
     UNREFERENCED_PARAMETER(argv);
 
     OS_MEMORY_ARENA arena = {};
+    OS_FSIC_ALLOCATOR alloc = {};
+    OS_FILE_INFO_CHUNK *chunk = NULL;
+    HANDLE dir = INVALID_HANDLE_VALUE;
+    size_t nfiles = 0;
 
     // create the memory arena used to store temporary memory.
     if (OsCreateMemoryArena(&arena, Megabytes(2), true, true) < 0)
@@ -115,6 +119,16 @@ main
         OsLayerError("ERROR: %S(%u): Unable to initialize main memory arena.\n", __FUNCTION__, GetCurrentThreadId());
         return -1;
     }
+    // test the file system enumeration code.
+    OsInitFileSystemInfoChunkAllocator(&alloc, &arena);
+    if (OsOpenNativeDirectory(L"C:\\git\\oslayer", dir) < 0)
+    {
+    }
+    chunk = OsNativeDirectoryFindFiles(dir, L"*", true, nfiles, &alloc);
+    OsCloseNativeDirectory(dir);
+    OsFreeFileInfoChunkList(&alloc, chunk);
+    OsMemoryArenaReset(&arena);
+    // TODO(rlk): need to be able to destroy allocator.
     {
         size_t index = 0;
         while (InputPaths[index] != NULL)
