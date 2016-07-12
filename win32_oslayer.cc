@@ -482,11 +482,13 @@ struct OS_TARBALL
 
 /// @summary Define the information maintained in-memory for a file known to the file system.
 struct OS_FILE_INFO
-{
-    DWORD               Attributes;                  /// The file attributes, as would be returned by GetFileAttributes().
+{   static size_t const MAX_STRING_BYTES = 16;       /// The maximum number of bytes of string data (including the zero terminator) stored for filename and extension data.
     int64_t             FileSize;                    /// The size of the file data, in bytes. 
     int64_t             BaseOffset;                  /// The offset of the file data from the start of the file (for files contained within archives).
     FILETIME            LastWrite;                   /// The last write time of the file.
+    DWORD               Attributes;                  /// The file attributes, as would be returned by GetFileAttributes().
+    char                FileName [MAX_STRING_BYTES]; /// A zero-terminated UTF-8 string containing (up to) 15 bytes of filename data. This data is used for hash collision resolution.
+    char                Extension[MAX_STRING_BYTES]; /// A zero-terminated ASCII string containing (up to) the first 15 bytes of file extension data. This data is used for 
 };
 
 /// @summary Define the data stored with a fixed-size chunk of file information.
@@ -1382,7 +1384,7 @@ public_function size_t               OsNativePathForHandle(WCHAR *buf, size_t bu
 public_function size_t               OsNativePathAppend(WCHAR *buf, size_t buf_bytes, WCHAR **buf_end, size_t &bytes_needed, WCHAR const *append);
 public_function size_t               OsNativePathChangeExtension(WCHAR *buf, size_t buf_bytes, WCHAR **buf_end, size_t &bytes_needed, WCHAR const *new_ext);
 public_function size_t               OsNativePathAppendExtension(WCHAR *buf, size_t buf_bytes, WCHAR **buf_end, size_t &bytes_needed, WCHAR const *new_ext);
-public_function bool                 OsNativePathParse(WCHAR *buf, WCHAR *buf_end, OS_PATH_PARTS *parts);
+public_function int                  OsNativePathParse(WCHAR *buf, WCHAR *buf_end, OS_PATH_PARTS *parts);
 public_function size_t               OsPhysicalSectorSize(HANDLE file);
 public_function void                 OsInitFileSystemInfoChunkAllocator(OS_FSIC_ALLOCATOR *alloc);
 public_function OS_FILE_INFO_CHUNK*  OsNewFileInfoChunk(OS_FSIC_ALLOCATOR *alloc);
@@ -1394,7 +1396,7 @@ public_function void                 OsUnlockFileInfoChunkWrite(OS_FILE_INFO_CHU
 public_function int                  OsOpenNativeDirectory(WCHAR const *fspath, HANDLE &dir);
 public_function OS_FILE_INFO_CHUNK*  OsNativeDirectoryFindFiles(HANDLE dir, WCHAR const *filter, bool recurse, size_t &total_count, OS_FSIC_ALLOCATOR *alloc);
 public_function void                 OsCloseNativeDirectory(HANDLE dir);
-public_function bool                 OsCreateNativeDirectory(WCHAR const *abspath); 
+public_function int                  OsCreateNativeDirectory(WCHAR const *abspath); 
 
 public_function int                  OsCreateFilesystem(OS_FILE_SYSTEM *file_system, OS_FILE_SYSTEM_INIT const *init, OS_MEMORY_ARENA *arena);
 public_function int                  OsMountKnownPath(OS_FILE_SYSTEM *file_system, int folder_id, char const *mount_path, uint32_t priority, uintptr_t mount_id);
@@ -7977,8 +7979,8 @@ OsNativePathAppendExtension
 /// @param buf The zero-terminated path string to parse. Any forward slashes are converted to backslashes.
 /// @param buf_end A pointer to the zero terminator character of the input path string. This value must be valid.
 /// @param parts The OS_PATH_PARTS to update. The Root, RootEnd and PathFlags fields must be set.
-/// @return This function always returns true.
-internal_function bool
+/// @return This function always returns zero to indicate success.
+internal_function int
 OsExtractNativePathParts
 (
     WCHAR           *buf, 
@@ -8029,6 +8031,10 @@ OsExtractNativePathParts
                 parts->Extension   = iter + 1;
                 parts->PathFlags  |= OS_PATH_FLAG_FILENAME;
                 parts->PathFlags  |= OS_PATH_FLAG_EXTENSION;
+                if (parts->PathEnd == parts->Path)
+                {   // clear out the bit indicating that path data is present.
+                    parts->PathFlags &=~OS_PATH_FLAG_PATH;
+                }
             }
             iter--;
         }
@@ -8046,15 +8052,15 @@ OsExtractNativePathParts
         parts->FilenameEnd = buf_end;
     }
     UNREFERENCED_PARAMETER(buf);
-    return true;
+    return 0;
 }
 
 /// @summary Parse an absolute or relative native path string into its constituent parts.
 /// @param buf The buffer to parse containing the native path string. All forward slashes are replaced with backslash.
 /// @param buf_end A pointer to the zero-terminator byte of the input path string, or NULL to scan the input buffer for a zero terminator.
 /// @param parts The OS_PATH_PARTS to populate with path information.
-/// @return true if the path string is successfully parsed.
-public_function bool
+/// @return Zero if the path string is successfully parsed, or -1 if an error occurred.
+public_function int
 OsNativePathParse
 (
     WCHAR           *buf, 
@@ -8086,7 +8092,7 @@ OsNativePathParse
     if (buf == NULL || inp_chars < 1)
     {   // the input buffer is invalid; there's nothing to parse.
         parts->PathFlags = OS_PATH_FLAGS_INVALID;
-        return false;
+        return -1;
     }
 
     // determine the type of input path string and perform setup for OsExtractNativePathParts.
@@ -8164,7 +8170,7 @@ OsNativePathParse
             parts->Root      = buf;
             parts->RootEnd   = buf + 2;
             parts->PathFlags = OS_PATH_FLAG_ABSOLUTE | OS_PATH_FLAG_ROOT;
-            return true;
+            return 0;
         }
         // else, assume relative path, directory path info only.
         parts->Root      = buf;
@@ -8181,7 +8187,7 @@ OsNativePathParse
         {   // assume this is a relative directory path.
             parts->PathEnd = buf + 2;
         }
-        return true;
+        return 0;
     }
     else  // inp_chars == 1
     {   // assume this is a relative path, directory info only.
@@ -8190,7 +8196,7 @@ OsNativePathParse
         parts->Path      = buf;
         parts->PathEnd   = buf + 1;
         parts->PathFlags = OS_PATH_FLAG_RELATIVE | OS_PATH_FLAG_PATH;
-        return true;
+        return 0;
     }
 
 scan_for_end_of_root:
@@ -8207,7 +8213,7 @@ scan_for_end_of_root:
     }
     if (parts->RootEnd == buf_end)
     {   // no additional components will be found.
-        return true;
+        return 0;
     }
     return OsExtractNativePathParts(buf, buf_end, parts);
 }
@@ -8382,6 +8388,44 @@ OsCloseNativeDirectory
         CloseHandle(dir);
 }
 
+/// @summary Make a signed 64-bit integer from two DWORDs.
+/// @param high32 The upper 32 bits of the 64-bit value.
+/// @param low32 The lower 32 bits of the 64-bit value.
+/// @return The signed 64-bit integer value.
+internal_function inline int64_t
+OsMakeInt64
+(
+    uint32_t high32, 
+    uint32_t low32
+)
+{
+    return (((int64_t) high32) << 32) | ((int64_t) low32);
+}
+
+/// @summary Make an unsigned 64-bit integer from two DWORDs.
+/// @param high32 The upper 32 bits of the 64-bit value.
+/// @param low32 The lower 32 bits of the 64-bit value.
+/// @return The unsigned 64-bit integer value.
+internal_function inline uint64_t
+OsMakeUInt64
+(
+    uint32_t high32, 
+    uint32_t low32
+)
+{
+    return (((uint64_t) high32) << 32) | ((uint64_t) low32);
+}
+
+/// @summary Enumerate all files in a directory (and possibly its subdirectories.)
+/// @param buf The native path to search. The buffer contents are overwritten during enumeration.
+/// @param buf_bytes The maximum number of bytes that can be written to the path string buffer.
+/// @param buf_end A pointer to the zero-terminator codepoint within the path string buffer.
+/// @param filter A zero-terminated string specifying the filter to use when locating files. The filter supports wildcards. Specify a filter of * to include all files in the search.
+/// @param recurse Specify true to include files located in subdirectories in the search results.
+/// @param total_files This value is updated to include the total number of files returned by the search.
+/// @param alloc The OS_FILE_INFO_CHUNK allocator to use for allocating blocks of file information to store the search results.
+/// @param chunk The OS_FILE_INFO_CHUNK to which search results will be written, or NULL if no search results have been returned yet. New chunks are allocated as-needed.
+/// @return A pointer to the OS_FILE_INFO_CHUNK containing the search results.
 internal_function OS_FILE_INFO_CHUNK*
 OsEnumerateDirectory
 (
@@ -8394,13 +8438,15 @@ OsEnumerateDirectory
     OS_FSIC_ALLOCATOR  *alloc, 
     OS_FILE_INFO_CHUNK *chunk
 )
-{
-    HANDLE  find_handle = INVALID_HANDLE_VALUE;
-    WCHAR     *base_end = buf_end;
-    WCHAR   *filter_end = buf_end;
-    size_t filter_chars = 0;
-    size_t bytes_needed = 0;
-    WIN32_FIND_DATA  fd;
+{   size_t const MAX_UTF8 = 1024; // maximum of 1024 bytes of UTF-8 data returned for filename.
+    HANDLE    find_handle = INVALID_HANDLE_VALUE;
+    WCHAR       *base_end = buf_end;
+    WCHAR     *filter_end = buf_end;
+    size_t   filter_chars = 0;
+    size_t   bytes_needed = 0;
+    int       fname_bytes = 0;
+    WIN32_FIND_DATA    fd;
+    char utf8buf[MAX_UTF8];
 
     if (recurse)
     {   // if recursion is enabled, filter with *, and recurse into all subdirectories.
@@ -8481,10 +8527,51 @@ OsEnumerateDirectory
         }
         // fill out the information for the file in the current chunk.
         chunk->PathHash[chunk->RecordCount]            = OsHashPath(buf);
-        chunk->FileInfo[chunk->RecordCount].Attributes = fd.dwFileAttributes;
-        chunk->FileInfo[chunk->RecordCount].FileSize   =(((int64_t)fd.nFileSizeHigh) << 32) | ((int64_t)fd.nFileSizeLow);
+        chunk->FileInfo[chunk->RecordCount].FileSize   = OsMakeInt64(fd.nFileSizeHigh, fd.nFileSizeLow);
         chunk->FileInfo[chunk->RecordCount].BaseOffset = 0;
         chunk->FileInfo[chunk->RecordCount].LastWrite  = fd.ftLastWriteTime;
+        chunk->FileInfo[chunk->RecordCount].Attributes = fd.dwFileAttributes;
+        // convert the filename from file system native to UTF-8.
+        // this data will be used for collision resolution and extension searching.
+        if ((fname_bytes = WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, utf8buf, MAX_UTF8, NULL, NULL)) == 0)
+        {
+            OsLayerError("ERROR: %S(%u): Failed to convert filename %s to UTF-8 (%08X).\n", __FUNCTION__, GetCurrentThreadId(), fd.cFileName, GetLastError());
+            continue;
+        }
+        // copy as much data as possible to the filename buffer.
+        // fname_bytes includes one byte for the zero-terminator.
+        size_t fnmax = OS_FILE_INFO::MAX_STRING_BYTES - 1;
+        char  *fndst = chunk->FileInfo[chunk->RecordCount].FileName;
+        char  *fnend = utf8buf + fname_bytes;
+        char  *fnsrc = utf8buf;
+        char  *fnext = NULL;
+        if (fnmax >= size_t(fname_bytes - 1))
+            fnmax  = size_t(fname_bytes - 1);
+        CopyMemory(fndst, fnsrc, fnmax);
+        fndst[fnmax] = 0;
+        // find the file extension and copy as much as possible into the extension buffer.
+        // note that the first character is intentionally NOT included.
+        while (fnend > fnsrc)
+        {
+            if(*fnend == '.')
+                fnext = fnend;
+            fnend--;
+        }
+        if (fnext != NULL)
+        {   // copy the file extension data.
+            fndst  = chunk->FileInfo[chunk->RecordCount].Extension;
+            fnmax  = OS_FILE_INFO::MAX_STRING_BYTES - 1;
+            fnend  = utf8buf + fname_bytes;
+            if (fnmax >= size_t(fnend - fnext - 1))
+                fnmax  = size_t(fnend - fnext - 1);
+            CopyMemory(fndst, fnext, fnmax);
+            fndst[fnmax] = 0;
+        }
+        else
+        {   // there is no file extension.
+            chunk->FileInfo[chunk->RecordCount].Extension[0] = 0;
+        }
+        // all data has been written to the new record. make it visible.
         chunk->RecordCount++;
         total_files++;
     } 
@@ -8495,6 +8582,13 @@ OsEnumerateDirectory
     return chunk;
 }
 
+/// @summary Search a native filesystem directory (and possibly its subdirectories) for files matching a specific criteria.
+/// @param dir The handle of the root directory to search, as returned by OsOpenNativeDirectory.
+/// @param filter A zero-terminated string specifying the filter to use when locating files. The filter supports wildcards. Specify a filter of * to include all files in the search.
+/// @param recurse Specify true to include files located in subdirectories in the search results.
+/// @param total_files This value is updated to include the total number of files returned by the search.
+/// @param alloc The OS_FILE_INFO_CHUNK allocator to use for allocating blocks of file information to store the search results.
+/// @return A pointer to the OS_FILE_INFO_CHUNK containing the search results, or NULL if no results were returned or an error occurred.
 public_function OS_FILE_INFO_CHUNK*
 OsNativeDirectoryFindFiles
 (
@@ -8512,8 +8606,12 @@ OsNativeDirectoryFindFiles
     size_t            nchars = 0;
     size_t           nneeded = 0;
 
+    // reset the total files counter; no results have been returned yet.
+    total_files = 0;
+    // use the default filter (return all files) if none is specified.
     if (filter == NULL || filter[0] == 0)
         filter = L"*";
+    // ensure that the directory handle is valid.
     if (dir == INVALID_HANDLE_VALUE)
     {
         OsLayerError("ERROR: %S(%u): Invalid directory handle.\n", __FUNCTION__, GetCurrentThreadId());
