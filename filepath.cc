@@ -23,26 +23,47 @@ static WCHAR const *InputPaths[] =
     L"C:\\foo\\", 
     L"C:\\foo.a", 
     L"C:\\foo\\bar.a.b", 
+    L"C:\\.vim",
     L"\\\\.\\SomeDevice", 
     L"\\\\?\\C:", 
     L"\\\\?\\C:\\", 
     L"\\\\?\\C:\\foo", 
     L"\\\\?\\C:\\foo\\", 
     L"\\\\?\\C:\\foo.a", 
-    L"\\\\?\\C:\\foo\\bar.a.b", 
+    L"\\\\?\\C:\\foo\\bar.a.b",
+    L"\\\\?\\C:\\.vim",
     L"\\\\?\\.\\SomeDevice",
     L"\\\\UNC", 
     L"\\\\UNC\\", 
     L"\\\\UNC\\foo", 
     L"\\\\UNC\\foo\\", 
     L"\\\\UNC\\foo.a", 
-    L"\\\\UNC\\foo\\bar.a.b", 
+    L"\\\\UNC\\foo\\bar.a.b",
+    L"\\\\UNC\\.vim",
     L"\\\\?\\UNC", 
     L"\\\\?\\UNC\\", 
     L"\\\\?\\UNC\\foo", 
     L"\\\\?\\UNC\\foo\\", 
     L"\\\\?\\UNC\\foo.a", 
     L"\\\\?\\UNC\\foo\\bar.a.b", 
+    L"\\\\?\\UNC\\.vim", 
+    L"\\", 
+    L"foo", 
+    L"foo\\",
+    L"foo\\bar",
+    L"foo\\bar.a", 
+    L"foo\\bar.a.b",
+    L"foo\\.vim", 
+    L".", 
+    L".vim", 
+    L"..", 
+    L"..\\", 
+    L".\\", 
+    L".\\foo", 
+    L".\\foo.a", 
+    L".\\foo\\.vim", 
+    L".\\foo\\bar.a", 
+    L".\\foo\\bar.a.b",
     NULL
 };
 
@@ -119,6 +140,7 @@ main
         OsLayerError("ERROR: %S(%u): Unable to initialize main memory arena.\n", __FUNCTION__, GetCurrentThreadId());
         return -1;
     }
+    OsCreateNativeDirectory(L"C:\\git\\oslayer\\build", NULL);
     // test the file system enumeration code.
     OsInitFileSystemInfoChunkAllocator(&alloc, &arena);
     if (OsOpenNativeDirectory(L"C:\\git\\oslayer", dir) < 0)
