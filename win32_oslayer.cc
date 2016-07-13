@@ -1494,6 +1494,34 @@ XInputGetBatteryInformation_Stub
     return ERROR_DEVICE_NOT_CONNECTED;
 }*/
 
+/// @summary Make a signed 64-bit integer from two DWORDs.
+/// @param high32 The upper 32 bits of the 64-bit value.
+/// @param low32 The lower 32 bits of the 64-bit value.
+/// @return The signed 64-bit integer value.
+internal_function inline int64_t
+OsMakeInt64
+(
+    uint32_t high32, 
+    uint32_t low32
+)
+{
+    return (((int64_t) high32) << 32) | ((int64_t) low32);
+}
+
+/// @summary Make an unsigned 64-bit integer from two DWORDs.
+/// @param high32 The upper 32 bits of the 64-bit value.
+/// @param low32 The lower 32 bits of the 64-bit value.
+/// @return The unsigned 64-bit integer value.
+internal_function inline uint64_t
+OsMakeUInt64
+(
+    uint32_t high32, 
+    uint32_t low32
+)
+{
+    return (((uint64_t) high32) << 32) | ((uint64_t) low32);
+}
+
 /// @summary Enable or disable a process privilege.
 /// @param token The privilege token of the process to modify.
 /// @param privilege_name The name of the privilege to enable or disable.
@@ -8016,7 +8044,10 @@ OsExtractNativePathParts
     if (parts->Path[0] == L'\\')
     {   // skip the leading path separator.
         if (parts->Path == parts->PathEnd)
+        {   // there is no actual path component; this is something like "C:\".
+            parts->PathFlags &= ~OS_PATH_FLAG_PATH;
             parts->PathEnd++;
+        }
         parts->Path++;
     }
 
@@ -8031,10 +8062,6 @@ OsExtractNativePathParts
                 parts->Extension   = iter + 1;
                 parts->PathFlags  |= OS_PATH_FLAG_FILENAME;
                 parts->PathFlags  |= OS_PATH_FLAG_EXTENSION;
-                if (parts->PathEnd == parts->Path)
-                {   // clear out the bit indicating that path data is present.
-                    parts->PathFlags &=~OS_PATH_FLAG_PATH;
-                }
             }
             iter--;
         }
@@ -8189,13 +8216,26 @@ OsNativePathParse
         }
         return 0;
     }
-    else  // inp_chars == 1
-    {   // assume this is a relative path, directory info only.
-        parts->Root      = buf;
-        parts->RootEnd   = buf;
-        parts->Path      = buf;
-        parts->PathEnd   = buf + 1;
-        parts->PathFlags = OS_PATH_FLAG_RELATIVE | OS_PATH_FLAG_PATH;
+    else
+    {   // /, ., a, etc.
+        if (buf[0] == L'/')
+            buf[0] = L'\\';
+        if (buf[0] == L'\\')
+        {   // treat this as an absolute path, the root of the filesystem.
+            parts->Root      = buf;
+            parts->RootEnd   = buf;
+            parts->Path      = buf;
+            parts->PathEnd   = buf + 1;
+            parts->PathFlags = OS_PATH_FLAG_ABSOLUTE | OS_PATH_FLAG_PATH;
+        }
+        else
+        {   // assume this is a relative path, directory info only.
+            parts->Root      = buf;
+            parts->RootEnd   = buf;
+            parts->Path      = buf;
+            parts->PathEnd   = buf + 1;
+            parts->PathFlags = OS_PATH_FLAG_RELATIVE | OS_PATH_FLAG_PATH;
+        }
         return 0;
     }
 
@@ -8386,34 +8426,6 @@ OsCloseNativeDirectory
 {
     if (dir != INVALID_HANDLE_VALUE)
         CloseHandle(dir);
-}
-
-/// @summary Make a signed 64-bit integer from two DWORDs.
-/// @param high32 The upper 32 bits of the 64-bit value.
-/// @param low32 The lower 32 bits of the 64-bit value.
-/// @return The signed 64-bit integer value.
-internal_function inline int64_t
-OsMakeInt64
-(
-    uint32_t high32, 
-    uint32_t low32
-)
-{
-    return (((int64_t) high32) << 32) | ((int64_t) low32);
-}
-
-/// @summary Make an unsigned 64-bit integer from two DWORDs.
-/// @param high32 The upper 32 bits of the 64-bit value.
-/// @param low32 The lower 32 bits of the 64-bit value.
-/// @return The unsigned 64-bit integer value.
-internal_function inline uint64_t
-OsMakeUInt64
-(
-    uint32_t high32, 
-    uint32_t low32
-)
-{
-    return (((uint64_t) high32) << 32) | ((uint64_t) low32);
 }
 
 /// @summary Enumerate all files in a directory (and possibly its subdirectories.)
@@ -8646,15 +8658,81 @@ OsNativeDirectoryFindFiles
     return root;
 }
 
-/*
-public_function bool
+/// @summary Ensure that all directories in a path exist. Any directories that do not exist are created.
+/// @param path A zero-terminated string specifying an absolute native filesystem path. All forward slashes are replaced with backslash.
+/// @param path_end A pointer to the zero-terminator codepoint on the path string, or NULL to scan the input for the zero terminator.
+/// @return Zero if all directories in the path exist or were created, or -1 if an error occurred.
+public_function int
 OsCreateNativeDirectory
 (
-    WCHAR const *path
+    WCHAR     *path,
+    WCHAR *path_end
 )
 {
+    WCHAR      *pathbuf = NULL;
+    WCHAR      *pathend = NULL;
+    WCHAR       *dirend = NULL;
+    size_t       nbytes = 32768 * sizeof(WCHAR);
+    OS_PATH_PARTS parts = {};
+
+    // parse the input path into its constituient parts.
+    if (OsNativePathParse(path, path_end, &parts) < 0)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to parse input path \"%s\".\n", __FUNCTION__, GetCurrentThreadId(), path);
+        return -1;
+    }
+    // ensure that an absolute path was supplied.
+    if (parts.PathFlags & OS_PATH_FLAG_RELATIVE)
+    {
+        OsLayerError("ERROR: %S(%u): An absolute path is required. Path \"%s\" specifies a relative path.\n", __FUNCTION__, GetCurrentThreadId(), path);
+        return -1;
+    }
+    // allocate a temporary path buffer of the maximum allowable size.
+    if ((pathbuf = (WCHAR*) malloc(nbytes)) == NULL)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to allocate temporary path buffer.\n", __FUNCTION__, GetCurrentThreadId());
+        return -1;
+    }
+    // copy the root into the new path buffer.
+    CopyMemory(pathbuf, path, (parts.RootEnd - path) * sizeof(WCHAR));
+    pathend  = pathbuf      + (parts.RootEnd - path);
+    *pathend++ = L'\\';
+    *pathend = 0;
+    // build up the path one directory at a time.
+    // attempt to create each directory in the tree.
+    dirend = parts.Path;
+    do
+    {   // search for the next directory separator character.
+        // note that the path was normalized during parsing.
+        while (dirend < parts.PathEnd)
+        {
+            if (*dirend == L'\\')
+            {   // skip the path separator.
+                dirend++;
+                break;
+            }
+            *pathend++ = *dirend++;
+        }
+        *pathend = 0;
+        // attempt to create the directory.
+        if (!CreateDirectory(pathbuf, NULL))
+        {
+            DWORD error = GetLastError();
+            if (error != ERROR_ALREADY_EXISTS)
+            {
+                OsLayerError("ERROR: %S(%u): Failed to create directory \"%s\" (%08X).\n", __FUNCTION__, GetCurrentThreadId(), pathbuf, error);
+                free(pathbuf);
+                return -1;
+            }
+        }
+        // append a directory separator character.
+        *pathend++ = L'\\';
+    } while (dirend < parts.PathEnd);
+
+    // clean up and return.
+    free(pathbuf);
+    return 0;
 }
-*/
 
 /*
 /// @summary Initializes a file system driver.
