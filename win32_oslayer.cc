@@ -466,28 +466,23 @@ struct OS_FSIC_ALLOCATOR
     OS_FILE_INFO_CHUNK *FreeList;                    /// The first chunk in the free list, or NULL if the free list is empty.
 };
 
-/// @summary Defines the data associated with an open file. This information is populated by the mount point.
-struct OS_FILE
+/// @summary Define the data maintained with a memory-mapped file opened for read access.
+struct OS_FILE_MAPPING
 {
-    HANDLE              Filedes;                     /// The handle used to access the file.
-    HANDLE              Filemap;                     /// The handle representing the file mapping, for memory-mapped files.
-    size_t              SectorSize;                  /// The physical sector size of the disk, in bytes.
-    int64_t             BaseOffset;                  /// The offset of the start of the file data, in butes.
-    int64_t             BaseSize;                    /// The size of the file data, in bytes, as stored.
-    int64_t             FileSize;                    /// The runtime size of the file data, in bytes. For non-compressed files, BaseSize and FileSize are the same.
-    uint32_t            FileHints;                   /// One or more of OS_FILE_USAGE_HINTS.
-    uint32_t            FileFlags;                   /// Reserved for future use. Set to 0.
-    DWORD               OSError;                     /// The most recent operating system error reported when accessing the file.
-    DWORD               OpenFlags;                   /// The open mode flags used to open the file handle. See MSDN for CreateFile.
+    HANDLE              Filedes;                     /// A valid file handle, or INVALID_HANDLE_VALUE.
+    HANDLE              Filemap;                     /// A valid file mapping handle, or NULL.
+    int64_t             FileSize;                    /// The size of the file, in bytes, at the time it was opened.
+    size_t              Granularity;                 /// The system allocation granularity, in bytes.
 };
 
-/// @summary Defines the data associated with a memory-mapped region of a file.
-struct OS_FILE_REGION
+/// @summary Define the data associated with a region of a file loaded or mapped into memory.
+struct OS_FILE_DATA
 {
-    int64_t             BaseOffset;                  /// The zero-based offset from the start of the file at which the mapped region begins. This is always a multiple of the system allocation granularity.
-    uint8_t            *SystemBase;                  /// The pointer to the start of the mapped region, aligned to the system allocation granularity.
-    uint8_t            *UserBase;                    /// The pointer to the start of the mapped region requested by the user.
-    int64_t             RegionSize;                  /// The number of bytes mapped, starting at UserBase.
+    uint8_t            *Buffer;                      /// The buffer containing the loaded file data.
+    void               *MapPtr;                      /// The address returned by MapViewOfFile.
+    int64_t             Offset;                      /// The offset of the data in this region from the start of the file, in bytes.
+    int64_t             DataSize;                    /// The number of bytes in Buffer that are valid.
+    uint32_t            Flags;                       /// One or more of OS_FILE_DATA_FLAGS describing the allocation attributes of the OS_FILE_DATA.
 };
 
 /// @summary Define the data used to execute a low-level I/O operation. Not all data is used by all operations.
@@ -1128,6 +1123,14 @@ enum OS_PATH_FLAGS                   : uint32_t
     OS_PATH_FLAG_EXTENSION           = (1 << 8),     /// The path string has a file extension component.
 };
 
+/// @summary Define various allocation attributes of a file region.
+enum OS_FILE_DATA_FLAGS              : uint32_t
+{
+    OS_FILE_DATA_FLAGS_NONE          = (0 << 0),      /// The OS_FILE_DATA is invalid.
+    OS_FILE_DATA_FLAG_COMMITTED      = (1 << 0),      /// The OS_FILE_DATA buffer is an explicitly allocated region of memory.
+    OS_FILE_DATA_FLAG_MAPPED_REGION  = (1 << 1),      /// The OS_FILE_DATA represents a mapped region of a file.
+};
+
 /// @summary Define flags used to optimize asynchronous I/O operations. The usage hints are specified when the file is opened.
 enum OS_IO_HINT_FLAGS                : uint32_t
 {
@@ -1397,6 +1400,11 @@ public_function int                  OsOpenNativeDirectory(WCHAR const *fspath, 
 public_function OS_FILE_INFO_CHUNK*  OsNativeDirectoryFindFiles(HANDLE dir, WCHAR const *filter, bool recurse, size_t &total_count, OS_FSIC_ALLOCATOR *alloc);
 public_function void                 OsCloseNativeDirectory(HANDLE dir);
 public_function int                  OsCreateNativeDirectory(WCHAR const *abspath); 
+public_function int                  OsLoadFileData(OS_FILE_DATA *data, WCHAR const *path);
+public_function int                  OsOpenFileMapping(OS_FILE_MAPPING *filemap, WCHAR const *path);
+public_function void                 OsCloseFileMapping(OS_FILE_MAPPING *filemap);
+public_function int                  OsMapFileRegion(OS_FILE_DATA *data, int64_t offset, int64_t size, OS_FILE_MAPPING *filemap);
+public_function void                 OsFreeFileData(OS_FILE_DATA *data);
 
 public_function int                  OsCreateIoThreadPool(OS_IO_THREAD_POOL *pool, OS_IO_THREAD_POOL_INIT *init, OS_MEMORY_ARENA *arena, char const *name);
 public_function void                 OsTerminateIoThreadPool(OS_IO_THREAD_POOL *pool);
@@ -8432,6 +8440,219 @@ OsStringByteCount
         }
     }
     return length * sizeof(WCHAR);
+}
+
+/// @summary Load the entire contents of a file into memory.
+/// @param data The OS_FILE_DATA instance to populate.
+/// @param path The zero-terminated UTF-16 path of the file to load.
+/// @return Zero if the file is loaded successfully, or -1 if an error occurred.
+public_function int
+OsLoadFileData
+(
+    OS_FILE_DATA *data,
+    WCHAR const  *path
+)
+{
+    LARGE_INTEGER file_size = {};
+    HANDLE     fd = INVALID_HANDLE_VALUE;
+    void     *buf = NULL;
+    size_t     nb = 0;
+    int64_t    nr = 0;
+
+    // initialize the fields of the OS_FILE_DATA structure.
+    ZeroMemory(data, sizeof(OS_FILE_DATA));
+
+    // open the requested input file, read-only, to be read from start to end.
+    if ((fd = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL)) == INVALID_HANDLE_VALUE)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to open input file \"%s\" (%08X).\n", __FUNCTION__, GetCurrentThreadId(), path, GetLastError());
+        goto cleanup_and_fail;
+    }
+    // retrieve the file size, and use that to allocate a buffer for the file data.
+    if (!GetFileSizeEx(fd, &file_size))
+    {
+        OsLayerError("ERROR: %S(%u): Failed to retrieve file size for input file \"%s\" (%08X).\n", __FUNCTION__, GetCurrentThreadId(), path, GetLastError());
+        goto cleanup_and_fail;
+    }
+    if ((nb = (size_t) file_size.QuadPart) == 0 || (buf = malloc(nb)) == NULL)
+    {
+        OsLayerError("ERROR: %S(%u): Failed to allocate %Iu byte input buffer for file \"%s\".\n", __FUNCTION__, GetCurrentThreadId(), nb, path);
+        goto cleanup_and_fail;
+    }
+    // read the entire file contents into the buffer, in 1MB chunks.
+    while (nr < file_size.QuadPart)
+    {
+        uint8_t     *dst =(uint8_t*) buf + nr;
+        int64_t   remain = file_size.QuadPart - nr;
+        DWORD    to_read =(remain < Megabytes(1)) ? (DWORD) remain : (DWORD) Megabytes(1); 
+        DWORD bytes_read = 0;
+        if (!ReadFile(fd, dst, to_read, &bytes_read, NULL))
+        {   // the read failed. treat this as a fatal error unless it's EOF.
+            if (GetLastError() != ERROR_HANDLE_EOF)
+            {
+                OsLayerError("ERROR: %S(%u): ReadFile failed for input file \"%s\", offset %I64d (%08X).\n", __FUNCTION__, GetCurrentThreadId(), path, nr, GetLastError());
+                goto cleanup_and_fail;
+            }
+            else
+            {   // reached end-of-file.
+                nr += bytes_read;
+                break;
+            }
+        }
+        else
+        {   // the read completed successfully.
+            nr += bytes_read;
+        }
+    }
+    // the file was successfully read, so clean up and set the fields on the FILE_DATA.
+    CloseHandle(fd);
+    data->Buffer   =(uint8_t*) buf;
+    data->MapPtr   = NULL;
+    data->Offset   = 0;
+    data->DataSize = file_size.QuadPart;
+    data->Flags    = OS_FILE_DATA_FLAG_COMMITTED;
+    return 0;
+
+cleanup_and_fail:
+    ZeroMemory(data, sizeof(OS_FILE_DATA));
+    if (fd != INVALID_HANDLE_VALUE) CloseHandle(fd);
+    if (buf != NULL) free(buf);
+    return -1;
+}
+
+/// @summary Open a file for memory-mapped I/O optimized for sequential reads.
+/// @param file The OS_FILE_MAPPING object to initialize.
+/// @param path The zero-terminated UTF-16 path of the file to open.
+/// @return Zero if the file mapping was opened successfully, or -1 if an error occurred.
+public_function int
+OsOpenFileMapping
+(
+    OS_FILE_MAPPING *file, 
+    WCHAR const     *path
+)
+{
+    SYSTEM_INFO    sys_info = {};
+    LARGE_INTEGER file_size = {};
+    HANDLE     fd = INVALID_HANDLE_VALUE;
+    HANDLE    map = NULL;
+
+    // initialize the fields of the OS_FILE_MAPPING structure.
+    ZeroMemory(file, sizeof(OS_FILE_MAPPING));
+
+    // open the requested input file, read-only, to be read from start to end.
+    if ((fd = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL)) == INVALID_HANDLE_VALUE)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to open input file \"%s\" (%08X).\n", __FUNCTION__, GetCurrentThreadId(), path, GetLastError());
+        goto cleanup_and_fail;
+    }
+    // retrieve the current size of the file, in bytes.
+    if (!GetFileSizeEx(fd, &file_size))
+    {
+        OsLayerError("ERROR: %S(%u): Failed to retrieve file size for input file \"%s\" (%08X).\n", __FUNCTION__, GetCurrentThreadId(), path, GetLastError());
+        goto cleanup_and_fail;
+    }
+    // map the entire file (but don't map a view of the file.)
+    if ((map = CreateFileMapping(fd, NULL, PAGE_READONLY, 0, 0, NULL)) == NULL)
+    {
+        OsLayerError("ERROR: %S(%u): Failed to create the file mapping for input file \"%s\" (%08X).\n", __FUNCTION__, GetCurrentThreadId(), path, GetLastError());
+        goto cleanup_and_fail;
+    }
+    // retrieve system information to get the allocation granularity.
+    GetNativeSystemInfo(&sys_info);
+
+    // all finished. the user should call IoMapFileRegion next.
+    file->Filedes     = fd;
+    file->Filemap     = map;
+    file->FileSize    = file_size.QuadPart;
+    file->Granularity = sys_info.dwAllocationGranularity;
+    return 0;
+
+cleanup_and_fail:
+    if (map != NULL) CloseHandle(map);
+    if (fd != INVALID_HANDLE_VALUE) CloseHandle(fd);
+    return -1;
+}
+
+/// @summary Close a file mapping opened with OsOpenFileMapping. All views should have been unmapped already.
+/// @param file The OS_FILE_MAPPING to close.
+public_function void
+OsCloseFileMapping
+(
+    OS_FILE_MAPPING *file
+)
+{
+    if (file->Filemap != NULL)
+    {
+        CloseHandle(file->Filemap);
+        file->Filemap = NULL;
+    }
+    if (file->Filedes != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(file->Filedes);
+        file->Filedes = INVALID_HANDLE_VALUE;
+    }
+}
+
+/// @summary Map a region of a file into the process address space. The file is mapped read-only.
+/// @param data The OS_FILE_DATA to populate with the mapped region.
+/// @param offset The zero-based offset of the first byte within the file to map.
+/// @param size The number of bytes to map into the process address space.
+/// @param file The OS_FILE_MAPPING returned by a previous call to OsOpenFileMapping.
+/// @return Zero if the region is successfully mapped into the process address space, or -1 if an error occurred.
+public_function int
+OsMapFileRegion
+(
+    OS_FILE_DATA    *data, 
+    int64_t        offset, 
+    int64_t          size, 
+    OS_FILE_MAPPING *file
+)
+{   // the mapping offset must be an integer multiple of the system allocation granularity.
+    // sys_offset is the starting offset of the view, adhering to this requirement.
+    // sys_nbytes is the actual size of the view, in bytes, adjusted for the granularity requirement.
+    // adjust is the byte adjustment between the start of the mapped region and what the user asked to see.
+    int64_t sys_offset = (offset / file->Granularity) * file->Granularity;
+    ptrdiff_t   adjust =  offset - sys_offset;
+    int64_t sys_nbytes =  size   + adjust;
+    DWORD         hofs = (DWORD)  (sys_offset >> 32);
+    DWORD         lofs = (DWORD)  (sys_offset & 0xFFFFFFFFUL);
+    DWORD        wsize = (DWORD) ((sys_offset + sys_nbytes > file->FileSize) ? 0 : sys_nbytes);
+    void         *base =  MapViewOfFile(file->Filemap, FILE_MAP_READ, hofs, lofs, wsize);
+    if (base == NULL)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to map region [%I64d, %I64d) (%08X).\n", __FUNCTION__, GetCurrentThreadId(), sys_offset, sys_offset+sys_nbytes, GetLastError());
+        ZeroMemory(data, sizeof(OS_FILE_DATA));
+        return -1;
+    }
+    data->Buffer   =((uint8_t*) base) + adjust;
+    data->MapPtr   = base;
+    data->Offset   = offset;
+    data->DataSize = size;
+    data->Flags    = OS_FILE_DATA_FLAG_MAPPED_REGION;
+    return 0;
+}
+
+/// @summary Free resources associated with a loaded OS_FILE_DATA object.
+/// @param data The OS_FILE_DATA to free.
+public_function void
+OsFreeFileData
+(
+    OS_FILE_DATA *data
+)
+{
+    if ((data->MapPtr != NULL) && (data->Flags & OS_FILE_DATA_FLAG_MAPPED_REGION))
+    {   // unmap the region, which will drop the pages.
+        UnmapViewOfFile(data->MapPtr);
+    }
+    else if ((data->Buffer != NULL) && (data->Flags & OS_FILE_DATA_FLAG_COMMITTED))
+    {   // free the buffer, which was allocated with malloc.
+        free(data->Buffer);
+    }
+    else
+    {   // nothing to do in this case.
+        // ...
+    }
+    ZeroMemory(data, sizeof(OS_FILE_DATA));
 }
 
 /// @summary Calculate the amount of memory required to create an OS thread pool.
