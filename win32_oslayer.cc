@@ -246,6 +246,14 @@
         __pragma(warning(pop))
 #endif
 
+/// @summary Copy a Vulkan API function pointer from one dispatch object to another.
+/// @param dst The destination dispatch object, for example an OS_VULKAN_DEVICE_DISPATCH instance.
+/// @param src The source dispatch object, for example an OS_VULKAN_INSTANCE_DISPATCH instance.
+#ifndef OS_LAYER_COPY_VULKAN_FUNCTION
+    #define OS_LAYER_COPY_VULKAN_FUNCTION(dst, src, fname) \
+        (dst)->fname = (src)->fname
+#endif
+
 /*////////////////
 //   Includes   //
 ////////////////*/
@@ -291,9 +299,9 @@ struct OS_WORKER_THREAD;
 struct OS_THREAD_POOL;
 struct OS_THREAD_POOL_INIT;
 
-struct OS_FILE;
+struct OS_FILE_DATA;
+struct OS_FILE_MAPPING;
 struct OS_PATH_PARTS;
-struct OS_FILE_REGION;
 
 struct OS_IO_OPERATION;
 struct OS_IO_OPERATION_RESULT;
@@ -796,6 +804,9 @@ struct OS_VULKAN_RUNTIME_PROPERTIES
 struct OS_VULKAN_INSTANCE_DISPATCH
 {
     VkInstance                        InstanceHandle;                                /// The Vulkan instance used by the application to interface with the Vulkan API.
+
+    OS_LAYER_VULKAN_GLOBAL_FUNCTION  (vkGetInstanceProcAddr);                        /// The vkGetInstanceProcAddr function, copied from the OS_VULKAN_RUNTIME_DISPATCH object.
+
     OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkCreateDevice);                               /// The vkCreateDevice function.
     OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkDestroyInstance);                            /// The vkDestroyInstance function.
     OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkEnumeratePhysicalDevices);                   /// The vkEnumeratePhysicalDevices function.
@@ -859,6 +870,9 @@ struct OS_VULKAN_DEVICE_DISPATCH
 {
     VkDevice                          DeviceHandle;                                  /// The Vulkan logical device handle used to interface with device-level API functions.
     VkPhysicalDevice                  PhysicalDeviceHandle;                          /// The handle of the Vulkan physical device that executes the application commands.
+
+    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetDeviceProcAddr);                          /// The vkGetDeviceProcAddr function, copied from the OS_VULKAN_INSTANCE_DISPATCH object.
+    
     OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkAllocateCommandBuffers);                     /// The vkAllocateCommandBuffers function.
     OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkAllocateDescriptorSets);                     /// The vkAllocateDescriptorSets function.
     OS_LAYER_VULKAN_DEVICE_FUNCTION  (vkAllocateMemory);                             /// The vkAllocateMemory function.
@@ -3926,6 +3940,7 @@ OsResolveVulkanInstanceFunctions
     VkInstanceCreateInfo  const *create_info 
 )
 {
+    OS_LAYER_COPY_VULKAN_FUNCTION(instance, runtime, vkGetInstanceProcAddr);
     OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkCreateDevice);
     OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkDestroyInstance);
     OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkEnumeratePhysicalDevices);
@@ -3973,6 +3988,7 @@ OsResolveVulkanDeviceFunctions
     VkDeviceCreateInfo const *create_info
 )
 {
+    OS_LAYER_COPY_VULKAN_FUNCTION(device, instance, vkGetDeviceProcAddr);
     OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkAllocateCommandBuffers);
     OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkAllocateMemory);
     OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(device, instance, vkBeginCommandBuffer);
