@@ -771,9 +771,9 @@ struct OS_VULKAN_ICD_INFO
     WCHAR              *ManifestPath;                /// Pointer to the zero-terminated path of the ICD JSON manifest file.
     uint8_t            *ManifestData;                /// A zero-terminated buffer containing the contents of the JSON manifest file.
     WCHAR              *DriverPath;                  /// A zero-terminated buffer containing the path of the installable client driver library.
-    uint8_t             MajorVersion;                /// The major version of the Vulkan API supported by the ICD.
-    uint8_t             MinorVersion;                /// The minor version of the Vulkan API supported by the ICD.
-    uint8_t             PatchVersion;                /// The patch version of the Vulkan API supported by the ICD.
+    uint32_t            MajorVersion;                /// The major version of the Vulkan API supported by the ICD.
+    uint32_t            MinorVersion;                /// The minor version of the Vulkan API supported by the ICD.
+    uint32_t            PatchVersion;                /// The patch version of the Vulkan API supported by the ICD.
 };
 
 /// @summary Defines the data associated with the top-level Vulkan entry points used to load the Vulkan API.
@@ -2721,6 +2721,251 @@ OsStringSearch
     return NULL;
 }
 
+/// @summary Figure out the starting and ending points of the directory path, filename and extension information in a path string.
+/// @param buf The zero-terminated path string to parse. Any forward slashes are converted to backslashes.
+/// @param buf_end A pointer to the zero terminator character of the input path string. This value must be valid.
+/// @param parts The OS_PATH_PARTS to update. The Root, RootEnd and PathFlags fields must be set.
+/// @return This function always returns zero to indicate success.
+internal_function int
+OsExtractNativePathParts
+(
+    WCHAR           *buf, 
+    WCHAR       *buf_end, 
+    OS_PATH_PARTS *parts
+)
+{   // initialize the components of the path parts to known values.
+    parts->Path         = parts->RootEnd;
+    parts->PathEnd      = parts->RootEnd;
+    parts->Filename     = parts->RootEnd;
+    parts->FilenameEnd  = parts->RootEnd;
+    parts->Extension    = buf_end;
+    parts->ExtensionEnd = buf_end;
+
+    while (parts->FilenameEnd < buf_end)
+    {
+        if (parts->FilenameEnd[0] == L'/')
+            parts->FilenameEnd[0]  = L'\\';
+        if (parts->FilenameEnd[0] == L'\\')
+        {   // encountered a path separator.
+            // update the end of the directory path string.
+            // reset the filename string to be zero-length.
+            parts->PathEnd     = parts->FilenameEnd;
+            parts->PathFlags  |= OS_PATH_FLAG_PATH;
+            parts->Filename    = parts->FilenameEnd + 1;
+            parts->FilenameEnd = parts->FilenameEnd + 1;
+        }
+        else
+        {   // this is a regular character; consider it part of the filename.
+            parts->FilenameEnd++;
+        }
+    }
+    if (parts->Path[0] == L'\\')
+    {   // skip the leading path separator.
+        if (parts->Path == parts->PathEnd)
+        {   // there is no actual path component; this is something like "C:\".
+            parts->PathFlags &= ~OS_PATH_FLAG_PATH;
+            parts->PathEnd++;
+        }
+        parts->Path++;
+    }
+
+    if (parts->Filename != parts->FilenameEnd)
+    {   // figure out whether this last bit is a filename or part of the directory path.
+        WCHAR *iter  = buf_end;
+        while (iter >= parts->Filename)
+        {   // consider 'a.b', '.a.b' and 'a.' to be a filename, but not '.a'.
+            if (*iter == L'.' && iter != parts->Filename)
+            {
+                parts->FilenameEnd = iter;
+                parts->Extension   = iter + 1;
+                parts->PathFlags  |= OS_PATH_FLAG_FILENAME;
+                parts->PathFlags  |= OS_PATH_FLAG_EXTENSION;
+            }
+            iter--;
+        }
+        if ((parts->PathFlags & OS_PATH_FLAG_FILENAME) == 0)
+        {   // consider 'a' and '.a' to be part of the directory path information.
+            parts->PathEnd     = parts->FilenameEnd;
+            parts->PathFlags  |= OS_PATH_FLAG_PATH;
+            parts->Filename    = buf_end;
+            parts->FilenameEnd = buf_end;
+        }
+    }
+    else
+    {   // if there's no filename present, make sure that it points to an empty string.
+        parts->Filename    = buf_end;
+        parts->FilenameEnd = buf_end;
+    }
+    UNREFERENCED_PARAMETER(buf);
+    return 0;
+}
+
+/// @summary Enumerate all files in a directory (and possibly its subdirectories.)
+/// @param buf The native path to search. The buffer contents are overwritten during enumeration.
+/// @param buf_bytes The maximum number of bytes that can be written to the path string buffer.
+/// @param buf_end A pointer to the zero-terminator codepoint within the path string buffer.
+/// @param filter A zero-terminated string specifying the filter to use when locating files. The filter supports wildcards. Specify a filter of * to include all files in the search.
+/// @param recurse Specify true to include files located in subdirectories in the search results.
+/// @param total_files This value is updated to include the total number of files returned by the search.
+/// @param alloc The OS_FILE_INFO_CHUNK allocator to use for allocating blocks of file information to store the search results.
+/// @param chunk The OS_FILE_INFO_CHUNK to which search results will be written, or NULL if no search results have been returned yet. New chunks are allocated as-needed.
+/// @return A pointer to the OS_FILE_INFO_CHUNK containing the search results.
+internal_function OS_FILE_INFO_CHUNK*
+OsEnumerateDirectory
+(
+    WCHAR                *buf, 
+    size_t          buf_bytes, 
+    WCHAR            *buf_end,
+    WCHAR const       *filter, 
+    bool              recurse, 
+    size_t       &total_files, 
+    OS_FSIC_ALLOCATOR  *alloc, 
+    OS_FILE_INFO_CHUNK *chunk
+)
+{   size_t const MAX_UTF8 = 1024; // maximum of 1024 bytes of UTF-8 data returned for filename.
+    HANDLE    find_handle = INVALID_HANDLE_VALUE;
+    WCHAR       *base_end = buf_end;
+    WCHAR     *filter_end = buf_end;
+    size_t   filter_chars = 0;
+    size_t   bytes_needed = 0;
+    int       fname_bytes = 0;
+    WIN32_FIND_DATA    fd;
+    char utf8buf[MAX_UTF8];
+
+    if (recurse)
+    {   // if recursion is enabled, filter with *, and recurse into all subdirectories.
+        if ((filter_chars = OsNativePathAppend(buf, buf_bytes, &filter_end, bytes_needed, L"*")) == 0)
+        {
+            OsLayerError("ERROR: %S(%u): Unable to construct * filter string for path %s.\n", __FUNCTION__, GetCurrentThreadId(), buf);
+            return chunk;
+        }
+        if ((find_handle = FindFirstFileEx(buf, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, FIND_FIRST_EX_LARGE_FETCH)) == INVALID_HANDLE_VALUE)
+        {
+            OsLayerError("ERROR: %S(%u): Search filter %s failed (%08X).\n", __FUNCTION__, GetCurrentThreadId(), buf, GetLastError());
+            return chunk;
+        }
+        do
+        {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            {
+                if ((fd.cFileName[0] == L'.' && fd.cFileName[1] == 0) || (fd.cFileName[0] == L'.' && fd.cFileName[1] == L'.' && fd.cFileName[2] == 0))
+                {   // skip the current directory and parent directory links.
+                    continue;
+                }
+                else
+                {   // build the path string for the subdirectory.
+                    *base_end = 0; filter_end = base_end;
+                    if ((filter_chars = OsNativePathAppend(buf, buf_bytes, &filter_end, bytes_needed, fd.cFileName)) == 0)
+                    {
+                        *base_end = 0; filter_end = base_end;
+                        OsLayerError("ERROR: %S(%u): Unable to recurse into subdirectory %s of path %s.\n", __FUNCTION__, GetCurrentThreadId(), fd.cFileName, buf);
+                    }
+                    // recurse into the subdirectory.
+                    chunk = OsEnumerateDirectory(buf, buf_bytes, filter_end, filter, recurse, total_files, alloc, chunk);
+                }
+            }
+        } 
+        while (FindNextFile(find_handle, &fd));
+        FindClose(find_handle); find_handle = INVALID_HANDLE_VALUE;
+    }
+
+    // now search with the actual filter applied, and look at files only.
+    *base_end = 0; filter_end = base_end;
+    if ((filter_chars = OsNativePathAppend(buf, buf_bytes, &filter_end, bytes_needed, filter)) == 0)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to construct filter string from %s and %s.\n", __FUNCTION__, GetCurrentThreadId(), buf, filter);
+        return chunk;
+    }
+    if ((find_handle = FindFirstFileEx(buf, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, FIND_FIRST_EX_LARGE_FETCH)) == INVALID_HANDLE_VALUE)
+    {
+        OsLayerError("ERROR: %S(%u): Search filter %s failed (%08X).\n", __FUNCTION__, GetCurrentThreadId(), buf, GetLastError());
+        return chunk;
+    }
+    do
+    {   // skip over anything that's not a proper file or symlink.
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DEVICE)
+            continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_VIRTUAL)
+            continue;
+
+        // build the absolute path of the file.
+        *base_end = 0; filter_end = base_end;
+        if ((filter_chars = OsNativePathAppend(buf, buf_bytes, &filter_end, bytes_needed, fd.cFileName)) == 0)
+        {
+            OsLayerError("ERROR: %S(%u): Failed to build filename for path %s, file %s.\n", __FUNCTION__, GetCurrentThreadId(), buf, fd.cFileName);
+            continue;
+        }
+        if (chunk == NULL || chunk->RecordCount == OS_FILE_INFO_CHUNK::CAPACITY)
+        {   // allocate a new chunk; the current chunk is full.
+            OS_FILE_INFO_CHUNK *new_chunk = OsNewFileInfoChunk(alloc);
+            if (new_chunk == NULL)
+            {
+                OsLayerError("ERROR: %S(%u): Failed to allocate OS_FILE_INFO_CHUNK for file %s.\n", __FUNCTION__, GetCurrentThreadId(), buf);
+                continue;
+            }
+            // entries higher up in the tree appear first.
+            new_chunk->NextChunk = chunk;
+            chunk = new_chunk;
+        }
+        // fill out the information for the file in the current chunk.
+        chunk->PathHash[chunk->RecordCount]            = OsHashPath(buf);
+        chunk->FileInfo[chunk->RecordCount].FileSize   = OsMakeInt64(fd.nFileSizeHigh, fd.nFileSizeLow);
+        chunk->FileInfo[chunk->RecordCount].BaseOffset = 0;
+        chunk->FileInfo[chunk->RecordCount].LastWrite  = fd.ftLastWriteTime;
+        chunk->FileInfo[chunk->RecordCount].Attributes = fd.dwFileAttributes;
+        // convert the filename from file system native to UTF-8.
+        // this data will be used for collision resolution and extension searching.
+        if ((fname_bytes = WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, utf8buf, MAX_UTF8, NULL, NULL)) == 0)
+        {
+            OsLayerError("ERROR: %S(%u): Failed to convert filename %s to UTF-8 (%08X).\n", __FUNCTION__, GetCurrentThreadId(), fd.cFileName, GetLastError());
+            continue;
+        }
+        // copy as much data as possible to the filename buffer.
+        // fname_bytes includes one byte for the zero-terminator.
+        size_t fnmax = OS_FILE_INFO::MAX_STRING_BYTES - 1;
+        char  *fndst = chunk->FileInfo[chunk->RecordCount].FileName;
+        char  *fnend = utf8buf + fname_bytes;
+        char  *fnsrc = utf8buf;
+        char  *fnext = NULL;
+        if (fnmax >= size_t(fname_bytes - 1))
+            fnmax  = size_t(fname_bytes - 1);
+        CopyMemory(fndst, fnsrc, fnmax);
+        fndst[fnmax] = 0;
+        // find the file extension and copy as much as possible into the extension buffer.
+        // note that the first character is intentionally NOT included.
+        while (fnend > fnsrc)
+        {
+            if(*fnend == '.')
+                fnext = fnend;
+            fnend--;
+        }
+        if (fnext != NULL)
+        {   // copy the file extension data.
+            fndst  = chunk->FileInfo[chunk->RecordCount].Extension;
+            fnmax  = OS_FILE_INFO::MAX_STRING_BYTES - 1;
+            fnend  = utf8buf + fname_bytes;
+            if (fnmax >= size_t(fnend - fnext - 1))
+                fnmax  = size_t(fnend - fnext - 1);
+            CopyMemory(fndst, fnext, fnmax);
+            fndst[fnmax] = 0;
+        }
+        else
+        {   // there is no file extension.
+            chunk->FileInfo[chunk->RecordCount].Extension[0] = 0;
+        }
+        // all data has been written to the new record. make it visible.
+        chunk->RecordCount++;
+        total_files++;
+    } 
+    while (FindNextFile(find_handle, &fd));
+
+    // finished searching; clean up and return.
+    FindClose(find_handle); find_handle = INVALID_HANDLE_VALUE;
+    return chunk;
+}
+
 /// @summary Helper function to convert a UTF-8 encoded string to the system native WCHAR. Free the returned buffer using the standard C library free() call.
 /// @param str The NULL-terminated UTF-8 string to convert.
 /// @param size_chars On return, stores the length of the string in characters, not including NULL-terminator.
@@ -3959,7 +4204,7 @@ OsAlignFor
 /// @typeparam T The type being allocated. This type is used to determine the required alignment.
 /// @return The number of bytes required to allocate an instance, including worst-case padding.
 template <typename T>
-internal_function size_t
+public_function size_t
 OsAllocationSizeForStruct
 (
     void
@@ -3973,7 +4218,7 @@ OsAllocationSizeForStruct
 /// @param n The number of items of type T in the array.
 /// @return The number of bytes required to allocate an array of count items, including worst-case padding.
 template <typename T>
-internal_function size_t
+public_function size_t
 OsAllocationSizeForArray
 (
     size_t n
@@ -5429,7 +5674,16 @@ OsEnumerateVulkanDrivers
                     uint8_t      *json_data = NULL;
                     size_t        path_size = wcslen(value_buf) + 1;
                     WCHAR        *json_path = NULL;
+                    WCHAR      *driver_path = NULL;
+                    char          *lib_path = NULL;
+                    char          *api_vers = NULL;
+                    char           *lib_end = NULL;
+                    char           *api_end = NULL;
                     DWORD            nbread = 0;
+                    int              ver_mj = 0;
+                    int              ver_mi = 0;
+                    int              ver_pn = 0;
+                    int        driver_chars = 0;
 
                     // zero out the ICD info structure.
                     ZeroMemory(&icd_list[num_icds], sizeof(OS_VULKAN_ICD_INFO));
@@ -5469,14 +5723,79 @@ OsEnumerateVulkanDrivers
                     json_data[json_size.QuadPart+3] = 0;
                     // copy the manifest path string over to the user buffer.
                     CopyMemory(json_path, value_buf, (nv+1) * sizeof(WCHAR));
-                    // TODO(rlk): parse out the "library_path": and "api_version": values within the JSON.
-                    // for now, only support ASCII and UTF-8 encoding, I guess?
+                    // parse out the necessary values from the JSON manifest.
+                    // for now, assume ASCII or UTF-8 encoding is used for the manifest.
+                    // some manifests have whitespace after the key but before the ':'.
+                    if ((lib_path = (char*) OsStringSearch((char const*) json_data, "\"library_path\"")) == NULL)
+                    {
+                        OsLayerError("ERROR: %S(%u): Unable to find ICD \"library_path\" in Vulkan ICD manifest \"%s\".\n", __FUNCTION__, GetCurrentThreadId(), value_buf);
+                        CloseHandle(json_fd);
+                        free(json_path);
+                        free(json_data);
+                        continue;
+                    }
+                    if ((api_vers = (char*) OsStringSearch((char const*) lib_path, "\"api_version\"")) == NULL)
+                    {
+                        OsLayerError("ERROR: %S(%u): Unable to find ICD \"api_version\" in Vulkan ICD manifest \"%s\".\n", __FUNCTION__, GetCurrentThreadId(), value_buf);
+                        CloseHandle(json_fd);
+                        free(json_path);
+                        free(json_data);
+                        continue;
+                    }
+                    // skip the keys, then find the start of the values.
+                    lib_path += strlen("\"library_path\":");
+                    api_vers += strlen("\"api_version\":");
+                    while (*lib_path && *lib_path != '\"')
+                        lib_path++;
+                    while (*api_vers && *api_vers != '\"')
+                        api_vers++;
+                    // skip the leading double-quotes.
+                    lib_end = ++lib_path; 
+                    api_end = ++api_vers;
+                    // find the end of the values.
+                    while (*lib_end && *lib_end != '\"')
+                        lib_end++;
+                    while (*api_end && *api_end != '\"')
+                        api_end++;
+                    // allocate a user buffer for the library path, converted to UTF-16.
+                    if ((driver_chars = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, lib_path, (int)(lib_end-lib_path), NULL, 0)) == 0)
+                    {
+                        OsLayerError("ERROR: %S(%u): Unable to convert ICD driver path in Vulkan ICD manifest \"%s\" to UTF-16 (%08X).\n", __FUNCTION__, GetCurrentThreadId(), value_buf, GetLastError());
+                        CloseHandle(json_fd);
+                        free(json_path);
+                        free(json_data);
+                        continue;
+                    }
+                    if ((driver_path = (WCHAR*) malloc((driver_chars+1) * sizeof(WCHAR))) == NULL)
+                    {
+                        OsLayerError("ERROR: %S(%u): Unable to allocate memory for ICD driver path in Vulkan ICD manifest \"%s\".\n", __FUNCTION__, GetCurrentThreadId(), value_buf);
+                        CloseHandle(json_fd);
+                        free(json_path);
+                        free(json_data);
+                        continue;
+                    }
+                    if (MultiByteToWideChar(CP_UTF8, 0, lib_path, (int)(lib_end-lib_path), driver_path, driver_chars) != driver_chars)
+                    {
+                        OsLayerError("ERROR: %S(%u): Unable to convert ICD driver path in Vulkan ICD manifest \"%s\" to UTF-16 (%08X).\n", __FUNCTION__, GetCurrentThreadId(), value_buf, GetLastError());
+                        CloseHandle(json_fd);
+                        free(driver_path);
+                        free(json_path);
+                        free(json_data);
+                        continue;
+                    }
+                    // ensure the path is zero-terminated.
+                    driver_path[driver_chars]  = 0;
+                    #pragma warning(push)
+                    #pragma warning(disable:4996) // Consider using sscanf_s instead.
+                    // parse out the Vulkan API version.
+                    sscanf(api_vers, "%d.%d.%d", &ver_mj, &ver_mi, &ver_pn);
+                    #pragma warning(pop)
                     icd_list[num_icds].ManifestPath = json_path;
                     icd_list[num_icds].ManifestData = json_data;
-                    icd_list[num_icds].DriverPath   = NULL; // TODO(rlk): parsed from JSON
-                    icd_list[num_icds].MajorVersion = 0; // TODO(rlk): parsed from JSON
-                    icd_list[num_icds].MinorVersion = 0; // TODO(rlk): parsed from JSON
-                    icd_list[num_icds].PatchVersion = 0; // TODO(rlk): parsed from JSON
+                    icd_list[num_icds].DriverPath   = driver_path;
+                    icd_list[num_icds].MajorVersion =(uint32_t) ver_mj;
+                    icd_list[num_icds].MinorVersion =(uint32_t) ver_mi;
+                    icd_list[num_icds].PatchVersion =(uint32_t) ver_pn;
                 }
                 CloseHandle(json_fd);
                 num_icds++;
@@ -7567,85 +7886,6 @@ OsNativePathAppendExtension
     return (inp_chars + sep_chars + ext_chars);
 }
 
-/// @summary Figure out the starting and ending points of the directory path, filename and extension information in a path string.
-/// @param buf The zero-terminated path string to parse. Any forward slashes are converted to backslashes.
-/// @param buf_end A pointer to the zero terminator character of the input path string. This value must be valid.
-/// @param parts The OS_PATH_PARTS to update. The Root, RootEnd and PathFlags fields must be set.
-/// @return This function always returns zero to indicate success.
-internal_function int
-OsExtractNativePathParts
-(
-    WCHAR           *buf, 
-    WCHAR       *buf_end, 
-    OS_PATH_PARTS *parts
-)
-{   // initialize the components of the path parts to known values.
-    parts->Path         = parts->RootEnd;
-    parts->PathEnd      = parts->RootEnd;
-    parts->Filename     = parts->RootEnd;
-    parts->FilenameEnd  = parts->RootEnd;
-    parts->Extension    = buf_end;
-    parts->ExtensionEnd = buf_end;
-
-    while (parts->FilenameEnd < buf_end)
-    {
-        if (parts->FilenameEnd[0] == L'/')
-            parts->FilenameEnd[0]  = L'\\';
-        if (parts->FilenameEnd[0] == L'\\')
-        {   // encountered a path separator.
-            // update the end of the directory path string.
-            // reset the filename string to be zero-length.
-            parts->PathEnd     = parts->FilenameEnd;
-            parts->PathFlags  |= OS_PATH_FLAG_PATH;
-            parts->Filename    = parts->FilenameEnd + 1;
-            parts->FilenameEnd = parts->FilenameEnd + 1;
-        }
-        else
-        {   // this is a regular character; consider it part of the filename.
-            parts->FilenameEnd++;
-        }
-    }
-    if (parts->Path[0] == L'\\')
-    {   // skip the leading path separator.
-        if (parts->Path == parts->PathEnd)
-        {   // there is no actual path component; this is something like "C:\".
-            parts->PathFlags &= ~OS_PATH_FLAG_PATH;
-            parts->PathEnd++;
-        }
-        parts->Path++;
-    }
-
-    if (parts->Filename != parts->FilenameEnd)
-    {   // figure out whether this last bit is a filename or part of the directory path.
-        WCHAR *iter  = buf_end;
-        while (iter >= parts->Filename)
-        {   // consider 'a.b', '.a.b' and 'a.' to be a filename, but not '.a'.
-            if (*iter == L'.' && iter != parts->Filename)
-            {
-                parts->FilenameEnd = iter;
-                parts->Extension   = iter + 1;
-                parts->PathFlags  |= OS_PATH_FLAG_FILENAME;
-                parts->PathFlags  |= OS_PATH_FLAG_EXTENSION;
-            }
-            iter--;
-        }
-        if ((parts->PathFlags & OS_PATH_FLAG_FILENAME) == 0)
-        {   // consider 'a' and '.a' to be part of the directory path information.
-            parts->PathEnd     = parts->FilenameEnd;
-            parts->PathFlags  |= OS_PATH_FLAG_PATH;
-            parts->Filename    = buf_end;
-            parts->FilenameEnd = buf_end;
-        }
-    }
-    else
-    {   // if there's no filename present, make sure that it points to an empty string.
-        parts->Filename    = buf_end;
-        parts->FilenameEnd = buf_end;
-    }
-    UNREFERENCED_PARAMETER(buf);
-    return 0;
-}
-
 /// @summary Parse an absolute or relative native path string into its constituent parts.
 /// @param buf The buffer to parse containing the native path string. All forward slashes are replaced with backslash.
 /// @param buf_end A pointer to the zero-terminator byte of the input path string, or NULL to scan the input buffer for a zero terminator.
@@ -7823,12 +8063,12 @@ scan_for_end_of_root:
 }
 
 /// @summary Retrieve the physical sector size for a block-access device.
-/// @param file The handle to an open file on the device.
+/// @param device A handle to the device to query. This handle must be obtained by opening a device path, not a file.
 /// @return The size of a physical sector on the specified device.
 public_function size_t 
 OsPhysicalSectorSize
 (
-    HANDLE file
+    HANDLE device
 )
 {   // http://msdn.microsoft.com/en-us/library/ff800831(v=vs.85).aspx
     // for structure STORAGE_ACCESS_ALIGNMENT
@@ -7841,7 +8081,7 @@ OsPhysicalSectorSize
     query.QueryType  = PropertyStandardQuery;
     query.PropertyId = StorageAccessAlignmentProperty;
     DWORD bytes = 0;
-    BOOL result = DeviceIoControl(file, IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof(query), &desc , sizeof(desc), &bytes, NULL);
+    BOOL result = DeviceIoControl(device, IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof(query), &desc , sizeof(desc), &bytes, NULL);
     return result ? desc.BytesPerPhysicalSector : DefaultPhysicalSectorSize;
 }
 
@@ -7990,172 +8230,6 @@ OsCloseNativeDirectory
 {
     if (dir != INVALID_HANDLE_VALUE)
         CloseHandle(dir);
-}
-
-/// @summary Enumerate all files in a directory (and possibly its subdirectories.)
-/// @param buf The native path to search. The buffer contents are overwritten during enumeration.
-/// @param buf_bytes The maximum number of bytes that can be written to the path string buffer.
-/// @param buf_end A pointer to the zero-terminator codepoint within the path string buffer.
-/// @param filter A zero-terminated string specifying the filter to use when locating files. The filter supports wildcards. Specify a filter of * to include all files in the search.
-/// @param recurse Specify true to include files located in subdirectories in the search results.
-/// @param total_files This value is updated to include the total number of files returned by the search.
-/// @param alloc The OS_FILE_INFO_CHUNK allocator to use for allocating blocks of file information to store the search results.
-/// @param chunk The OS_FILE_INFO_CHUNK to which search results will be written, or NULL if no search results have been returned yet. New chunks are allocated as-needed.
-/// @return A pointer to the OS_FILE_INFO_CHUNK containing the search results.
-internal_function OS_FILE_INFO_CHUNK*
-OsEnumerateDirectory
-(
-    WCHAR                *buf, 
-    size_t          buf_bytes, 
-    WCHAR            *buf_end,
-    WCHAR const       *filter, 
-    bool              recurse, 
-    size_t       &total_files, 
-    OS_FSIC_ALLOCATOR  *alloc, 
-    OS_FILE_INFO_CHUNK *chunk
-)
-{   size_t const MAX_UTF8 = 1024; // maximum of 1024 bytes of UTF-8 data returned for filename.
-    HANDLE    find_handle = INVALID_HANDLE_VALUE;
-    WCHAR       *base_end = buf_end;
-    WCHAR     *filter_end = buf_end;
-    size_t   filter_chars = 0;
-    size_t   bytes_needed = 0;
-    int       fname_bytes = 0;
-    WIN32_FIND_DATA    fd;
-    char utf8buf[MAX_UTF8];
-
-    if (recurse)
-    {   // if recursion is enabled, filter with *, and recurse into all subdirectories.
-        if ((filter_chars = OsNativePathAppend(buf, buf_bytes, &filter_end, bytes_needed, L"*")) == 0)
-        {
-            OsLayerError("ERROR: %S(%u): Unable to construct * filter string for path %s.\n", __FUNCTION__, GetCurrentThreadId(), buf);
-            return chunk;
-        }
-        if ((find_handle = FindFirstFileEx(buf, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, FIND_FIRST_EX_LARGE_FETCH)) == INVALID_HANDLE_VALUE)
-        {
-            OsLayerError("ERROR: %S(%u): Search filter %s failed (%08X).\n", __FUNCTION__, GetCurrentThreadId(), buf, GetLastError());
-            return chunk;
-        }
-        do
-        {
-            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-            {
-                if ((fd.cFileName[0] == L'.' && fd.cFileName[1] == 0) || (fd.cFileName[0] == L'.' && fd.cFileName[1] == L'.' && fd.cFileName[2] == 0))
-                {   // skip the current directory and parent directory links.
-                    continue;
-                }
-                else
-                {   // build the path string for the subdirectory.
-                    *base_end = 0; filter_end = base_end;
-                    if ((filter_chars = OsNativePathAppend(buf, buf_bytes, &filter_end, bytes_needed, fd.cFileName)) == 0)
-                    {
-                        *base_end = 0; filter_end = base_end;
-                        OsLayerError("ERROR: %S(%u): Unable to recurse into subdirectory %s of path %s.\n", __FUNCTION__, GetCurrentThreadId(), fd.cFileName, buf);
-                    }
-                    // recurse into the subdirectory.
-                    chunk = OsEnumerateDirectory(buf, buf_bytes, filter_end, filter, recurse, total_files, alloc, chunk);
-                }
-            }
-        } 
-        while (FindNextFile(find_handle, &fd));
-        FindClose(find_handle); find_handle = INVALID_HANDLE_VALUE;
-    }
-
-    // now search with the actual filter applied, and look at files only.
-    *base_end = 0; filter_end = base_end;
-    if ((filter_chars = OsNativePathAppend(buf, buf_bytes, &filter_end, bytes_needed, filter)) == 0)
-    {
-        OsLayerError("ERROR: %S(%u): Unable to construct filter string from %s and %s.\n", __FUNCTION__, GetCurrentThreadId(), buf, filter);
-        return chunk;
-    }
-    if ((find_handle = FindFirstFileEx(buf, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, FIND_FIRST_EX_LARGE_FETCH)) == INVALID_HANDLE_VALUE)
-    {
-        OsLayerError("ERROR: %S(%u): Search filter %s failed (%08X).\n", __FUNCTION__, GetCurrentThreadId(), buf, GetLastError());
-        return chunk;
-    }
-    do
-    {   // skip over anything that's not a proper file or symlink.
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-            continue;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DEVICE)
-            continue;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_VIRTUAL)
-            continue;
-
-        // build the absolute path of the file.
-        *base_end = 0; filter_end = base_end;
-        if ((filter_chars = OsNativePathAppend(buf, buf_bytes, &filter_end, bytes_needed, fd.cFileName)) == 0)
-        {
-            OsLayerError("ERROR: %S(%u): Failed to build filename for path %s, file %s.\n", __FUNCTION__, GetCurrentThreadId(), buf, fd.cFileName);
-            continue;
-        }
-        if (chunk == NULL || chunk->RecordCount == OS_FILE_INFO_CHUNK::CAPACITY)
-        {   // allocate a new chunk; the current chunk is full.
-            OS_FILE_INFO_CHUNK *new_chunk = OsNewFileInfoChunk(alloc);
-            if (new_chunk == NULL)
-            {
-                OsLayerError("ERROR: %S(%u): Failed to allocate OS_FILE_INFO_CHUNK for file %s.\n", __FUNCTION__, GetCurrentThreadId(), buf);
-                continue;
-            }
-            // entries higher up in the tree appear first.
-            new_chunk->NextChunk = chunk;
-            chunk = new_chunk;
-        }
-        // fill out the information for the file in the current chunk.
-        chunk->PathHash[chunk->RecordCount]            = OsHashPath(buf);
-        chunk->FileInfo[chunk->RecordCount].FileSize   = OsMakeInt64(fd.nFileSizeHigh, fd.nFileSizeLow);
-        chunk->FileInfo[chunk->RecordCount].BaseOffset = 0;
-        chunk->FileInfo[chunk->RecordCount].LastWrite  = fd.ftLastWriteTime;
-        chunk->FileInfo[chunk->RecordCount].Attributes = fd.dwFileAttributes;
-        // convert the filename from file system native to UTF-8.
-        // this data will be used for collision resolution and extension searching.
-        if ((fname_bytes = WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, utf8buf, MAX_UTF8, NULL, NULL)) == 0)
-        {
-            OsLayerError("ERROR: %S(%u): Failed to convert filename %s to UTF-8 (%08X).\n", __FUNCTION__, GetCurrentThreadId(), fd.cFileName, GetLastError());
-            continue;
-        }
-        // copy as much data as possible to the filename buffer.
-        // fname_bytes includes one byte for the zero-terminator.
-        size_t fnmax = OS_FILE_INFO::MAX_STRING_BYTES - 1;
-        char  *fndst = chunk->FileInfo[chunk->RecordCount].FileName;
-        char  *fnend = utf8buf + fname_bytes;
-        char  *fnsrc = utf8buf;
-        char  *fnext = NULL;
-        if (fnmax >= size_t(fname_bytes - 1))
-            fnmax  = size_t(fname_bytes - 1);
-        CopyMemory(fndst, fnsrc, fnmax);
-        fndst[fnmax] = 0;
-        // find the file extension and copy as much as possible into the extension buffer.
-        // note that the first character is intentionally NOT included.
-        while (fnend > fnsrc)
-        {
-            if(*fnend == '.')
-                fnext = fnend;
-            fnend--;
-        }
-        if (fnext != NULL)
-        {   // copy the file extension data.
-            fndst  = chunk->FileInfo[chunk->RecordCount].Extension;
-            fnmax  = OS_FILE_INFO::MAX_STRING_BYTES - 1;
-            fnend  = utf8buf + fname_bytes;
-            if (fnmax >= size_t(fnend - fnext - 1))
-                fnmax  = size_t(fnend - fnext - 1);
-            CopyMemory(fndst, fnext, fnmax);
-            fndst[fnmax] = 0;
-        }
-        else
-        {   // there is no file extension.
-            chunk->FileInfo[chunk->RecordCount].Extension[0] = 0;
-        }
-        // all data has been written to the new record. make it visible.
-        chunk->RecordCount++;
-        total_files++;
-    } 
-    while (FindNextFile(find_handle, &fd));
-
-    // finished searching; clean up and return.
-    FindClose(find_handle); find_handle = INVALID_HANDLE_VALUE;
-    return chunk;
 }
 
 /// @summary Search a native filesystem directory (and possibly its subdirectories) for files matching a specific criteria.
@@ -8682,5 +8756,4 @@ OsSubmitIoRequest
     }
     return true;
 }
-
 
