@@ -1402,7 +1402,7 @@ public_function size_t               OsNativePathAppend(WCHAR *buf, size_t buf_b
 public_function size_t               OsNativePathChangeExtension(WCHAR *buf, size_t buf_bytes, WCHAR **buf_end, size_t &bytes_needed, WCHAR const *new_ext);
 public_function size_t               OsNativePathAppendExtension(WCHAR *buf, size_t buf_bytes, WCHAR **buf_end, size_t &bytes_needed, WCHAR const *new_ext);
 public_function int                  OsNativePathParse(WCHAR *buf, WCHAR *buf_end, OS_PATH_PARTS *parts);
-public_function size_t               OsPhysicalSectorSize(HANDLE file);
+public_function size_t               OsPhysicalSectorSize(HANDLE device);
 public_function void                 OsInitFileSystemInfoChunkAllocator(OS_FSIC_ALLOCATOR *alloc);
 public_function OS_FILE_INFO_CHUNK*  OsNewFileInfoChunk(OS_FSIC_ALLOCATOR *alloc);
 public_function void                 OsFreeFileInfoChunkList(OS_FSIC_ALLOCATOR *alloc, OS_FILE_INFO_CHUNK *chunk);
