@@ -160,12 +160,12 @@
 #endif
 
 /// @summary Helper macro used by OsVulkanLoaderResolveIcdFunctions to resolve a Vulkan ICD entry point using GetProcAddress.
-/// @param vkloader The OS_VULKAN_LOADER maintaining the function pointer to the entry point.
+/// @param vkruntime The OS_VULKAN_RUNTIME_DISPATCH maintaining the function pointer to the entry point.
 /// @param fname The entry point to resolve.
 #ifndef OS_LAYER_RESOLVE_VULKAN_ICD_FUNCTION
-#define OS_LAYER_RESOLVE_VULKAN_ICD_FUNCTION(vkloader, fname) \
+#define OS_LAYER_RESOLVE_VULKAN_ICD_FUNCTION(vkruntime, fname) \
         do {                                                                   \
-            if (((vkloader)->fname = (PFN_##fname) GetProcAddress((vkloader)->LoaderHandle, #fname)) == NULL) { \
+            if (((vkruntime)->fname = (PFN_##fname) GetProcAddress((vkruntime)->LoaderHandle, #fname)) == NULL) { \
                 OsLayerError("ERROR: %S(%u): Unable to resolve Vulkan ICD entry point \"%S\".\n" , __FUNCTION__, GetCurrentThreadId(), #fname); \
                 return VK_ERROR_INCOMPATIBLE_DRIVER;                           \
             }                                                                  \
@@ -183,12 +183,12 @@
 #endif
 
 /// @summary Helper macro used by OsVulkanLoaderResolveGlobalFunctions to resolve a global-level function.
-/// @param vkloader The OS_VULKAN_LOADER maintaining the function pointer to the entry point.
+/// @param vkruntime The OS_VULKAN_RUNTIME_DISPATCH maintaining the function pointer to the entry point.
 /// @param fname The entry point to resolve.
 #ifndef OS_LAYER_RESOLVE_VULKAN_GLOBAL_FUNCTION
-    #define OS_LAYER_RESOLVE_VULKAN_GLOBAL_FUNCTION(vkloader, fname)           \
+    #define OS_LAYER_RESOLVE_VULKAN_GLOBAL_FUNCTION(vkruntime, fname) \
         do {                                                                   \
-            if (((vkloader)->fname = (PFN_##fname) (vkloader)->vkGetInstanceProcAddr(NULL, #fname)) == NULL) { \
+            if (((vkruntime)->fname = (PFN_##fname) (vkruntime)->vkGetInstanceProcAddr(NULL, #fname)) == NULL) { \
                 OsLayerError("ERROR: %S(%u): Unable to resolve Vulkan global entry point \"%S\".\n", __FUNCTION__, GetCurrentThreadId(), #fname); \
                 return VK_ERROR_INCOMPATIBLE_DRIVER;                           \
             }                                                                  \
@@ -206,13 +206,13 @@
 #endif
 
 /// @summary Helper macro used by OsVulkanLoaderResolveInstanceFunctions to resolve an instance-level function.
-/// @param vkinstance The OS_VULKAN_INSTANCE maintaining the function pointer to the entry point.
-/// @param vkloader The OS_VULKAN_LOADER maintaining the function pointer to the vkGetInstanceProcAddr entry point.
+/// @param vkinstance The OS_VULKAN_INSTANCE_DISPATCH maintaining the function pointer to the entry point.
+/// @param vkruntime The OS_VULKAN_RUNTIME_DISPATCH maintaining the function pointer to the vkGetInstanceProcAddr entry point.
 /// @param fname The entry point to resolve.
 #ifndef OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION
-    #define OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(vkinstance, vkloader, fname) \
+    #define OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(vkinstance, vkruntime, fname) \
         do {                                                                   \
-            if (((vkinstance)->fname = (PFN_##fname)(vkloader)->vkGetInstanceProcAddr((vkinstance)->InstanceHandle, #fname)) == NULL) { \
+            if (((vkinstance)->fname = (PFN_##fname)(vkruntime)->vkGetInstanceProcAddr((vkinstance)->InstanceHandle, #fname)) == NULL) { \
                 OsLayerError("ERROR: %S(%u): Unable to resolve Vuklan instance entry point \"%S\".\n", __FUNCTION__, GetCurrentThreadId(), #fname); \
                 return VK_ERROR_INCOMPATIBLE_DRIVER;                           \
             }                                                                  \
@@ -230,8 +230,9 @@
 #endif
 
 /// @summary Helper macro used by VkLoaderResolveDeviceFunctions to resolve a device-level function.
-/// @param fn The Vulkan API function to resolve.
-/// @param device_obj The VK_DEVICE maintaining the function pointer to set.
+/// @param vkdevice The OS_VULKAN_DEVICE_DISPATCH maintaining the function pointer to set.
+/// @param vkinstance The OS_VULKAN_INSTANCE_DISPATCH maintaining the function pointer to the vkGetDeviceProcAddr entry point.
+/// @param fname The entry point to resolve.
 #ifndef OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION
     #define OS_LAYER_RESOLVE_VULKAN_DEVICE_FUNCTION(vkdevice, vkinstance, fname) \
         do {                                                                   \
@@ -292,8 +293,16 @@ struct OS_THREAD_POOL_INIT;
 
 struct OS_FILE;
 struct OS_PATH_PARTS;
-struct OS_MOUNTPOINT;
 struct OS_FILE_REGION;
+
+struct OS_IO_OPERATION;
+struct OS_IO_OPERATION_RESULT;
+struct OS_IO_REQUEST;
+struct OS_IO_RESULT;
+struct OS_IO_REQUEST_POOL;
+struct OS_IO_THREAD_INIT;
+struct OS_IO_THREAD_POOL;
+struct OS_IO_THREAD_POOL_INIT;
 
 struct OS_INPUT_SYSTEM;
 struct OS_INPUT_EVENTS;
@@ -304,9 +313,10 @@ struct OS_KEYBOARD_EVENTS;
 struct OS_TASK_PROFILER;
 struct OS_TASK_PROFILER_SPAN;
 
-struct OS_VULKAN_DEVICE;
-struct OS_VULKAN_RUNTIME;
-struct OS_VULKAN_INSTANCE;
+struct OS_VULKAN_ICD_INFO;
+struct OS_VULKAN_DEVICE_DISPATCH;
+struct OS_VULKAN_RUNTIME_DISPATCH;
+struct OS_VULKAN_INSTANCE_DISPATCH;
 struct OS_VULKAN_RUNTIME_PROPERTIES;
 struct OS_VULKAN_PHYSICAL_DEVICE_LIST;
 
@@ -427,59 +437,6 @@ struct OS_THREAD_POOL_INIT
     uint32_t            NUMAGroup;                   /// The zero-based index of the NUMA processor group on which the worker threads will be scheduled. Set to 0.
 };
 
-#pragma pack(push, 1)
-/// @summary Defines the fields of the base TAR header as they exist in the file.
-struct OS_TAR_HEADER_ENCODED
-{
-    char                FileName[100];               /// The filename, with no path information.
-    char                FileMode[8];                 /// The octal file mode value.
-    char                OwnerUID[8];                 /// The octal owner user ID value.
-    char                GroupUID[8];                 /// The octal group ID value.
-    char                FileSize[12];                /// The octal file size, in bytes.
-    char                FileTime[12];                /// The octal UNIX file time of last modification.
-    char                Checksum[8];                 /// The octal checksum value of the file.
-    char                FileType;                    /// One of the values of the OS_VFS_TAR_ENTRY_TYPE enumeration.
-    char                LinkName[100];               /// The filename of the linked file, with no path information.
-    char                ExtraPad[255];               /// Additional unused data, or, possibly, a OS_USTAR_HEADER_ENCODED.
-};
-#pragma pack(pop)
-
-#pragma pack(push, 1)
-/// @summary Defines the fields of the extended USTAR header as they exist in the file.
-struct OS_USTAR_HEADER_ENCODED
-{
-    char                MagicStr[6];                 /// The string "ustar\0".
-    char                Version [2];                 /// The version number, terminated with a space.
-    char                OwnerStr[32];                /// The ASCII name of the file owner.
-    char                GroupStr[32];                /// The ASCII name of the file group.
-    char                DevMajor[8];                 /// The octal device major number.
-    char                DevMinor[8];                 /// The octal device minor number.
-    char                FileBase[155];               /// The prefix value for the FileName, with no trailing slash.
-};
-#pragma pack(pop)
-
-/// @summary Defines the set of information maintained at runtime for each entry in a tarball.
-struct OS_TAR_ENTRY
-{
-    int64_t             FileSize;                    /// The size of the file, in bytes.
-    uint64_t            FileTime;                    /// The last write time of the file, as a UNIX timestamp.
-    int64_t             DataOffset;                  /// The absolute byte offset to the start of the file data.
-    uint32_t            Checksum;                    /// The checksum of the file data.
-    uint32_t            Reserved;                    /// Reserved for future use. Set to 0.
-    char                FileType;                    /// One of the values of the OS_TAR_ENTRY_TYPE enumeration.
-    char                FullPath[257];               /// The full path of the file, "<FileBase>/<FileName>\0".
-    char                LinkName[101];               /// The filename of the linked file, zero-terminated.
-    char                Padding;                     /// One extra byte of padding. Set to 0.
-};
-
-/// @summary Defines the metadata associated with a tarball.
-struct OS_TARBALL
-{
-    size_t              EntryCount;                  /// The number of regular file entries defined in the tarball.
-    uint32_t           *EntryHash;                   /// An array where each item [Entry] specifies the hash of the entry filename.
-    OS_TAR_ENTRY       *EntryInfo;                   /// An array where each item [Entry] specifies information about a single file entry.
-};
-
 /// @summary Define the information maintained in-memory for a file known to the file system.
 struct OS_FILE_INFO
 {   static size_t const MAX_STRING_BYTES = 16;       /// The maximum number of bytes of string data (including the zero terminator) stored for filename and extension data.
@@ -509,33 +466,6 @@ struct OS_FSIC_ALLOCATOR
     OS_FILE_INFO_CHUNK *FreeList;                    /// The first chunk in the free list, or NULL if the free list is empty.
 };
 
-/// @summary Define the signature for the callback invoked to synchronously open a file for access. The information necessary to access the file is written to @a file.
-/// @param mount The mount point performing the file open operation.
-/// @param path The zero-terminated UTF-8 path of the file to open, relative to the mount point root.
-/// @param usage One of OS_FILE_USAGE specifying the intended use of the file by the application.
-/// @param hints One or more of OS_FILE_USAGE_HINTS specifying additional desired behaviors.
-/// @param file If the call returns OS_IO_RESULT_SUCCESS, this structure should be populated with file data.
-/// @return One of OS_IO_RESULT indicating the result of the operation.
-typedef int           (*OS_OPEN_FILE)(OS_MOUNTPOINT *mount, char const *path, int usage, uint32_t hints, OS_FILE *file);
-
-/// @summary Define the signature for the callback invoked to synchronously write an entire file to disk. If the file exists, its contents are overwritten; otherwise, a new file is created.
-/// @param mount The mount point performing the file save operation.
-/// @param path The zero-terminated UTF-8 path of the file to write, relative to the mount point root.
-/// @param data The buffer containing the data to write to the file.
-/// @param file_size The number of bytes to read from the data buffer and write to the file.
-/// @return One of OS_IO_RESULT indicating the result of the operation.
-typedef int           (*OS_SAVE_FILE)(OS_MOUNTPOINT *mount, char const *path, void const *data, int64_t const file_size);
-
-/// @summary Define the signature for the callback invoked to determine whether a given mount point supports a particular type of file access.
-/// @param mount The mount point to query.
-/// @param usage One of OS_FILE_USAGE specifying the intended use of the file by the application.
-/// @return OS_IO_RESULT_SUCCESS if the usage is supported, or OS_IO_RESULT_NOT_SUPPORTED.
-typedef int           (*OS_MOUNT_SUPPORT)(OS_MOUNTPOINT *mount, int usage);
-
-/// @summary Define the signature for the callback invoked when a mount point is being removed.
-/// @param mount The mount point being unmounted.
-typedef void          (*OS_UNMOUNT)(OS_MOUNTPOINT *mount);
-
 /// @summary Defines the data associated with an open file. This information is populated by the mount point.
 struct OS_FILE
 {
@@ -560,6 +490,140 @@ struct OS_FILE_REGION
     int64_t             RegionSize;                  /// The number of bytes mapped, starting at UserBase.
 };
 
+/// @summary Define the data used to execute a low-level I/O operation. Not all data is used by all operations.
+struct OS_IO_OPERATION
+{
+    WCHAR              *FilePath;                    /// Pointer to a zero-terminated string specifying the file path. Used for OPEN operations only.
+    HANDLE              FileHandle;                  /// The file handle specifying the target for the operation. Used for READ, WRITE, FLUSH and CLOSE operations.
+    HANDLE              CompletionPort;              /// The I/O completion port to associate with the file, or NULL. Used for OPEN operations only.
+    OVERLAPPED         *Overlapped;                  /// The OVERLAPPED object to use for asynchronous I/O, or NULL to use synchronous I/O. Used for READ and WRITE operations.
+    void               *DataBuffer;                  /// The source buffer specifying data to write, or destination buffer for data being read. Used for READ and WRITE operations.
+    int64_t             FileOffset;                  /// The absolute byte offset within the file at which to perform the I/O operation. Used for asynchronous READ and WRITE only.
+    int64_t             PreallocationSize;           /// The desired size of the file, if OS_IO_HINT_FLAG_PREALLOCATE is specified. Used for OPEN operations only.
+    uint32_t            TransferAmount;              /// The number of bytes to transfer. Used for READ and WRITE operations.
+    uint32_t            IoHintFlags;                 /// One or more of OS_IO_HINT_FLAGS. Used for OPEN operations only.
+};
+
+/// @summary Define the data resulting from the execution of a low-level I/O operation.
+struct OS_IO_OPERATION_RESULT
+{
+    HANDLE              FileHandle;                  /// The file handle specifying the target for the operaiton. For OPEN operations, this is the handle of the opened file.
+    DWORD               ResultCode;                  /// The operating system result code.
+    uint32_t            TransferAmount;              /// The number of bytes transferred.
+    bool                CompletedSynchronously;      /// Set to true if the I/O operation completed synchronously, or false if the I/O operation completed asynchronously.
+    bool                WasSuccessful;               /// Set to true if the I/O operation completed successfully, or false if the I/O operation failed.
+};
+
+/// @summary Define execution environment data passed back to an I/O completion callback.
+/// This data can be used to allocate and initialize a chained request, or submit a new request.
+struct OS_IO_REQUEST_CONTEXT
+{
+    OS_IO_REQUEST_POOL *RequestPool;                 /// The I/O request pool from which the I/O request was allocated.
+    OS_IO_THREAD_POOL  *ThreadPool;                  /// The thread pool that executed the I/O request.
+    uintptr_t           PoolContext;                 /// Opaque application-defined data associated with the I/O thread pool.
+};
+
+/// @summary Data specifying profiling data for an I/O operation.
+struct OS_IO_PROFILE
+{
+    uint64_t            QueueDelay;                  /// The time, in nanoseconds, between when the I/O request was submitted and when it started executing.
+    uint64_t            ExecutionTime;               /// The time, in nanoseconds, that the I/O request spent executing.
+    uint32_t            OsThreadId;                  /// The operating system identifier of the worker thread that executed the request.
+};
+
+/// @summary Define the signature for the function invoked when an I/O operation has completed. These callbacks run on the I/O thread pool thread, and should perform a minimal amount of non-blocking work.
+/// @param was_successful Set to true if the request executed successfully.
+/// @param result Data describing the result of the I/O operation that was executed.
+/// @param context Specifies the execution environment for the I/O operation.
+/// @param profile Specifies the execution timing information for the I/O operation.
+/// @return A chained I/O request to execute immediately, or NULL.
+typedef OS_IO_REQUEST* (*OS_IO_COMPLETE)(bool was_successful, OS_IO_RESULT *result, OS_IO_REQUEST_CONTEXT *context, OS_IO_PROFILE *profile);
+
+/// @summary Define the data representing an active request internally within the background I/O system.
+struct OS_IO_REQUEST
+{
+    OS_IO_REQUEST      *NextRequest;                 /// Pointer to the next node in the list, or NULL if this is the tail node.
+    OS_IO_REQUEST      *PrevRequest;                 /// Pointer to the previous node in the list, or NULL if this is the head node.
+    OS_IO_REQUEST_POOL *RequestPool;                 /// The OS_IO_REQUEST_POOL from which this request was allocated.
+    int                 RequestType;                 /// One of OS_IO_REQUEST_TYPE specifying the type of operation being performed.
+    int                 RequestState;                /// One of OS_IO_REQUEST_STATE specifying the current state of the request.
+    OVERLAPPED          Overlapped;                  /// The OVERLAPPED instance associated with the asynchronous request.
+    HANDLE              FileHandle;                  /// The file handle associated with the request.
+    WCHAR              *PathBuffer;                  /// Pointer to a caller-managed buffer specifying the path of the file to OPEN.
+    void               *DataBuffer;                  /// The caller-managed buffer from which to READ or WRITE data.
+    int64_t             DataAmount;                  /// The number of bytes to transfer to or from the caller-managed data buffer.
+    int64_t             BaseOffset;                  /// The byte offset of the start of the operation from the start of the physical file.
+    int64_t             FileOffset;                  /// The byte offset of the start of the operation from the start of the logical file.
+    uintptr_t           UserContext;                 /// Opaque data associated with the request to be passed through to the completion callback.
+    OS_IO_COMPLETE      IoComplete;                  /// The callback to invoke when the operation has completed. May be NULL.
+    uint64_t            IoSubmitTime;                /// The timestamp (in ticks) at which the I/O request was submitted.
+    uint64_t            IoLaunchTime;                /// The timestamp (in ticks) at which the I/O request was dequeued by a worker thread and began executing.
+    uint64_t            IoFinishTime;                /// The timestamp (in ticks) at which the I/O request finished executing.
+    uint32_t            IoHintFlags;                 /// A combination of one or more OS_IO_HINT_FLAGS. Generally only used for OPEN operations.
+};
+
+/// @summary Define an object managing a preallocated pool of I/O requests.
+/// The I/O request pool may be accessed concurrently by a submitting thread and a worker thread.
+struct OS_IO_REQUEST_POOL
+{
+    CRITICAL_SECTION    ListLock;                    /// The lock protecting the live and free lists.
+    OS_IO_REQUEST      *LiveRequest;                 /// Pointer to the first live request, or NULL if no requests have been allocated from the pool.
+    OS_IO_REQUEST      *FreeRequest;                 /// Pointer to the first free request, or NULL if no requests are available in the pool.
+    OS_IO_REQUEST      *NodePool;                    /// Pointer to the pool allocation.
+};
+
+/// @summary Define the data returned from a background I/O request submitted by the application.
+struct OS_IO_RESULT
+{
+    int                 RequestType;                 /// One of OS_IO_REQUEST_TYPE specifying the type of operation that completed.
+    uint32_t            ResultCode;                  /// ERROR_SUCCESS or another result code indicating whether the operation completed successfully.
+    uintptr_t           UserContext;                 /// Opaque data associated with the request by the application.
+    HANDLE              FileHandle;                  /// The handle of the file associated with the I/O request. This value may be INVALID_HANDLE_VALUE.
+    WCHAR              *PathBuffer;                  /// The path of the file associated with the I/O request. This value may be NULL.
+    void               *DataBuffer;                  /// The source or destination caller-managed buffer. This value may be NULL.
+    union
+    {
+        int64_t         FileSize;                    /// For an OPEN operation, the file size is returned in this field.
+        int64_t         DataAmount;                  /// The number of bytes read from or written to the data buffer.
+    };
+    union
+    {
+        int64_t         BaseOffset;                  /// The byte offset of the start of the operation from the start of the physical file.
+        int64_t         PhysicalSectorSize;          /// For an OPEN operation, the physical device sector size in bytes is returned in this field.
+    };
+    int64_t             FileOffset;                  /// The byte offset of the start of the operation from the start of the logical file.
+};
+
+/// @summary Define the data passed to an I/O worker thread on startup. The thread should copy the data into thread-local memory.
+struct OS_IO_THREAD_INIT
+{
+    OS_IO_THREAD_POOL  *ThreadPool;                  /// The OS_IO_THREAD_POOL to which the worker belongs.
+    HANDLE              ReadySignal;                 /// A manual-reset event to be signaled by the worker when it has successfully completed initialization and is ready-to-run.
+    HANDLE              ErrorSignal;                 /// A manual-reset event to be signaled by the worker before it terminates when it encounters a fatal error.
+    HANDLE              TerminateSignal;             /// A manual-reset event to be signaled by the application when the worker should terminate.
+    HANDLE              CompletionPort;              /// The I/O completion port to be monitored by the thread for incoming events.
+    uintptr_t           PoolContext;                 /// Opaque data specified by the application.
+};
+
+/// @summary Define the data associated with an I/O thread pool. The I/O thread pool differs from a standard worker thread pool; all threads launch immediately and have only 64KB of stack space.
+struct OS_IO_THREAD_POOL
+{
+    size_t              ActiveThreads;               /// The number of I/O worker threads in the pool.
+    unsigned int       *OSThreadIds;                 /// An array of operating system thread identifiers.
+    HANDLE             *OSThreadHandle;              /// An array of operating system thread handles.
+    HANDLE             *WorkerReady;                 /// An array of manual-reset events used by each thread to signal successful initialization.
+    HANDLE             *WorkerError;                 /// An array of manual-reset events used by each thread to signal fatal errors prior to termination.
+    HANDLE              CompletionPort;              /// The I/O completion port used to signal worker threads.
+    HANDLE              TerminateSignal;             /// A manual-reset event used to signal all worker threads to terminate.
+};
+
+/// @summary Define the data used by the application to configure an I/O thread pool.
+struct OS_IO_THREAD_POOL_INIT
+{
+    size_t              ThreadCount;                 /// The number of threads in the pool. 
+    uintptr_t           PoolContext;                 /// Opaque data associated with the pool.
+};
+
 /// @summary Define the data used to represent the various parts of a native path string.
 struct OS_PATH_PARTS
 {
@@ -572,58 +636,6 @@ struct OS_PATH_PARTS
     WCHAR              *Extension;                   /// Pointer to the first character of the extension portion of the path.
     WCHAR              *ExtensionEnd;                /// Pointer to the last character of the extension portion of the path.
     uint32_t            PathFlags;                   /// One or more of OS_PATH_FLAGS specifying attributes of the path.
-};
-
-/// @summary Define the data associated with a mountpoint, which represents a single mounted file system within the larger virtualized file system.
-/// The file system could be represented by a local directory, a remote directory, or an archive file.
-struct OS_MOUNTPOINT
-{
-    uintptr_t           Id;                          /// The application-defined mount point identifier.
-    char               *Root;                        /// The mount point name exposed to the VFS, such as "/exec".
-    size_t              RootLength;                  /// The length of the mount point name, in bytes.
-    size_t              LocalPathLength;             /// The length of the LocalPath string, in characters.
-    WCHAR              *LocalPath;                   /// The fully-resolved absolute path of the backing directory or file.
-    void               *StateData;                   /// A pointer to opaque mountpoint-specific data.
-    OS_OPEN_FILE        OpenFile;                    /// The callback used to open a file for access.
-    OS_SAVE_FILE        SaveFile;                    /// The callback used to save a file to disk.
-    OS_MOUNT_SUPPORT    SupportsUsage;               /// The callback used to determine whether the mountpoint supports a given file usage.
-    OS_UNMOUNT          Unmount;                     /// The callback used to clean up mountpoint-specific data when the mount point is removed.
-};
-
-/// @summary Defines the internal state data associated with a tarball mount point.
-struct OS_MOUNTPOINT_TAR
-{
-    HANDLE              TarFiledes;                  /// The file descriptor for the tarball. Duplicated for each opened file.
-    size_t              SectorSize;                  /// The physical disk sector size, in bytes.
-    OS_TARBALL          TarballData;                 /// The parsed entry data for all regular files.
-};
-
-/// @summary Define the data associated with a prioritized set of mount points. Items can be iterated over in priority order. Multiple mount points can be defined at the same root location, but with different priorities.
-struct OS_MOUNTPOINT_TABLE
-{
-    size_t              Count;                       /// The number of mountpoints defined in the table.
-    size_t              Capacity;                    /// The capacity of the mount point table. The capacity is fixed.
-    uintptr_t          *MountpointIds;               /// The set of application-defined unique mount point identifiers.
-    OS_MOUNTPOINT      *MountpointData;              /// The set of mount point data and callback functions.
-    uint32_t           *MountpointPriority;          /// The set of mount point priority values.
-};
-
-/// @summary Define the data associated with the virtual file system.
-struct OS_FILE_SYSTEM
-{
-    SRWLOCK             MountpointLock;              /// A reader-writer lock protecting access to the mountpoint table.
-    OS_MOUNTPOINT_TABLE MountpointTable;             /// A table of mount points stored in priority order.
-    DWORD               PageSize;                    /// The operating system page size, in bytes.
-    DWORD               AllocationGranularity;       /// The operating system allocation granularity, in bytes.
-    // ...
-};
-
-/// @summary Define the parameters used to configure the file system interface.
-struct OS_FILE_SYSTEM_INIT
-{
-    size_t              MaxMountPoints;              /// The maximum number of active mount points.
-    size_t              MaxQueuedIoOps;              /// The maximum number of queued asynchronous I/O operations.
-    size_t              MaxInFlightIoOps;            /// The maximum number of in-flight asynchronous I/O operations.
 };
 
 /// @summary Define the data associated with keyboard state.
@@ -753,8 +765,19 @@ struct OS_INPUT_SYSTEM
     OS_GAMEPAD_LIST     GamepadBuffer [2];           /// Identifier and state information for gamepad devices.
 };
 
+/// @summary Define the data associated with a Vulkan Installable Client Driver (ICD).
+struct OS_VULKAN_ICD_INFO
+{
+    WCHAR              *ManifestPath;                /// Pointer to the zero-terminated path of the ICD JSON manifest file.
+    uint8_t            *ManifestData;                /// A zero-terminated buffer containing the contents of the JSON manifest file.
+    WCHAR              *DriverPath;                  /// A zero-terminated buffer containing the path of the installable client driver library.
+    uint8_t             MajorVersion;                /// The major version of the Vulkan API supported by the ICD.
+    uint8_t             MinorVersion;                /// The minor version of the Vulkan API supported by the ICD.
+    uint8_t             PatchVersion;                /// The patch version of the Vulkan API supported by the ICD.
+};
+
 /// @summary Defines the data associated with the top-level Vulkan entry points used to load the Vulkan API.
-struct OS_VULKAN_RUNTIME
+struct OS_VULKAN_RUNTIME_DISPATCH
 {
     HMODULE                           LoaderHandle;                                  /// The module base address of the Vulkan loader or ICD.
     OS_LAYER_VULKAN_ICD_FUNCTION     (vkGetInstanceProcAddr);                        /// The vkGetInstanceProcAddr function.
@@ -775,7 +798,7 @@ struct OS_VULKAN_RUNTIME_PROPERTIES
 };
 
 /// @summary Defines the instance-level Vulkan runtime functions used to query physical device information and including any extension functions enabled by the application.
-struct OS_VULKAN_INSTANCE
+struct OS_VULKAN_INSTANCE_DISPATCH
 {
     VkInstance                        InstanceHandle;                                /// The Vulkan instance used by the application to interface with the Vulkan API.
     OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkCreateDevice);                               /// The vkCreateDevice function.
@@ -837,7 +860,7 @@ struct OS_VULKAN_PHYSICAL_DEVICE_LIST
 };
 
 /// @summary Define the device-level Vulkan runtime functions used to manage resources and submit work to the device.
-struct OS_VULKAN_DEVICE
+struct OS_VULKAN_DEVICE_DISPATCH
 {
     VkDevice                          DeviceHandle;                                  /// The Vulkan logical device handle used to interface with device-level API functions.
     VkPhysicalDevice                  PhysicalDeviceHandle;                          /// The handle of the Vulkan physical device that executes the application commands.
@@ -1039,56 +1062,24 @@ enum OS_WORKER_THREAD_WAKE_REASON    : int
     OS_WORKER_THREAD_WAKE_FOR_ERROR  = 3,            /// The thread was woken because of an error in GetQueuedCompletionStatus.
 };
 
-/// @summary Define the recognized categories of file system mount points.
-enum OS_MOUNTPOINT_TYPE              : int
+/// @summary Define the supported types of asynchronous I/O requests.
+enum OS_IO_REQUEST_TYPE              : int
 {
-    OS_MOUNTPOINT_TYPE_DIRECTORY     = 0,            /// The mount point is a directory on the filesystem.
-    OS_MOUNTPOINT_TYPE_ARCHIVE       = 1,            /// The mount point is an archive file (like a TAR.)
-    OS_MOUNTPOINT_TYPE_COUNT         = 2,            /// The number of recognized virtual file system mount point types.
+    OS_IO_REQUEST_NOOP               = 0,            /// Ignore the operation; pass through all data to the completion callback.
+    OS_IO_REQUEST_OPEN_FILE          = 1,            /// Asynchronously open a file, but do not issue any other I/O operations.
+    OS_IO_REQUEST_READ_FILE          = 2,            /// Issue an explicit asynchronous read request.
+    OS_IO_REQUEST_WRITE_FILE         = 3,            /// Issue an explicit asynchronous write request.
+    OS_IO_REQUEST_FLUSH_FILE         = 4,            /// Issue an explicit asynchronous flush request.
+    OS_IO_REQUEST_CLOSE_FILE         = 5,            /// Asynchronously close a file.
 };
 
-/// @summary Define the recognized types of file system entities.
-enum OS_FILE_ENTRY_TYPE              : int
+/// @summary Define the states that an I/O request can be in.
+enum OS_IO_REQUEST_STATE             : int
 {
-    OS_FILE_ENTRY_TYPE_UNKNOWN       = 0,            /// The entry type is not yet known or could not be determined.
-    OS_FILE_ENTRY_TYPE_FILE          = 1,            /// The entry is a regular file.
-    OS_FILE_ENTRY_TYPE_DIRECTORY     = 2,            /// The entry is a regular directory.
-    OS_FILE_ENTRY_TYPE_ALIAS         = 3,            /// The entry is an alias to another file or directory.
-    OS_FILE_ENTRY_TYPE_IGNORE        = 4,            /// The entry exists, but should be ignored.
-    OS_FILE_ENTRY_TYPE_COUNT         = 5,            /// The number of recognized virtual file system entity types.
-};
-
-/// @summary Define the recognized usage types for file I/O, which in turn define the access and sharing modes.
-enum OS_FILE_USAGE                   : int
-{
-    OS_FILE_USAGE_STREAM_IN          = 0,            /// The file will be streamed in to memory and then closed (read-only.)
-    OS_FILE_USAGE_STREAM_OUT         = 1,            /// The file will be streamed out to disk and then closed (write-only.)
-    OS_FILE_USAGE_MMAP_READ          = 2,            /// The file (or portions of the file) will be read-only using memory-mapped I/O.
-    OS_FILE_USAGE_MMAP_WRITE         = 3,            /// The file (or portions of the file) will be read+write using memory-mapped I/O.
-    OS_FILE_USAGE_MANUAL_IO          = 4,            /// The file will be opened for reading and writing using manual I/O.
-};
-
-/// @summary Define the return codes for file system I/O operations.
-enum OS_IO_RESULT                    : int
-{
-    OS_IO_RESULT_SUCCESS             = 0,            /// The I/O operation completed successfully.
-    OS_IO_RESULT_NOT_SUPPORTED       = 1,            /// The I/O system operation is not supported by the mountpoint driver.
-    OS_IO_RESULT_OSERROR             = 2,            /// The I/O operation failed due to an operating system error. Check OS_FILE::OSError.
-};
-
-/// @summary Defines the recognized types of entries in a tarball. Vendor extensions may additionally have a type 'A'-'Z'.
-enum OS_TAR_ENTRY_TYPE               : char
-{
-    OS_TAR_ENTRY_TYPE_FILE           = '0',          /// The entry represents a regular file.
-    OS_TAR_ENTRY_TYPE_HARDLINK       = '1',          /// The entry represents a hard link.
-    OS_TAR_ENTRY_TYPE_SYMLINK        = '2',          /// The entry represents a symbolic link.
-    OS_TAR_ENTRY_TYPE_CHARACTER      = '3',          /// The entry represents a character device file.
-    OS_TAR_ENTRY_TYPE_BLOCK          = '4',          /// The entry represents a block device file.
-    OS_TAR_ENTRY_TYPE_DIRECTORY      = '5',          /// The entry represents a directory.
-    OS_TAR_ENTRY_TYPE_FIFO           = '6',          /// The entry represents a named pipe file.
-    OS_TAR_ENTRY_TYPE_CONTIGUOUS     = '7',          /// The entry represents a contiguous file.
-    OS_TAR_ENTRY_TYPE_GMETA          = 'g',          /// The entry is a global extended header with metadata.
-    OS_TAR_ENTRY_TYPE_XMETA          = 'x',          /// The entry is an extended header with metadata for the next file.
+    OS_IO_REQUEST_STATE_CHAINED      = 0,            /// The I/O request has been submitted as a chained request, which executes immediately and is not queued.
+    OS_IO_REQUEST_STATE_SUBMITTED    = 1,            /// The I/O request has been submitted, but not yet launched.
+    OS_IO_REQUEST_STATE_LAUNCHED     = 2,            /// The I/O request has been picked up by an I/O thread and has begun executing.
+    OS_IO_REQUEST_STATE_COMPLETED    = 3,            /// The I/O request has been completed.
 };
 
 /// @summary Defines identifiers for special well-known directories.
@@ -1137,16 +1128,21 @@ enum OS_PATH_FLAGS                   : uint32_t
     OS_PATH_FLAG_EXTENSION           = (1 << 8),     /// The path string has a file extension component.
 };
 
-/// @summary Define flags used to optimize file accesses for a particular usage scenario.
-enum OS_FILE_USAGE_HINTS             : uint32_t
+/// @summary Define flags used to optimize asynchronous I/O operations. The usage hints are specified when the file is opened.
+enum OS_IO_HINT_FLAGS                : uint32_t
 {
-    OS_FILE_USAGE_HINT_NONE          = (0 << 0),     /// No special usage hints are specified.
-    OS_FILE_USAGE_HINT_UNBUFFERED    = (1 << 0),     /// Prefer to perform I/O that bypasses the system file cache.
-    OS_FILE_USAGE_HINT_ASYNCHRONOUS  = (1 << 1),     /// All read or write I/O operations will be performed asynchronously.
-    OS_FILE_USAGE_HINT_OVERWRITE     = (1 << 2),     /// If the file exists, the existing contents will be overwritten.
+    OS_IO_HINT_FLAGS_NONE            = (0 << 0),      /// No I/O hints are specified, use the default behavior appropriate for the I/O request type.
+    OS_IO_HINT_FLAG_READ             = (1 << 0),      /// Read operations will be issued against the file.
+    OS_IO_HINT_FLAG_WRITE            = (1 << 1),      /// Write operations will be issues against the file.
+    OS_IO_HINT_FLAG_OVERWRITE        = (1 << 2),      /// The existing file contents should be discarded.
+    OS_IO_HINT_FLAG_PREALLOCATE      = (1 << 3),      /// Preallocate the file to the size specified in the OS_IO_REQUEST::DataAmount field.
+    OS_IO_HINT_FLAG_SEQUENTIAL       = (1 << 4),      /// Optimize for sequential access when performing cached/buffered I/O.
+    OS_IO_HINT_FLAG_UNCACHED         = (1 << 5),      /// Indicate that the I/O should bypass the OS page cache, and that the source or destination buffer meets sector alignment requirements (valid for OPEN, LOAD and SAVE).
+    OS_IO_HINT_FLAG_WRITE_THROUGH    = (1 << 6),      /// Indicate that writes should be immediately flushed to disk.
+    OS_IO_HINT_FLAG_TEMPORARY        = (1 << 7),      /// Indicate that the file is temporary, and will be deleted when the file handle is closed.
 };
 
-/// @summary Define flags indicating how to interpret WIN32_POINTER_STATE::Relative.
+/// @summary Define flags indicating how to interpret OS_POINTER_STATE::Relative.
 enum OS_POINTER_FLAGS                : uint32_t
 {
     OS_POINTER_FLAGS_NONE            = (0 << 0),     /// No special flags are specified with the pointer data.
@@ -1296,10 +1292,13 @@ OS_LAYER_DEFINE_RUNTIME_FUNCTION(XInputGetCapabilities);
 //OS_LAYER_DEFINE_RUNTIME_FUNCTION(XInputGetBatteryInformation);
 
 /// @summary The module load address of the XInput DLL.
-global_variable HMODULE    XInputDll = NULL;
+global_variable HMODULE         XInputDll = NULL;
+
+/// @summary OVERLAPPED_ENTRY::lpCompletionKey is set to OS_IO_COMPLETION_KEY_SHUTDOWN to terminate the asynchronous I/O thread loop.
+global_variable ULONG_PTR const OS_IO_COMPLETION_KEY_SHUTDOWN = ~ULONG_PTR(0);
 
 /// @summary The GUID of the Win32 OS Layer task profiler provider {349CE0E9-6DF5-4C25-AC5B-C84F529BC0CE}.
-global_variable GUID const TaskProfilerGUID = { 0x349ce0e9, 0x6df5, 0x4c25, { 0xac, 0x5b, 0xc8, 0x4f, 0x52, 0x9b, 0xc0, 0xce } };
+global_variable GUID      const TaskProfilerGUID = { 0x349ce0e9, 0x6df5, 0x4c25, { 0xac, 0x5b, 0xc8, 0x4f, 0x52, 0x9b, 0xc0, 0xce } };
 
 /*////////////////////////////
 //   Forward Declarations   //
@@ -1346,9 +1345,6 @@ public_function void                 OsDestroyThreadPool(OS_THREAD_POOL *pool);
 public_function bool                 OsSignalWorkerThreads(OS_WORKER_THREAD *sender, uintptr_t signal_arg, size_t thread_count);
 public_function bool                 OsSignalWorkerThreads(OS_THREAD_POOL *pool, uintptr_t signal_arg, size_t thread_count);
 
-public_function int                  OsLoadTarball(OS_TARBALL *tar, HANDLE tarfd, DWORD result);
-public_function void                 OsUnloadTarball(OS_TARBALL *tar);
-
 public_function void                 OsResetInputSystem(OS_INPUT_SYSTEM *system);
 public_function void                 OsPushRawInput(OS_INPUT_SYSTEM *system, RAWINPUT const *input);
 public_function void                 OsPushRawInputDeviceChange(OS_INPUT_SYSTEM *system, WPARAM wparam, LPARAM lparam);
@@ -1356,17 +1352,21 @@ public_function void                 OsSimulateKeyPress(OS_INPUT_SYSTEM *system,
 public_function void                 OsSimulateKeyRelease(OS_INPUT_SYSTEM *system, HANDLE device, UINT virtual_key);
 public_function void                 OsConsumeInputEvents(OS_INPUT_EVENTS *events, OS_INPUT_SYSTEM *system, uint64_t tick_time);
 
-public_function VkResult             OsLoadVulkanRuntime(OS_VULKAN_RUNTIME *runtime);
-public_function VkResult             OsQueryVulkanRuntimeProperties(OS_VULKAN_RUNTIME_PROPERTIES *props, OS_VULKAN_RUNTIME *runtime, OS_MEMORY_ARENA *arena);
-public_function VkResult             OsCreateVulkanInstance(OS_VULKAN_INSTANCE *instance, OS_VULKAN_RUNTIME *runtime, VkInstanceCreateInfo const *create_info, VkAllocationCallbacks const *allocation_callbacks);
+public_function int                  OsEnumerateVulkanDrivers(OS_VULKAN_ICD_INFO *icd_list, size_t max_icds, size_t *icd_count);
+public_function void                 OsFreeVulkanDriverList(OS_VULKAN_ICD_INFO *icd_list, size_t icd_count);
+public_function VkResult             OsLoadVulkanIcd(OS_VULKAN_RUNTIME_DISPATCH *runtime, OS_VULKAN_ICD_INFO *icd_info);
+public_function VkResult             OsLoadVulkanDriver(OS_VULKAN_RUNTIME_DISPATCH *runtime, HMODULE icd_module);
+public_function VkResult             OsLoadVulkanRuntime(OS_VULKAN_RUNTIME_DISPATCH *runtime);
+public_function VkResult             OsQueryVulkanRuntimeProperties(OS_VULKAN_RUNTIME_PROPERTIES *props, OS_VULKAN_RUNTIME_DISPATCH *runtime, OS_MEMORY_ARENA *arena);
+public_function VkResult             OsCreateVulkanInstance(OS_VULKAN_INSTANCE_DISPATCH *instance, OS_VULKAN_RUNTIME_DISPATCH *runtime, VkInstanceCreateInfo const *create_info, VkAllocationCallbacks const *allocation_callbacks);
 public_function bool                 OsIsPrimaryDisplay(OS_VULKAN_PHYSICAL_DEVICE_LIST const *device_list, size_t display_index);
 public_function int32_t              OsDisplayRefreshRate(OS_VULKAN_PHYSICAL_DEVICE_LIST const *device_list, size_t display_index);
 public_function char const*          OsSupportsVulkanInstanceLayer(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const *layer_name, size_t *layer_index);
 public_function bool                 OsSupportsAllVulkanInstanceLayers(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const **layer_name, size_t const layer_count);
 public_function char const*          OsSupportsVulkanInstanceExtension(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const *extension_name, size_t *extension_index);
 public_function bool                 OsSupportsAllVulkanInstanceExtensions(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const **extension_names, size_t const extension_count);
-public_function VkResult             OsEnumerateVulkanPhysicalDevices(OS_VULKAN_PHYSICAL_DEVICE_LIST *device_list, OS_VULKAN_INSTANCE *instance, OS_MEMORY_ARENA *arena, HINSTANCE exe_instance);
-public_function VkResult             OsCreateVulkanLogicalDevice(OS_VULKAN_DEVICE *device, OS_VULKAN_INSTANCE *instance, VkPhysicalDevice physical_Device, VkDeviceCreateInfo const *create_info, VkAllocationCallbacks const *allocation_callbacks);
+public_function VkResult             OsEnumerateVulkanPhysicalDevices(OS_VULKAN_PHYSICAL_DEVICE_LIST *device_list, OS_VULKAN_INSTANCE_DISPATCH *instance, OS_MEMORY_ARENA *arena, HINSTANCE exe_instance);
+public_function VkResult             OsCreateVulkanLogicalDevice(OS_VULKAN_DEVICE_DISPATCH *device, OS_VULKAN_INSTANCE_DISPATCH *instance, VkPhysicalDevice physical_Device, VkDeviceCreateInfo const *create_info, VkAllocationCallbacks const *allocation_callbacks);
 
 public_function int                  OsInitializeAudio(OS_AUDIO_SYSTEM *audio_system);
 public_function int                  OsEnumerateAudioDevices(OS_AUDIO_DEVICE_LIST *device_list, OS_AUDIO_SYSTEM *audio_system, OS_MEMORY_ARENA *arena);
@@ -1398,17 +1398,12 @@ public_function OS_FILE_INFO_CHUNK*  OsNativeDirectoryFindFiles(HANDLE dir, WCHA
 public_function void                 OsCloseNativeDirectory(HANDLE dir);
 public_function int                  OsCreateNativeDirectory(WCHAR const *abspath); 
 
-public_function int                  OsCreateFilesystem(OS_FILE_SYSTEM *file_system, OS_FILE_SYSTEM_INIT const *init, OS_MEMORY_ARENA *arena);
-public_function int                  OsMountKnownPath(OS_FILE_SYSTEM *file_system, int folder_id, char const *mount_path, uint32_t priority, uintptr_t mount_id);
-public_function int                  OsMountPhysicalPath(OS_FILE_SYSTEM *file_system, char const *source_path, char const *mount_path, uint32_t priority, uintptr_t mount_id);
-public_function int                  OsMountVirtualPath(OS_FILE_SYSTEM *file_system, char const *virtual_path, char const *mount_path, uint32_t priority, uintptr_t mount_id);
-public_function void                 OsUnmount(OS_FILE_SYSTEM *file_system, uintptr_t mount_id);
-public_function void                 OsUnmountAll(OS_FILE_SYSTEM *file_system, char const *mount_path);
-public_function void                 OsCloseFile(OS_FILE *file);
-public_function int                  OsOpenFile(OS_FILE_SYSTEM *file_system, char const *path, int usage, uint32_t hints, OS_FILE *file);
-public_function int                  OsReadFile(OS_FILE *file, int64_t offset, void *buffer, size_t size, size_t &bytes_read);
-public_function int                  OsWriteFile(OS_FILE *file, int64_t offset, void const *buffer, size_t size, size_t &bytes_written);
-public_function int                  OsFlushFile(OS_FILE *file);
+public_function int                  OsCreateIoThreadPool(OS_IO_THREAD_POOL *pool, OS_IO_THREAD_POOL_INIT *init, OS_MEMORY_ARENA *arena, char const *name);
+public_function void                 OsTerminateIoThreadPool(OS_IO_THREAD_POOL *pool);
+public_function void                 OsDestroyIoThreadPool(OS_IO_THREAD_POOL *pool);
+public_function int                  OsCreateIoRequestPool(OS_IO_REQUEST_POOL *pool, OS_MEMORY_ARENA *arena, size_t pool_capacity);
+public_function OS_IO_REQUEST*       OsAllocateIoRequest(OS_IO_REQUEST_POOL *pool);
+public_function bool                 OsSubmitIoRequest(OS_IO_THREAD_POOL *pool, OS_IO_REQUEST *request);
 
 /*//////////////////////////
 //   Internal Functions   //
@@ -1520,6 +1515,23 @@ OsMakeUInt64
 )
 {
     return (((uint64_t) high32) << 32) | ((uint64_t) low32);
+}
+
+/// @summary Given two timestamp values, calculate the number of nanoseconds between them.
+/// @param start_ticks The TimestampInTicks at the beginning of the measured interval.
+/// @param end_ticks The TimestampInTicks at the end of the measured interval.
+/// @param frequency The number of ticks-per-second of the clock used to capture the timestamp values.
+/// @return The elapsed time between the timestamps, specified in nanoseconds.
+internal_function uint64_t
+OsElapsedNanoseconds
+(
+    uint64_t start_ticks, 
+    uint64_t   end_ticks, 
+    int64_t    frequency
+)
+{   // scale the tick value by the nanoseconds-per-second multiplier
+    // before scaling back down by ticks-per-second to avoid loss of precision.
+    return (1000000000ULL * (end_ticks - start_ticks)) / uint64_t(frequency);
 }
 
 /// @summary Enable or disable a process privilege.
@@ -2709,141 +2721,6 @@ OsStringSearch
     return NULL;
 }
 
-/// @summary Calculate the byte offset of the start of the next header in a tarball.
-/// @param data_offset The absolute byte offset of the start of the data.
-/// @param data_size The un-padded size of the file data, in bytes.
-/// @return The byte offset of the start of the next header record.
-internal_function int64_t 
-OsTarNextHeaderOffset
-(
-    int64_t data_offset, 
-    int64_t data_size
-)
-{   // assuming a block size of 512 bytes, which is typical.
-    // round the data size up to the nearest even block multiple as
-    // the data blocks are padded up to the block size with zero bytes.
-    return data_offset + (((data_size + 511) / 512) * 512);
-}
-
-/// @summary Copy a string value until a zero-byte is encountered.
-/// @param dst The start of the destination buffer.
-/// @param src The start of the source buffer.
-/// @param dst_offset The offset into the destination buffer at which to begin writing, in bytes.
-/// @param max The maximum number of bytes to copy from the source to the destination.
-/// @return The input dst_offset, plus the number of bytes copied from src to dst minus one.
-internal_function size_t
-OsTarStrcpy
-(
-    char         *dst, 
-    char const   *src, 
-    size_t dst_offset, 
-    size_t        max
-)
-{
-    size_t s = 0;
-    size_t d = dst_offset;
-
-    do {
-        dst[d++] = src[s];
-    } while (src[s] != 0 && s++ < max);
-
-    return dst_offset + s;
-}
-
-/// @summary Parses a zero-padded octal string and converts it to a decimal value.
-/// @param str The buffer containing the value to parse.
-/// @param length The maximum number of bytes to read from the input string.
-/// @return The decoded decimal integer value.
-template <typename int_type>
-internal_function  int_type 
-OsTarOctalToDecimal
-(
-    char const *str, 
-    size_t   length
-)
-{
-    int_type    n = 0;
-    for (size_t i = 0; i < length; ++i)
-    {
-        if (str[i] >= '0' && str[i] <= '8')
-        {
-            n *= 8;
-            n += str[i] - 48;
-        }
-        else break;
-    }
-    return n;
-}
-
-/// @summary Parses an encoded TAR header entry to generate the data stored by the mount point.
-/// @param dst The record to populate.
-/// @param src The raw header record as it exists on disk.
-/// @param offset The absolute byte offset of the start of the header record within the tarball.
-/// @return The absolute byte offset of the start of the next header record.
-internal_function int64_t 
-OsTarDecodeEntry
-(
-    OS_TAR_ENTRY                *dst, 
-    OS_TAR_HEADER_ENCODED const *src, 
-    int64_t                   offset
-)
-{   // decode the base header fields.
-    dst->FileSize    = OsTarOctalToDecimal< int64_t>(src->FileSize, 12);
-    dst->FileTime    = OsTarOctalToDecimal<uint64_t>(src->FileTime, 12);
-    dst->DataOffset  = offset + sizeof(OS_TAR_HEADER_ENCODED);
-    dst->Checksum    = OsTarOctalToDecimal<uint32_t>(src->Checksum,  8);
-    dst->FileType    = src->FileType;
-    // check to see if a ustar extended header is present.
-    OS_USTAR_HEADER_ENCODED const *ustar = (OS_USTAR_HEADER_ENCODED const*) src->ExtraPad;
-    if (strncmp(ustar->MagicStr,  "ustar", 5) == 0)
-    {   // a ustar extended header is present, which affects the path strings.
-        size_t slen  = OsTarStrcpy(dst->FullPath, ustar->FileBase, 0, 155);
-        // a single forward slash separates the base path and filename.
-        if (slen > 0)  dst->FullPath[slen++] = '/';
-        // append the filename to the path string.
-        slen = OsTarStrcpy(dst->FullPath, src->FileName, slen, 100); dst->FullPath[slen] = 0;
-        // the link name never has the BasePath prepended; copy it over as-is.
-        memcpy(dst->LinkName, src->LinkName, 100 * sizeof(char)); dst->LinkName[100] = 0;
-    }
-    else
-    {   // no extended header is present, so copy over the file and link name.
-        memcpy(dst->FullPath, src->FileName, 100 * sizeof(char)); dst->FullPath[100] = 0;
-        memcpy(dst->LinkName, src->LinkName, 100 * sizeof(char)); dst->LinkName[100] = 0;
-    }
-    return OsTarNextHeaderOffset(dst->DataOffset, dst->FileSize);
-}
-
-/// @summary Compare two mount point roots to determine if they match.
-/// @param s1 A NULL-terminated UTF-8 string specifying the mount point identifier to match, with trailing slash '/'.
-/// @param s2 A NULL-terminated UTF-8 string specifying the mount point identifier to check, with trailing slash '/'.
-/// @return true if the mount point identifiers match.
-internal_function bool
-OsMountPointMatchExact
-(
-    char const *s1, 
-    char const *s2
-)
-{   // use strcasecmp on Linux.
-    return _stricmp(s1, s2) == 0;
-}
-
-/// @summary Determine whether a path references an entry under a given mount point.
-/// @param mount A NULL-terminated UTF-8 string specifying the mount point root to match, with trailing slash '/'.
-/// @param path A NULL-terminated UTF-8 string specifying the path to check.
-/// @param len The number of bytes to compare from mount.
-/// @return true if the path is under the mount point.
-internal_function bool
-OsMountPointMatchStart
-(
-    char   const *mount, 
-    char   const  *path, 
-    size_t          len
-)
-{   // use strncasecmp on Linux.
-    if (len == 0) len = strlen(mount);
-    return _strnicmp(mount, path, len - 1) == 0;
-}
-
 /// @summary Helper function to convert a UTF-8 encoded string to the system native WCHAR. Free the returned buffer using the standard C library free() call.
 /// @param str The NULL-terminated UTF-8 string to convert.
 /// @param size_chars On return, stores the length of the string in characters, not including NULL-terminator.
@@ -2962,1063 +2839,694 @@ OsResolvePathForHandleMalloc
     return pathbuf;
 }
 
-/// @summary Allocate storage for a mountpoint table.
-/// @param table The OS_MOUNTPOINT_TABLE to initialize.
-/// @param capcity The table capacity, in mount points.
-/// @return Zero if the table is successfully initialized, or -1 if memory allocation failed.
-internal_function int
-OsCreateMountpointTable
+/// @summary Execute a low-level file open operation.
+/// @param args Information about the file to open. The FilePath and IoHintFlags fields must be set.
+/// @param result Information returned from the operation specifying the file handle and whether the operation completed successfully.
+/// @param file_info If this argument is not NULL, information about the file is stored here on return.
+/// @param sector_size If this argument is not NULL, the physical device sector size is stored here on return.
+internal_function void
+OsIoExecuteOpen
 (
-    OS_MOUNTPOINT_TABLE *table, 
-    size_t            capacity
-)
-{   // initialize all fields of the mount table instance.
-    ZeroMemory(table, sizeof(OS_MOUNTPOINT_TABLE));
-
-    // allocate storage for the specified number of items.
-    table->Count               = 0;
-    table->Capacity            = capacity;
-    table->MountpointIds       =(uintptr_t    *) malloc(capacity * sizeof(uintptr_t));
-    table->MountpointData      =(OS_MOUNTPOINT*) malloc(capacity * sizeof(OS_MOUNTPOINT));
-    table->MountpointPriority  =(uint32_t     *) malloc(capacity * sizeof(uint32_t));
-    if (table->MountpointIds  == NULL || table->MountpointData == NULL || table->MountpointPriority == NULL)
-    {
-        if (table->MountpointPriority != NULL) free(table->MountpointPriority);
-        if (table->MountpointData != NULL) free(table->MountpointData);
-        if (table->MountpointIds != NULL) free(table->MountpointIds);
-        ZeroMemory(table, sizeof(OS_MOUNTPOINT_TABLE));
-        return -1;
-    }
-    return 0;
-}
-
-/// @summary Update a mountpoint table with a new mount point.
-/// @param table The OS_MOUNTPOINT_TABLE to update.
-/// @param id The application-defined identifier of the new mount point.
-/// @param priority The priority value of the mount point being added.
-/// @return A pointer to the mount point data to populate, or NULL if the table is full.
-internal_function OS_MOUNTPOINT*
-OsAddMountpoint
-(
-    OS_MOUNTPOINT_TABLE *table, 
-    uintptr_t               id, 
-    uint32_t          priority
+    OS_IO_OPERATION          &args, 
+    OS_IO_OPERATION_RESULT &result, 
+    FILE_STANDARD_INFO  *file_info, 
+    size_t            *sector_size
 )
 {
-    intptr_t ins_idx  = 0;
-    intptr_t min_idx  = 0;
-    intptr_t max_idx  = 0;
-    intptr_t end_idx  =(intptr_t) table->Count;
+    HANDLE    fd = INVALID_HANDLE_VALUE;
+    DWORD access = 0; // dwDesiredAccess
+    DWORD share  = 0; // dwShareMode
+    DWORD create = 0; // dwCreationDisposition
+    DWORD flags  = 0; // dwFlagsAndAttributes
 
-    if (table->Count == table->Capacity)
-    {   // grow storage by a fixed-size amount.
-        size_t     new_capacity = table->Capacity + 32;
-        uintptr_t      *id_list =(uintptr_t    *) realloc(table->MountpointIds     , new_capacity * sizeof(uintptr_t));
-        OS_MOUNTPOINT *rec_list =(OS_MOUNTPOINT*) realloc(table->MountpointData    , new_capacity * sizeof(OS_MOUNTPOINT));
-        uint32_t      *pri_list =(uint32_t     *) realloc(table->MountpointPriority, new_capacity * sizeof(uint32_t));
-        if (id_list  != NULL) table->MountpointIds      = id_list;
-        if (rec_list != NULL) table->MountpointData     = rec_list;
-        if (pri_list != NULL) table->MountpointPriority = pri_list;
-        if (pri_list != NULL || rec_list != NULL || id_list != NULL)
-        {   // all storage arrays were successfully grown. capacity was increased.
-            table->Capacity = new_capacity;
+    if (args.IoHintFlags & OS_IO_HINT_FLAG_OVERWRITE)
+    {   // this implies write access.
+        args.IoHintFlags |= OS_IO_HINT_FLAG_WRITE;
+    }
+    if (args.IoHintFlags & OS_IO_HINT_FLAG_READ)
+    {
+        access |= GENERIC_READ;
+        share   = FILE_SHARE_READ;
+        create  = OPEN_EXISTING;
+        flags   = FILE_FLAG_OVERLAPPED;
+    }
+    if (args.IoHintFlags & OS_IO_HINT_FLAG_WRITE)
+    {
+        access |= GENERIC_WRITE;
+        flags   = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED;
+        if (args.IoHintFlags & OS_IO_HINT_FLAG_OVERWRITE)
+        {   // opening the file will always succeed.
+            create = CREATE_ALWAYS;
         }
         else
-        {   // unable to allocate storage for one or more arrays. capacity cannot be increased.
-            return NULL;
+        {   // opening the file will always succeed, but existing contents are preserved.
+            create = OPEN_ALWAYS;
         }
-    }
-
-    // perform a binary search to determine where the new item should be inserted.
-    while (min_idx <= max_idx)
-    {   // expect that many items will have the same priority value.
-        intptr_t mid  =(min_idx + max_idx) / 2;
-        uint32_t pri  = table->MountpointPriority[mid];
-        if (priority == pri)
-        {   // find the end of this run so that the new item appears last.
-            ins_idx   = mid;
-            while (priority == table->MountpointPriority[ins_idx])
-            {
-                ins_idx++;
-            }
-            break;
-        }
-        else if (priority > pri)
-        {   // continue searching the lower half of the range.
-            max_idx = mid - 1;
+        if (args.IoHintFlags & OS_IO_HINT_FLAG_TEMPORARY)
+        {   // temporary files are deleted on close, and the cache manager will try to prevent writes to disk.
+            flags |= FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE;
+            share |= FILE_SHARE_DELETE;
         }
         else
-        {   // continue searching the upper half of the range.
-            min_idx = mid + 1;
+        {   // standard persistent file, data will eventually end up on disk.
+            flags |= FILE_ATTRIBUTE_NORMAL;
         }
     }
-    // insert the new item into the mount point table at the designated location.
-    if (ins_idx != end_idx)
-    {   // shift the other list items down by one.
-        intptr_t dst = end_idx;
-        intptr_t src = end_idx - 1;
-        do {
-            table->MountpointIds     [dst] = table->MountpointIds     [src];
-            table->MountpointData    [dst] = table->MountpointData    [src];
-            table->MountpointPriority[dst] = table->MountpointPriority[src];
-            dst  = src--;
-        } while (src >= ins_idx);
-        // insert the new item into the list.
-        table->MountpointIds[ins_idx] = id;
-        table->MountpointPriority[ins_idx] = priority;
-        table->Count++;
+    if (args.IoHintFlags & OS_IO_HINT_FLAG_SEQUENTIAL)
+    {   // tell the cache manager to optimize for sequential access.
+        flags |= FILE_FLAG_SEQUENTIAL_SCAN;
     }
     else
-    {   // insert the item at the end of the list.
-        ins_idx = end_idx++;
-        table->MountpointIds[ins_idx] = id;
-        table->MountpointPriority[ins_idx] = priority;
-        table->Count++;
+    {   // assume the file will be accessed randomly.
+        flags |= FILE_FLAG_RANDOM_ACCESS;
     }
-    return &table->MountpointData[ins_idx];
+    if (args.IoHintFlags & OS_IO_HINT_FLAG_UNCACHED)
+    {   // use unbuffered I/O, reads must be performed in sector size multiples to 
+        // a buffer whose address is also a multiple of the physical disk sector size.
+        flags |= FILE_FLAG_NO_BUFFERING;
+    }
+    if (args.IoHintFlags & OS_IO_HINT_FLAG_WRITE_THROUGH)
+    {   // writes are immediately flushed to disk, if possible.
+        flags |= FILE_FLAG_WRITE_THROUGH;
+    }
+    if ((fd = CreateFile(args.FilePath, access, share, NULL, create, flags, NULL)) == INVALID_HANDLE_VALUE)
+    {
+        OsLayerError("ERROR: %S(%u): Failed to open file \"%s\" (%08X).\n", __FUNCTION__, GetCurrentThreadId(), args.FilePath, GetLastError());
+        result.FileHandle = INVALID_HANDLE_VALUE;
+        result.ResultCode = GetLastError();
+        result.TransferAmount = 0;
+        result.CompletedSynchronously = true;
+        result.WasSuccessful = false;
+        return;
+    }
+    if (args.CompletionPort != NULL && CreateIoCompletionPort(fd, args.CompletionPort, 0, 0) != args.CompletionPort)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to associate file \"%s\" with I/O completion port (%08X).\n", __FUNCTION__, GetCurrentThreadId(), args.FilePath, GetLastError());
+        result.FileHandle = INVALID_HANDLE_VALUE;
+        result.ResultCode = GetLastError();
+        result.TransferAmount = 0;
+        result.CompletedSynchronously = true;
+        result.WasSuccessful = false;
+        CloseHandle(fd);
+        return;
+    }
+    if (args.CompletionPort != NULL)
+    {   // immediately complete requests that execute synchronously; don't post completion port notification.
+        // this reduces traffic on the completion port and improves performance for asynchronous requests.
+        SetFileCompletionNotificationModes(fd, FILE_SKIP_COMPLETION_PORT_ON_SUCCESS);
+    }
+    if ((args.IoHintFlags & OS_IO_HINT_FLAG_PREALLOCATE) && args.PreallocationSize > 0)
+    {   // preallocate storage space for the file data, which can significantly improve performance when writing large files.
+        // this can be slower for large files if the file is not written sequentially.
+        LARGE_INTEGER new_ptr; new_ptr.QuadPart = args.PreallocationSize;
+        if (SetFilePointerEx(fd, new_ptr, NULL, FILE_BEGIN))
+        {   // set the end-of-file marker to the new location.
+            if (SetEndOfFile(fd))
+            {   // move the file pointer back to the start of the file.
+                new_ptr.QuadPart = 0;
+                SetFilePointerEx(fd, new_ptr, NULL, FILE_BEGIN);
+            }
+            else
+            {   // this is a non-fatal error since preallocation is an optimization.
+                OsLayerError("ERROR: %S(%u): Failed to preallocate file \"%s\" to %I64d bytes. SetEndOfFile failed (%08X).\n", __FUNCTION__, GetCurrentThreadId(), args.FilePath, args.PreallocationSize, GetLastError()); 
+            }
+        }
+        else
+        {   // this is a non-fatal error since preallocation is an optimization.
+            OsLayerError("ERROR: %S(%u): Failed to preallocate file \"%s\" to %I64d bytes. SetFilePointerEx failed (%08X).\n", __FUNCTION__, GetCurrentThreadId(), args.FilePath, args.PreallocationSize, GetLastError()); 
+        }
+    }
+    if (file_info != NULL)
+    {   // retrieve the end-of-file (logical file size) and allocation size (physical size).
+        ZeroMemory(file_info, sizeof(FILE_STANDARD_INFO));
+        if (!GetFileInformationByHandleEx(fd, FileStandardInfo, file_info, sizeof(FILE_STANDARD_INFO)))
+        {   // this is a non-fatal error since it's just an information request.
+            OsLayerError("ERROR: %S(%u): Failed to retrieve attributes for file \"%s\" (%08X).\n", __FUNCTION__, GetCurrentThreadId(), args.FilePath, GetLastError());
+        }
+    }
+    if (sector_size != NULL)
+    {   // retrieve the physical device sector size. this value is necessary for unbuffered I/O operations, 
+        // where the buffer address and transfer size must be a multiple of the physical device sector size.
+        // TODO(rlk): for this to work, it needs the DEVICE path, ie. \\.\C:, and then you have to open a handle.
+        // TODO(rlk): GetFileInformationByHandleEx could also be used, but that is Windows 8+ for the property we need.
+        // TODO(rlk): for now, just hard-code to 4096.
+        /*STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR desc;
+        STORAGE_PROPERTY_QUERY query;
+        DWORD bytes = 0;
+        ZeroMemory(&desc , sizeof(STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR));
+        ZeroMemory(&query, sizeof(STORAGE_PROPERTY_QUERY));
+        query.QueryType  = PropertyStandardQuery;
+        query.PropertyId = StorageAccessAlignmentProperty;
+        if (DeviceIoControl(fd, IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof(query), &desc, sizeof(desc), &bytes, NULL))
+        {   // save the physical device sector size.
+           *sector_size  = desc.BytesPerPhysicalSector; 
+        }
+        else
+        {   // this is a non-fatal error; return a default that will work for all common disks.
+            OsLayerError("ERROR: %S(%u): Failed to retrieve physical device sector size for file \"%s\" (%08X).\n", __FUNCTION__, GetCurrentThreadId(), args.FilePath, GetLastError());
+           *sector_size = 4096;
+        }*/
+        *sector_size = 4096;
+    }
+    result.FileHandle = fd;
+    result.ResultCode = GetLastError();
+    result.TransferAmount = 0;
+    result.CompletedSynchronously = true;
+    result.WasSuccessful = true;
 }
 
-/// @summary Remove a mountpoint at a given location within the mount point table.
-/// @param table The OS_MOUNTPOINT_TABLE to update.
-/// @param index The zero-based index of the item to remove.
+/// @summary Execute a synchronous or asynchronous read operation.
+/// @param args Information about the read operation. The FileHandle, DataBuffer and TransferAmount fields must be set.
+/// @param result Information returned from the operation specifying the number of bytes transferred and whether the operation completed successfully.
 internal_function void
-OsRemoveMountpointAt
+OsIoExecuteRead
 (
-    OS_MOUNTPOINT_TABLE *table, 
-    size_t               index
-)
-{   assert(index <= table->Count && table->Count > 0);
-    if (table->Count > 0)
-    {   
-        size_t dst = index;
-        size_t src = index + 1;
-
-        // release resources associated with the item being unmounted.
-        table->MountpointData[index].Unmount(&table->MountpointData[index]);
-        free(table->MountpointData[index].Root);
-        free(table->MountpointData[index].LocalPath);
-        ZeroMemory(&table->MountpointData[index], sizeof(OS_MOUNTPOINT));
-
-        // shift all of the other items up on top of the removed item.
-        for (size_t i = index, n = table->Count - 1; i < n; ++i, ++dst, ++src)
-        {
-            table->MountpointIds     [dst] = table->MountpointIds     [src];
-            table->MountpointData    [dst] = table->MountpointData    [src];
-            table->MountpointPriority[dst] = table->MountpointPriority[src];
-        }
-        table->Count--;
-    }
-}
-
-/// @summary Removes a mount point with a given ID from a prioritized mount list.
-/// @param table The OS_MOUNTPOINT_TABLE to update.
-/// @param id The unique application identifier of the mount point to remove.
-internal_function void
-OsRemoveMountpointId
-(
-    OS_MOUNTPOINT_TABLE *table, 
-    uintptr_t               id
-)
-{
-    for (size_t i = 0, n = table->Count; i < n; ++i)
-    {
-        if (table->MountpointIds[i] == id)
-        {
-            OsRemoveMountpointAt(table, i);
-            break;
-        }
-    }
-}
-
-/// @summary Synchronously open a file for access. The information necessary to access the file is written to @a file.
-/// @param mount The mount point performing the file open operation.
-/// @param path The zero-terminated UTF-8 path of the file to open, relative to the mount point root.
-/// @param usage One of OS_FILE_USAGE specifying the intended use of the file by the application.
-/// @param hints One or more of OS_FILE_USAGE_HINTS specifying additional desired behaviors.
-/// @param file If the call returns OS_IO_RESULT_SUCCESS, this structure should be populated with file data.
-/// @return One of OS_IO_RESULT indicating the result of the operation.
-internal_function int 
-OsOpenFile_Filesystem
-(
-    OS_MOUNTPOINT *mount, 
-    char const     *path, 
-    int            usage, 
-    uint32_t       hints, 
-    OS_FILE        *file
-)
-{
-    LARGE_INTEGER fsize = {0};
-    WCHAR      *pathbuf = OsMakeSystemPathMalloc(mount->LocalPath, mount->LocalPathLength, path);
-    HANDLE        hFile = INVALID_HANDLE_VALUE;
-    HANDLE     hFileMap = NULL;
-    DWORD        access = 0;
-    DWORD         share = 0;
-    DWORD        create = 0;
-    DWORD         flags = 0;
-    DWORD       protect = 0;
-    size_t        ssize = 0;
-
-    // initialize the fields of the file object.
-    ZeroMemory(file, sizeof(OS_FILE));
-
-    // figure out access flags, share modes, etc. based on the intended usage.
-    switch (usage)
-    {
-    case OS_FILE_USAGE_STREAM_IN:
-        {
-            access = GENERIC_READ;
-            share  = FILE_SHARE_READ;
-            create = OPEN_EXISTING;
-            flags  = FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OVERLAPPED;
-            if (hints & OS_FILE_USAGE_HINT_UNBUFFERED)
-            {
-                flags |= FILE_FLAG_NO_BUFFERING;
-            }
-        } break;
-    case OS_FILE_USAGE_STREAM_OUT:
-        {
-            access = GENERIC_READ | GENERIC_WRITE;
-            share  = FILE_SHARE_READ;
-            create = CREATE_ALWAYS;
-            flags  = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OVERLAPPED;
-            if (hints & OS_FILE_USAGE_HINT_UNBUFFERED)
-            {
-                flags |= FILE_FLAG_NO_BUFFERING;
-            }
-        } break;
-    case OS_FILE_USAGE_MMAP_READ:
-        {
-            access  = GENERIC_READ;
-            share   = FILE_SHARE_READ;
-            create  = OPEN_EXISTING;
-            flags   = FILE_FLAG_SEQUENTIAL_SCAN;
-            protect = PAGE_READONLY;
-        } break;
-    case OS_FILE_USAGE_MMAP_WRITE:
-        {
-            access  = GENERIC_READ | GENERIC_WRITE;
-            share   = 0;
-            create  = OPEN_ALWAYS;
-            flags   = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN;
-            protect = PAGE_READWRITE;
-        } break;
-    case OS_FILE_USAGE_MANUAL_IO:
-        {
-            access = GENERIC_READ | GENERIC_WRITE;
-            share  = FILE_SHARE_READ;
-            create = OPEN_ALWAYS;
-            flags  = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN;
-            if (hints & OS_FILE_USAGE_HINT_UNBUFFERED)
-            {
-                flags |= FILE_FLAG_NO_BUFFERING;
-            }
-            if (hints & OS_FILE_USAGE_HINT_ASYNCHRONOUS)
-            {
-                flags |= FILE_FLAG_OVERLAPPED;
-            }
-            if (hints & OS_FILE_USAGE_HINT_OVERWRITE)
-            {
-                create = CREATE_ALWAYS;
-            }
-        } break;
-    default:
-        return OS_IO_RESULT_NOT_SUPPORTED;
-    }
-
-    // open the file as specified by the caller.
-    if ((hFile = CreateFileW(pathbuf, access, share, NULL, create, flags, NULL)) == INVALID_HANDLE_VALUE)
-    {   // the file cannot be opened.
-        OsLayerError("ERROR: %S(%u): Unable to open file %s (user path %S) (%08X).\n", __FUNCTION__, GetCurrentThreadId(), pathbuf, path, GetLastError());
-        goto cleanup_and_fail;
-    }
-
-    // retrieve basic file attributes.
-    ssize = OsPhysicalSectorSize(hFile);
-    if (!GetFileSizeEx(hFile, &fsize))
-    {   // the file size cannot be retrieved.
-        OsLayerError("ERROR: %S(%u): Unable to retrieve size for file %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), pathbuf, GetLastError());
-        goto cleanup_and_fail;
-    }
-
-    // clean up temporary buffers.
-    free(pathbuf); pathbuf = NULL;
-
-    // if the file is being opened for memory-mapped I/O, create the mapping.
-    if (usage == OS_FILE_USAGE_MMAP_READ || usage == OS_FILE_USAGE_MMAP_WRITE)
-    {   // create the file mapping over the entire file.
-        if ((hFileMap = CreateFileMapping(hFile, NULL, protect, 0, 0, NULL)) == NULL)
-        {
-            OsLayerError("ERROR: %S(%u): Unable to create file mapping for file %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), pathbuf, GetLastError());
-            goto cleanup_and_fail;
-        }
-    }
-
-    // set output parameters and clean up.
-    file->Filedes    = hFile;
-    file->Filemap    = hFileMap;
-    file->SectorSize = ssize;
-    file->BaseOffset = 0;
-    file->BaseSize   = fsize.QuadPart;
-    file->FileSize   = fsize.QuadPart;
-    file->FileHints  = hints;
-    file->FileFlags  = 0;
-    file->OSError    = ERROR_SUCCESS;
-    file->OpenFlags  = flags;
-    return OS_IO_RESULT_SUCCESS;
-
-cleanup_and_fail:
-    if (hFileMap != NULL) CloseHandle(hFileMap);
-    if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
-    if (pathbuf != NULL) free(pathbuf);
-    ZeroMemory(file, sizeof(OS_FILE));
-    file->OpenFlags  = flags;
-    file->Filedes    = INVALID_HANDLE_VALUE;
-    file->Filemap    = NULL;
-    file->FileHints  = hints;
-    file->OSError    = GetLastError();
-    return OS_IO_RESULT_OSERROR;
-}
-
-/// @summary Synchronously write an entire file to disk. If the file exists, its contents are overwritten; otherwise, a new file is created.
-/// @param mount The mount point performing the file save operation.
-/// @param path The zero-terminated UTF-8 path of the file to write, relative to the mount point root.
-/// @param data The buffer containing the data to write to the file.
-/// @param file_size The number of bytes to read from the data buffer and write to the file.
-/// @return One of OS_IO_RESULT indicating the result of the operation.
-internal_function int
-OsSaveFile_Filesystem
-(
-    OS_MOUNTPOINT *mount, 
-    char    const  *path, 
-    void    const  *data, 
-    int64_t const   size
-)
-{
-    FILE_END_OF_FILE_INFO eof;
-    FILE_ALLOCATION_INFO  sec;
-    uint8_t const     *buffer = (uint8_t const  *) data;
-    SYSTEM_INFO       sysinfo = {0};
-    HANDLE                 fd = INVALID_HANDLE_VALUE;
-    DWORD           mem_flags = MEM_RESERVE  | MEM_COMMIT;
-    DWORD         mem_protect = PAGE_READWRITE;
-    DWORD              access = GENERIC_READ | GENERIC_WRITE;
-    DWORD               share = FILE_SHARE_READ;
-    DWORD              create = CREATE_ALWAYS;
-    DWORD               flags = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING;
-    WCHAR          *file_path = NULL;
-    size_t      file_path_len = 0;
-    WCHAR          *temp_path = NULL;
-    WCHAR           *temp_ext = NULL;
-    size_t       temp_ext_len = 0;
-    DWORD           page_size = 4096;
-    int64_t         file_size = 0;
-    uint8_t    *sector_buffer = NULL;
-    size_t       sector_count = 0;
-    int64_t      sector_bytes = 0;
-    size_t        sector_over = 0;
-    size_t        sector_size = 0;
-
-    // get the system page size, and allocate a single-page buffer. to support
-    // unbuffered I/O, the buffer must be allocated on a sector-size boundary
-    // and must also be a multiple of the physical disk sector size. allocating
-    // a virtual memory page using VirtualAlloc will satisfy these constraints.
-    GetNativeSystemInfo(&sysinfo); page_size = sysinfo.dwPageSize;
-    if ((sector_buffer = (uint8_t*) VirtualAlloc(NULL, page_size, mem_flags, mem_protect)) == NULL)
-    {   // unable to allocate the overage buffer; check GetLastError().
-        OsLayerError("ERROR: %S(%u): Unable to allocate overage buffer for file %S (%08X).\n", __FUNCTION__, GetCurrentThreadId(), path, GetLastError());
-        goto cleanup_and_fail;
-    }
-
-    // generate a temporary filename in the same location as the output file.
-    // this prevents the file from being copied when it is moved, which happens
-    // if the temp file isn't on the same volume as the output file.
-    if ((file_path = OsMakeSystemPathMalloc(mount->LocalPath, mount->LocalPathLength, path)) == NULL)
-    {   // unable to allocate the output path buffer.
-        OsLayerError("ERROR: %S(%u): Unable to allocate system path buffer for file %S.\n", __FUNCTION__, GetCurrentThreadId(), path);
-        goto cleanup_and_fail;
-    }
-    temp_ext_len   =  4; // wcslen(L".tmp")
-    file_path_len  =  wcslen(file_path);
-    if ((temp_path = (WCHAR*) malloc((file_path_len + temp_ext_len + 1) * sizeof(WCHAR))) == NULL)
-    {   // unable to allocate temporary path memory.
-        OsLayerError("ERROR: %S(%u): Unable to allocate temporary path buffer for file %s (%S).\n", __FUNCTION__, GetCurrentThreadId(), file_path, path);
-        goto cleanup_and_fail;
-    }
-    temp_ext  = temp_path + file_path_len;
-    memcpy(temp_path, file_path, file_path_len   * sizeof(WCHAR));
-    memcpy(temp_ext , L".tmp"  ,(temp_ext_len+1) * sizeof(WCHAR));
-
-    // create the temporary file, and get the physical disk sector size.
-    // pre-allocate storage for the file contents, which should improve performance.
-    if ((fd = CreateFile(temp_path, access, share, NULL, create, flags, NULL)) == INVALID_HANDLE_VALUE)
-    {   // unable to create the new file; check GetLastError().
-        OsLayerError("ERROR: %S(%u): Unable to create staging file %s for file %S (%08X).\n", __FUNCTION__, GetCurrentThreadId(), temp_path, path, GetLastError());
-        goto cleanup_and_fail;
-    }
-    sector_size = OsPhysicalSectorSize(fd);
-    file_size   = OsAlignUp(size, sector_size);
-    sec.AllocationSize.QuadPart = file_size;
-    SetFileInformationByHandle(fd, FileAllocationInfo , &sec, sizeof(sec));
-
-    // copy the data extending into the tail sector into the overage buffer.
-    sector_count = size_t (size / sector_size);
-    sector_bytes = int64_t(sector_size) * sector_count;
-    sector_over  = size_t (size - sector_bytes);
-    if (sector_over > 0)
-    {   // buffer the overlap amount. note that the page will have been zeroed.
-        memcpy(sector_buffer, &buffer[sector_bytes], sector_over);
-    }
-
-    // write the data to the file.
-    if (sector_bytes > 0)
-    {   // write the bulk of the data, if the data is > 1 sector.
-        int64_t amount = 0;
-        DWORD   nwrite = 0;
-        while  (amount < sector_bytes)
-        {
-            DWORD n = (sector_bytes - amount) < 0xFFFFFFFFU ? DWORD(sector_bytes - amount) : 0xFFFFFFFFU;
-            if (!WriteFile(fd, &buffer[amount], n, &nwrite, NULL))
-            {
-                OsLayerError("ERROR: %S(%u): Failed write to staging file %s for file %S (%08X).\n", __FUNCTION__, GetCurrentThreadId(), temp_path, path, GetLastError());
-                goto cleanup_and_fail;
-            }
-            amount += nwrite;
-        }
-    }
-    if (sector_over > 0)
-    {   // write the remaining sector-sized chunk of data.
-        DWORD n = (DWORD) sector_size;
-        DWORD w = (DWORD) 0;
-        if (!WriteFile(fd, sector_buffer, n, &w, NULL))
-        {
-            OsLayerError("ERROR: %S(%u): Failed last-sector write to staging file %s for file %S (%08X).\n", __FUNCTION__, GetCurrentThreadId(), temp_path, path, GetLastError());
-            goto cleanup_and_fail;
-        }
-    }
-
-    // set the correct end-of-file marker.
-    eof.EndOfFile.QuadPart = size;
-    SetFileInformationByHandle(fd, FileEndOfFileInfo, &eof, sizeof(eof));
-    SetFileValidData(fd, eof.EndOfFile.QuadPart);
-
-    // close the file, and move it to the destination path.
-    CloseHandle(fd); fd = INVALID_HANDLE_VALUE;
-    if (!MoveFileEx(temp_path, file_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-    {   // the file could not be moved into place; check GetLastError().
-        OsLayerError("ERROR: %S(%u): Unable to move staging file %s to %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), temp_path, file_path, GetLastError());
-        goto cleanup_and_fail;
-    }
-
-    // clean up our temporary buffers; we're done.
-    free(temp_path); temp_path =  NULL;
-    free(file_path); file_path =  NULL;
-    VirtualFree(sector_buffer, 0, MEM_RELEASE);
-    return OS_IO_RESULT_SUCCESS;
-
-cleanup_and_fail:
-    if (fd != INVALID_HANDLE_VALUE) CloseHandle(fd);
-    if (temp_path     != NULL)      DeleteFile(temp_path);
-    if (temp_path     != NULL)      free(temp_path);
-    if (file_path     != NULL)      free(file_path);
-    if (sector_buffer != NULL)      VirtualFree(sector_buffer, 0, MEM_RELEASE);
-    return OS_IO_RESULT_OSERROR;
-}
-
-/// @summary Determine whether a given mount point supports a particular type of file access.
-/// @param mount The mount point to query.
-/// @param usage One of OS_FILE_USAGE specifying the intended use of the file by the application.
-/// @return OS_IO_RESULT_SUCCESS if the usage is supported, or OS_IO_RESULT_NOT_SUPPORTED.
-internal_function int
-OsSupportsUsage_Filesystem
-(
-    OS_MOUNTPOINT *mount, 
-    int            usage
-)
-{
-    switch (usage)
-    {
-        case OS_FILE_USAGE_STREAM_IN : return OS_IO_RESULT_SUCCESS;
-        case OS_FILE_USAGE_STREAM_OUT: return OS_IO_RESULT_SUCCESS;
-        case OS_FILE_USAGE_MMAP_READ : return OS_IO_RESULT_SUCCESS;
-        case OS_FILE_USAGE_MMAP_WRITE: return OS_IO_RESULT_SUCCESS;
-        case OS_FILE_USAGE_MANUAL_IO : return OS_IO_RESULT_SUCCESS;
-        default: return OS_IO_RESULT_NOT_SUPPORTED;
-    }
-    UNREFERENCED_PARAMETER(mount);
-}
-
-/// @summary Define the signature for the callback invoked when a mount point is being removed.
-/// @param mount The mount point being unmounted.
-internal_function void
-OsUnmount_Filesystem
-(
-    OS_MOUNTPOINT *mount
-)
-{
-    UNREFERENCED_PARAMETER(mount);
-}
-
-/// @summary Initialize a filesystem-based mountpoint and allocate the private state data.
-/// @param mount The OS_VFS_MOUNT instance to initialize.
-/// @param local_path The NULL-terminated string specifying the local path that functions as the root of the mount point. This directory must exist.
-/// @return true if the mount point was initialized successfully.
-internal_function int
-OsCreateMount_Filesystem
-(
-    OS_MOUNTPOINT    *mount, 
-    WCHAR const *local_path
-)
-{
-    size_t  pathlen = 0;
-    WCHAR  *pathbuf = NULL;
-    DWORD     share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-    HANDLE     hDir = INVALID_HANDLE_VALUE;
-
-    // to get a consistent, fully-resolved path to use as the base path, 
-    // open the directory, and then retrieve the path from the resulting handle.
-    if ((hDir = CreateFile(local_path, 0, share, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL)) == INVALID_HANDLE_VALUE)
-    {
-        OsLayerError("ERROR: %S(%u): Unable to initialize filesystem mount point %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), local_path, GetLastError());
-        goto cleanup_and_fail;
-    }
-    if ((pathbuf = OsResolvePathForHandleMalloc(hDir, pathlen)) == NULL)
-    {
-        OsLayerError("ERROR: %S(%u): Unable to retrieve path for filesystem mount point %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), local_path, GetLastError());
-        goto cleanup_and_fail;
-    }
-    CloseHandle(hDir);
-
-    // everything was successful; set up the mount point fields.
-    // the Id, Root and RootLength fields are set up by the caller.
-    mount->LocalPath       = pathbuf;
-    mount->LocalPathLength = pathlen;
-    mount->StateData       = NULL;
-    mount->OpenFile        = OsOpenFile_Filesystem;
-    mount->SaveFile        = OsSaveFile_Filesystem;
-    mount->SupportsUsage   = OsSupportsUsage_Filesystem;
-    mount->Unmount         = OsUnmount_Filesystem;
-    return 0;
-
-cleanup_and_fail:
-    if (hDir != INVALID_HANDLE_VALUE) CloseHandle(hDir);
-    if (pathbuf != NULL) free(pathbuf);
-    return -1;
-}
-
-/// @summary Synchronously open a file for access. The information necessary to access the file is written to @a file.
-/// @param mount The mount point performing the file open operation.
-/// @param path The zero-terminated UTF-8 path of the file to open, relative to the mount point root.
-/// @param usage One of OS_FILE_USAGE specifying the intended use of the file by the application.
-/// @param hints One or more of OS_FILE_USAGE_HINTS specifying additional desired behaviors.
-/// @param file If the call returns OS_IO_RESULT_SUCCESS, this structure should be populated with file data.
-/// @return One of OS_IO_RESULT indicating the result of the operation.
-internal_function int 
-OsOpenFile_Tarball
-(
-    OS_MOUNTPOINT *mount, 
-    char const     *path, 
-    int            usage, 
-    uint32_t       hints, 
-    OS_FILE        *file
-)
-{
-    OS_MOUNTPOINT_TAR    *tar =(OS_MOUNTPOINT_TAR*) mount->StateData;
-    uint32_t const *hash_list = tar->TarballData.EntryHash;
-    HANDLE              hFile = INVALID_HANDLE_VALUE;
-    HANDLE           hFileMap = NULL;
-    DWORD              access = 0;
-    DWORD               share = 0;
-    DWORD              create = 0;
-    DWORD               flags = 0;
-    DWORD             protect = 0;
-    uint32_t             hash = OsHashPath(path);
-
-    // initialize the fields of the file object.
-    ZeroMemory(file, sizeof(OS_FILE));
-
-    // figure out access flags, share modes, etc. based on the intended usage.
-    switch (usage)
-    {
-    case OS_FILE_USAGE_STREAM_IN:
-        {
-            access = GENERIC_READ;
-            share  = FILE_SHARE_READ;
-            create = OPEN_EXISTING;
-            flags  = FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OVERLAPPED;
-            // alignment restrictions can't be guaranteed, so unbuffered I/O isn't supported.
-        } break;
-    case OS_FILE_USAGE_STREAM_OUT:
-        { // stream out is not supported.
-        } return OS_IO_RESULT_NOT_SUPPORTED;
-    case OS_FILE_USAGE_MMAP_READ:
-        {
-            access  = GENERIC_READ;
-            share   = FILE_SHARE_READ;
-            create  = OPEN_EXISTING;
-            flags   = FILE_FLAG_SEQUENTIAL_SCAN;
-            protect = PAGE_READONLY;
-        } break;
-    case OS_FILE_USAGE_MMAP_WRITE:
-        { // mmap-for-write is not supported.
-        } return OS_IO_RESULT_NOT_SUPPORTED;
-    case OS_FILE_USAGE_MANUAL_IO:
-        { // manual I/O is not supported (writing is not supported.)
-        } return OS_IO_RESULT_NOT_SUPPORTED;
-    default:
-        return OS_IO_RESULT_NOT_SUPPORTED;
-    }
-
-    // locate the file within the tarball by comparing hashes.
-    for (size_t i = 0, n = tar->TarballData.EntryCount; i < n; ++i)
-    {
-        if (hash_list[i] == hash)
-        {   // hashes match, confirm by comparing strings.
-            if (_stricmp(path, tar->TarballData.EntryInfo[i].FullPath) == 0)
-            {   // found an exact match for the path; duplicate the file handle(s) for the caller.
-                HANDLE p = GetCurrentProcess();
-                if (!DuplicateHandle(p, tar->TarFiledes, p, &hFile, 0, FALSE, DUPLICATE_SAME_ACCESS))
-                {
-                    OsLayerError("ERROR: %S(%u): Unable to duplicate TAR file handle for file %S (%08X).\n", __FUNCTION__, GetCurrentThreadId(), path, GetLastError());
-                    goto cleanup_and_fail;
-                }
-                if (usage == OS_FILE_USAGE_MMAP_READ)
-                {   // also create a new read-only file mapping object.
-                    if ((hFileMap = CreateFileMapping(hFile, NULL, PAGE_READONLY, 0, 0, NULL)) == NULL)
-                    {
-                        OsLayerError("ERROR: %S(%u): Unable to create file mapping object for file %S (%08X).\n", __FUNCTION__, GetCurrentThreadId(), path, GetLastError());
-                        goto cleanup_and_fail;
-                    }
-                }
-                file->Filedes    = hFile;
-                file->Filemap    = hFileMap;
-                file->SectorSize = tar->SectorSize;
-                file->BaseOffset = tar->TarballData.EntryInfo[i].DataOffset;
-                file->BaseSize   = tar->TarballData.EntryInfo[i].FileSize;
-                file->FileSize   = tar->TarballData.EntryInfo[i].FileSize;
-                file->FileHints  = hints;
-                file->FileFlags  = 0;
-                file->OSError    = ERROR_SUCCESS;
-                file->OpenFlags  = flags;
-                return OS_IO_RESULT_SUCCESS;
-            }
-        }
-    }
-
-    // else, the file was not found in the tarball.
-    // fall-through to cleanup_and_fail.
-    SetLastError(ERROR_FILE_NOT_FOUND);
-
-cleanup_and_fail:
-    if (hFileMap != NULL) CloseHandle(hFileMap);
-    if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
-    ZeroMemory(file, sizeof(OS_FILE));
-    file->OpenFlags  = flags;
-    file->Filedes    = INVALID_HANDLE_VALUE;
-    file->Filemap    = NULL;
-    file->FileHints  = hints;
-    file->OSError    = GetLastError();
-    return OS_IO_RESULT_OSERROR;
-}
-
-/// @summary Synchronously write an entire file to disk. If the file exists, its contents are overwritten; otherwise, a new file is created.
-/// @param mount The mount point performing the file save operation.
-/// @param path The zero-terminated UTF-8 path of the file to write, relative to the mount point root.
-/// @param data The buffer containing the data to write to the file.
-/// @param file_size The number of bytes to read from the data buffer and write to the file.
-/// @return One of OS_IO_RESULT indicating the result of the operation.
-internal_function int
-OsSaveFile_Tarball
-(
-    OS_MOUNTPOINT *mount, 
-    char    const  *path, 
-    void    const  *data, 
-    int64_t const   size
-)
-{
-    UNREFERENCED_PARAMETER(mount);
-    UNREFERENCED_PARAMETER(path);
-    UNREFERENCED_PARAMETER(data);
-    UNREFERENCED_PARAMETER(size);
-    return OS_IO_RESULT_NOT_SUPPORTED;
-}
-
-/// @summary Determine whether a given mount point supports a particular type of file access.
-/// @param mount The mount point to query.
-/// @param usage One of OS_FILE_USAGE specifying the intended use of the file by the application.
-/// @return OS_IO_RESULT_SUCCESS if the usage is supported, or OS_IO_RESULT_NOT_SUPPORTED.
-internal_function int
-OsSupportsUsage_Tarball
-(
-    OS_MOUNTPOINT *mount, 
-    int            usage
-)
-{
-    switch (usage)
-    {
-        case OS_FILE_USAGE_STREAM_IN : return OS_IO_RESULT_SUCCESS;
-        case OS_FILE_USAGE_STREAM_OUT: return OS_IO_RESULT_NOT_SUPPORTED;
-        case OS_FILE_USAGE_MMAP_READ : return OS_IO_RESULT_SUCCESS;
-        case OS_FILE_USAGE_MMAP_WRITE: return OS_IO_RESULT_NOT_SUPPORTED;
-        case OS_FILE_USAGE_MANUAL_IO : return OS_IO_RESULT_NOT_SUPPORTED;
-        default: return OS_IO_RESULT_NOT_SUPPORTED;
-    }
-    UNREFERENCED_PARAMETER(mount);
-}
-
-/// @summary Define the signature for the callback invoked when a mount point is being removed.
-/// @param mount The mount point being unmounted.
-internal_function void
-OsUnmount_Tarball
-(
-    OS_MOUNTPOINT *mount
-)
-{
-    if (mount != NULL)
-    {   // free the internal state data.
-        if (mount->StateData != NULL)
-        {
-            OS_MOUNTPOINT_TAR *tar = (OS_MOUNTPOINT_TAR*) mount->StateData;
-            OsUnloadTarball(&tar->TarballData);
-            CloseHandle(tar->TarFiledes);
-        }
-        free(mount->StateData);
-    }
-}
-
-/// @summary Initialize a tarball-based mountpoint and allocate the private state data.
-/// @param mount The OS_MOUNTPOINT instance to initialize.
-/// @param local_path The NULL-terminated string specifying the local path that functions as the root of the mount point. This directory must exist.
-/// @return Zero if the mount point was initialized successfully, or -1 if an error occurred.
-internal_function int
-OsCreateMount_Tarball
-(
-    OS_MOUNTPOINT    *mount, 
-    WCHAR const *local_path
-)
-{
-    OS_MOUNTPOINT_TAR *tar = NULL;
-    WCHAR         *pathbuf = NULL;
-    size_t         pathlen = 0;
-    DWORD           access = GENERIC_READ;
-    DWORD           create = OPEN_EXISTING;
-    DWORD            share = FILE_SHARE_READ;
-    HANDLE            hTar = INVALID_HANDLE_VALUE;
-    DWORD           result = ERROR_SUCCESS;
-
-    // to get a consistent, fully-resolved path to use as the base path, 
-    // open the file, and then retrieve the path from the resulting handle.
-    if ((hTar = CreateFile(local_path, access, share, NULL, create, FILE_FLAG_SEQUENTIAL_SCAN, NULL)) == INVALID_HANDLE_VALUE)
-    {
-        OsLayerError("ERROR: %S(%u): Unable to initialize tarball mount point %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), local_path, GetLastError());
-        goto cleanup_and_fail;
-    }
-    if ((pathbuf = OsResolvePathForHandleMalloc(hTar, pathlen)) == NULL)
-    {
-        OsLayerError("ERROR: %S(%u): Unable to retrieve path name for tarball mount point %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), local_path, GetLastError());
-        goto cleanup_and_fail;
-    }
-    if ((tar = (OS_MOUNTPOINT_TAR*) malloc(sizeof(OS_MOUNTPOINT_TAR))) == NULL)
-    {
-        OsLayerError("ERROR: %S(%u): Unable to allocate memory for tarball mount point %s.\n", __FUNCTION__, GetCurrentThreadId(), local_path);
-        goto cleanup_and_fail;
-    }
-    if (OsLoadTarball(&tar->TarballData, hTar, result) < 0)
-    {
-        OsLayerError("ERROR: %S(%u): Unable to parse tarball for mount point %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), local_path, result);
-        goto cleanup_and_fail;
-    }
-
-    // everything was successful; set up the mount point fields.
-    // the Id, Root and RootLength fields are set up by the caller.
-    tar->TarFiledes        = hTar;
-    tar->SectorSize        = OsPhysicalSectorSize(hTar);
-    mount->LocalPath       = pathbuf;
-    mount->LocalPathLength = pathlen;
-    mount->StateData       = tar;
-    mount->OpenFile        = OsOpenFile_Tarball;
-    mount->SaveFile        = OsSaveFile_Tarball;
-    mount->SupportsUsage   = OsSupportsUsage_Tarball;
-    mount->Unmount         = OsUnmount_Tarball;
-    return 0;
-
-cleanup_and_fail:
-    if (hTar != INVALID_HANDLE_VALUE) CloseHandle(hTar);
-    OsUnloadTarball(&tar->TarballData);
-    if (pathbuf != NULL) free(pathbuf);
-    if (tar != NULL) free(tar);
-    return -1;
-}
-
-/// @summary Performs all of the common setup when creating a new mount point.
-/// @param file_system The file system the mount point is attached to.
-/// @param source_wide The NULL-terminated source directory or file path.
-/// @param source_attr The attributes of the source path, as returned by GetFileAttributes().
-/// @param mount_path The NULL-terminated UTF-8 string specifying the mount point root exposed externally.
-/// @param priority The priority of the mount point. Higher numeric values indicate higher priority.
-/// @param mount_id An application-defined unique identifier for the mount point. This is necessary if the application later wants to remove this specific mount point, but not any of the others that are mounted with the same mount_path.
-/// @return Zero if the mount point was successfully installed, or -1 if an error occurred.
-internal_function int 
-OsSetupMountpoint
-(
-    OS_FILE_SYSTEM *file_system, 
-    WCHAR          *source_wide, 
-    DWORD           source_attr, 
-    char const      *mount_path, 
-    uint32_t           priority, 
-    uintptr_t          mount_id
+    OS_IO_OPERATION          &args,
+    OS_IO_OPERATION_RESULT &result
 )
 {   
-    OS_MOUNTPOINT *mount = NULL;
-    char     *mount_root = NULL;
-    size_t   mount_bytes = strlen(mount_path);
-    size_t  source_chars = wcslen(source_wide);
-    
-    // create the mount point record in the prioritized list.
-    AcquireSRWLockExclusive(&file_system->MountpointLock);
-    if ((mount = OsAddMountpoint(&file_system->MountpointTable, mount_id, priority)) == NULL)
-    {   // most likely, the mountpoint table is full.
-        OsLayerError("ERROR: %S(%u): Unable to insert mountpoint %S (%Iu/%Iu mountpoints used.)\n", __FUNCTION__, GetCurrentThreadId(), mount_path, file_system->MountpointTable.Count, file_system->MountpointTable.Capacity);
-        goto cleanup_and_fail;
+    DWORD transferred = 0;
+    // the request is submitted to be performed asynchronously, but can complete
+    // either synchronously or asynchronously. this routine hides that complexity.
+    if (args.Overlapped)
+    {   // populate the required fields of the OVERLAPPED strucure for an asynchronous request.
+        args.Overlapped->Internal     = 0;
+        args.Overlapped->InternalHigh = 0;
+        args.Overlapped->Offset       =(DWORD) (args.FileOffset        & 0xFFFFFFFFUL);
+        args.Overlapped->OffsetHigh   =(DWORD)((args.FileOffset >> 32) & 0xFFFFFFFFUL);
     }
-
-    // initialize the basic mount point properties:
-    mount->Id              = mount_id;
-    mount->Root            = NULL;
-    mount->RootLength      = mount_bytes;
-    mount->LocalPath       = NULL;
-    mount->LocalPathLength = 0;
-
-    // create version of mount_path with trailing slash.
-    if (mount_bytes && mount_path[mount_bytes-1] != '/')
-    {   // it's necessary to append the trailing slash.
-        if ((mount_root = (char*) malloc(mount_bytes  + 2)) == NULL)
-        {
-            OsLayerError("ERROR: %S(%u): Unable to allocate memory for mount point root path string.\n", __FUNCTION__, GetCurrentThreadId());
-            goto cleanup_and_fail;
+    else if (args.FileOffset >= 0)
+    {   // for synchronous I/O, support implicit seeking within the file.
+        LARGE_INTEGER new_ptr; new_ptr.QuadPart = args.FileOffset;
+        if (!SetFilePointerEx(args.FileHandle, new_ptr, NULL, FILE_BEGIN))
+        {   // the seek operation failed - fail the read operation.
+            result.FileHandle = args.FileHandle;
+            result.ResultCode = GetLastError();
+            result.CompletedSynchronously = true;
+            result.WasSuccessful = false;
+            return;
         }
-        memcpy(mount_root, mount_path, mount_bytes);
-        mount_root[mount_bytes+0] = '/';
-        mount_root[mount_bytes+1] =  0 ;
-        mount->Root = mount_root;
+    }
+    if (ReadFile(args.FileHandle, args.DataBuffer, args.TransferAmount, &transferred, args.Overlapped))
+    {   // the read operation completed synchronously (likely the data was in-cache.)
+        result.FileHandle = args.FileHandle;
+        result.ResultCode = GetLastError();
+        result.TransferAmount = transferred;
+        result.CompletedSynchronously = true;
+        result.WasSuccessful = true;
     }
     else
-    {   // the mount path has the trailing slash; copy the string.
-        if ((mount_root = (char*) malloc(mount_bytes  + 1)) == NULL)
+    {   // the operation could have failed, or it could be completing asynchronously.
+        // it could also be the case that end-of-file was reached.
+        switch ((result.ResultCode = GetLastError()))
         {
-            OsLayerError("ERROR: %S(%u): Unable to allocate memory for mount point root path string.\n", __FUNCTION__, GetCurrentThreadId());
-            goto cleanup_and_fail;
+            case ERROR_IO_PENDING:
+                { // the request will complete asynchronously.
+                  result.FileHandle = args.FileHandle;
+                  result.TransferAmount = 0;
+                  result.CompletedSynchronously = false;
+                  result.WasSuccessful = true;
+                } break;
+            case ERROR_HANDLE_EOF:
+                { // attempt to read past end-of-file; result.TransferAmount is set to the number of bytes available.
+                  result.FileHandle = args.FileHandle;
+                  result.TransferAmount = transferred;
+                  result.CompletedSynchronously = true;
+                  result.WasSuccessful = true;
+                } break;
+            default:
+                { // an actual error occurred.
+                  result.FileHandle = args.FileHandle;
+                  result.TransferAmount = transferred;
+                  result.CompletedSynchronously = true;
+                  result.WasSuccessful = false;
+                } break;
         }
-        memcpy(mount_root, mount_path, mount_bytes);
-        mount_root[mount_bytes] = 0;
-        mount->Root = mount_root;
     }
+}
 
-    // initialize the mount point internals based on the source type.
-    if (source_attr & FILE_ATTRIBUTE_DIRECTORY)
-    {   // set up a filesystem-based mount point.
-        if (OsCreateMount_Filesystem(mount, source_wide) < 0)
-        {   // OsVfsCreateMount_Filesystem outputs its own errors.
-            goto cleanup_and_fail;
+/// @summary Execute a synchronous or asynchronous write operation.
+/// @param args Information about the write operation. The FileHandle, DataBuffer and TransferAmount fields must be set.
+/// @param result Information returned from the operation specifying the number of bytes transferred and whether the operation completed successfully.
+internal_function void
+OsIoExecuteWrite
+(
+    OS_IO_OPERATION          &args, 
+    OS_IO_OPERATION_RESULT &result
+)
+{   
+    DWORD transferred = 0;
+    // the request is submitted to be performed asynchronously, but can complete
+    // either synchronously or asynchronously. this routine hides that complexity.
+    if (args.Overlapped)
+    {   // populate the required fields of the OVERLAPPED strucure for an asynchronous request.
+        args.Overlapped->Internal     = 0;
+        args.Overlapped->InternalHigh = 0;
+        args.Overlapped->Offset       =(DWORD) (args.FileOffset        & 0xFFFFFFFFUL);
+        args.Overlapped->OffsetHigh   =(DWORD)((args.FileOffset >> 32) & 0xFFFFFFFFUL);
+    }
+    else if (args.FileOffset >= 0)
+    {   // for synchronous I/O, support implicit seeking within the file.
+        LARGE_INTEGER new_ptr; new_ptr.QuadPart = args.FileOffset;
+        if (!SetFilePointerEx(args.FileHandle, new_ptr, NULL, FILE_BEGIN))
+        {   // the seek operation failed - fail the write operation.
+            result.FileHandle = args.FileHandle;
+            result.ResultCode = GetLastError();
+            result.CompletedSynchronously = true;
+            result.WasSuccessful = false;
+            return;
         }
-        ReleaseSRWLockExclusive(&file_system->MountpointLock);
-        return 0;
+    }
+    if (WriteFile(args.FileHandle, args.DataBuffer, args.TransferAmount, &transferred, args.Overlapped))
+    {   // the write operation completed synchronously.
+        result.FileHandle = args.FileHandle;
+        result.ResultCode = GetLastError();
+        result.TransferAmount = transferred;
+        result.CompletedSynchronously = true;
+        result.WasSuccessful = true;
     }
     else
-    {   // this is an archive file. extract the file extension.
-        WCHAR *ext = source_wide + source_chars;
-        while (ext > source_wide)
-        {   // search for the final period character.
-            if (*ext == L'.')
-            {   // ext points to the first character of the extension.
-                ext++;
+    {   // the operation could have failed, or it could be completing asynchronously.
+        // it could also be the case that end-of-file was reached.
+        switch ((result.ResultCode = GetLastError()))
+        {
+            case ERROR_IO_PENDING:
+                { // the request will complete asynchronously.
+                  result.FileHandle = args.FileHandle;
+                  result.TransferAmount = 0;
+                  result.CompletedSynchronously = false;
+                  result.WasSuccessful = true;
+                } break;
+            default:
+                { // an actual error occurred.
+                  result.FileHandle = args.FileHandle;
+                  result.TransferAmount = transferred;
+                  result.CompletedSynchronously = true;
+                  result.WasSuccessful = false;
+                } break;
+        }
+    }
+}
+
+/// @summary Execute a synchronous flush operation.
+/// @param args Information about the flush operation. The FileHandle field must be set.
+/// @param result Information returned from the operation specifying whether the operation completed successfully.
+internal_function void
+OsIoExecuteFlush
+(
+    OS_IO_OPERATION          &args, 
+    OS_IO_OPERATION_RESULT &result
+)
+{
+    if (FlushFileBuffers(args.FileHandle))
+    {
+        result.FileHandle = args.FileHandle;
+        result.ResultCode = GetLastError();
+        result.TransferAmount = 0;
+        result.CompletedSynchronously = true;
+        result.WasSuccessful = true;
+    }
+    else
+    {
+        result.FileHandle = args.FileHandle;
+        result.ResultCode = GetLastError();
+        result.TransferAmount = 0;
+        result.CompletedSynchronously = true;
+        result.WasSuccessful = false;
+    }
+}
+
+/// @summary Execute a synchronous file close operation.
+/// @param args Information about the close operation. The FileHandle field must be set.
+/// @param result Information returned from the operation specifying whether the operation completed successfully.
+internal_function void
+OsIoExecuteClose
+(
+    OS_IO_OPERATION          &args, 
+    OS_IO_OPERATION_RESULT &result
+)
+{
+    if (CloseHandle(args.FileHandle))
+    {
+        result.FileHandle = args.FileHandle;
+        result.ResultCode = GetLastError();
+        result.TransferAmount = 0;
+        result.CompletedSynchronously = true;
+        result.WasSuccessful = true;
+    }
+    else
+    {
+        result.FileHandle = args.FileHandle;
+        result.ResultCode = GetLastError();
+        result.TransferAmount = 0;
+        result.CompletedSynchronously = true;
+        result.WasSuccessful = false;
+    }
+}
+
+/// @summary Prepare an OS_IO_RESULT to pass to the I/O completion callback after executing an I/O operation.
+/// @param result The OS_IO_RESULT structure to populate.
+/// @param request The OS_IO_REQUEST describing the I/O operation.
+/// @param opres The OS_IO_OPERATION_RESULT describing the completion of the I/O operation.
+internal_function void
+OsIoPrepareResult
+(
+    OS_IO_RESULT          &result,
+    OS_IO_REQUEST        *request, 
+    OS_IO_OPERATION_RESULT &opres
+)
+{   // NOTE: this routine intentionally prepares the result to pass through as much
+    // data as possible, even if that data might not have been needed for the request.
+    result.RequestType = request->RequestType;
+    result.ResultCode  = opres.ResultCode;
+    result.UserContext = request->UserContext;
+    result.FileHandle  = opres.FileHandle;
+    result.PathBuffer  = request->PathBuffer;
+    result.DataBuffer  = request->DataBuffer;
+    result.DataAmount  = opres.TransferAmount;
+    result.BaseOffset  = request->BaseOffset;
+    result.FileOffset  = request->FileOffset;
+}
+
+/// @summary Execute an I/O request. The request may complete synchronously or asynchronously.
+/// @param request The I/O request to execute.
+/// @param completion_port The I/O completion port to associate with the request.
+/// @param opres The structure to populate with the result of the I/O operation.
+/// @param result The structure to populate with the result of the I/O request.
+internal_function void
+OsIoExecuteRequest
+(
+    OS_IO_REQUEST         *request, 
+    HANDLE         completion_port,
+    OS_IO_OPERATION_RESULT  &opres, 
+    OS_IO_RESULT           &result
+)
+{
+    switch (request->RequestType)
+    {
+        case OS_IO_REQUEST_NOOP:
+            { // there's no actual I/O operation to perform.
+              opres.FileHandle             = request->FileHandle;
+              opres.ResultCode             = ERROR_SUCCESS;
+              opres.TransferAmount         = 0;
+              opres.CompletedSynchronously = true;
+              opres.WasSuccessful          = true;
+              OsIoPrepareResult(result, request, opres);
+            } break;
+        case OS_IO_REQUEST_OPEN_FILE:
+            { // populate the operation request for the file open operation.
+              // open operations return more data than most requests, and are always performed synchronously.
+              FILE_STANDARD_INFO  fsi = {};
+              OS_IO_OPERATION   opreq = {};
+              size_t      sector_size = 0;
+              opreq.FilePath          = request->PathBuffer;
+              opreq.FileHandle        = INVALID_HANDLE_VALUE;
+              opreq.CompletionPort    = completion_port;
+              opreq.Overlapped        = NULL;
+              opreq.DataBuffer        = NULL;
+              opreq.FileOffset        = 0;
+              opreq.PreallocationSize = request->DataAmount;
+              opreq.TransferAmount    = 0;
+              opreq.IoHintFlags       = request->IoHintFlags;
+              OsIoExecuteOpen(opreq, opres, &fsi, &sector_size);
+              OsIoPrepareResult(result, request, opres);
+              result.FileSize = fsi.EndOfFile.QuadPart;
+              result.PhysicalSectorSize = sector_size;
+            } break;
+        case OS_IO_REQUEST_READ_FILE:
+            { // read requests may complete asynchronously.
+              OS_IO_OPERATION   opreq = {};
+              opreq.FilePath          = NULL;
+              opreq.FileHandle        = request->FileHandle;
+              opreq.CompletionPort    = NULL;
+              opreq.Overlapped        =&request->Overlapped;
+              opreq.DataBuffer        = request->DataBuffer;
+              opreq.FileOffset        = request->BaseOffset + request->FileOffset;
+              opreq.PreallocationSize = 0;
+              opreq.TransferAmount    =(uint32_t) request->DataAmount;
+              opreq.IoHintFlags       = OS_IO_HINT_FLAGS_NONE;
+              OsIoExecuteRead(opreq, opres);
+              OsIoPrepareResult(result, request, opres);
+            } break;
+        case OS_IO_REQUEST_WRITE_FILE:
+            { // write requests may complete asynchronously.
+              OS_IO_OPERATION   opreq = {};
+              opreq.FilePath          = NULL;
+              opreq.FileHandle        = request->FileHandle;
+              opreq.CompletionPort    = NULL;
+              opreq.Overlapped        =&request->Overlapped;
+              opreq.DataBuffer        = request->DataBuffer;
+              opreq.FileOffset        = request->BaseOffset + request->FileOffset;
+              opreq.PreallocationSize = 0;
+              opreq.TransferAmount    =(uint32_t) request->DataAmount;
+              opreq.IoHintFlags       = OS_IO_HINT_FLAGS_NONE;
+              OsIoExecuteWrite(opreq, opres);
+              OsIoPrepareResult(result, request, opres);
+            } break;
+        case OS_IO_REQUEST_FLUSH_FILE:
+            { // populate the operation request for the flush operation.
+              // flush operations are always performed synchronously.
+              OS_IO_OPERATION   opreq = {};
+              opreq.FilePath          = NULL;
+              opreq.FileHandle        = request->FileHandle;
+              opreq.CompletionPort    = NULL;
+              opreq.Overlapped        = NULL;
+              opreq.DataBuffer        = NULL;
+              opreq.FileOffset        = 0;
+              opreq.PreallocationSize = 0;
+              opreq.TransferAmount    = 0;
+              opreq.IoHintFlags       = OS_IO_HINT_FLAGS_NONE;
+              OsIoExecuteFlush(opreq, opres);
+              OsIoPrepareResult(result, request, opres);
+            } break;
+        case OS_IO_REQUEST_CLOSE_FILE:
+            { // populate the operation request for the close operation.
+              // close operations are always performed synchronously.
+              OS_IO_OPERATION   opreq = {};
+              opreq.FilePath          = NULL;
+              opreq.FileHandle        = request->FileHandle;
+              opreq.CompletionPort    = NULL;
+              opreq.Overlapped        = NULL;
+              opreq.DataBuffer        = NULL;
+              opreq.FileOffset        = 0;
+              opreq.PreallocationSize = 0;
+              opreq.TransferAmount    = 0;
+              opreq.IoHintFlags       = OS_IO_HINT_FLAGS_NONE;
+              OsIoExecuteClose(opreq, opres);
+              OsIoPrepareResult(result, request, opres);
+            } break;
+        default:
+            { // don't know what this is - just pass through data.
+              opres.FileHandle             = request->FileHandle;
+              opres.ResultCode             = ERROR_SUCCESS;
+              opres.TransferAmount         = 0;
+              opres.CompletedSynchronously = true;
+              opres.WasSuccessful          = true;
+              OsIoPrepareResult(result, request, opres);
+            } break;
+    }
+}
+
+/// @summary Return an I/O request to the pool it was allocated from.
+/// @param request The I/O request to return.
+internal_function void
+OsReturnIoRequest
+(
+    OS_IO_REQUEST *request
+)
+{
+    EnterCriticalSection(&request->RequestPool->ListLock);
+    {   // remove the node from the live list.
+        if (request->NextRequest != NULL)
+            request->NextRequest->PrevRequest = request->PrevRequest;
+        if (request->PrevRequest != NULL)
+            request->PrevRequest->NextRequest = request->NextRequest;
+        // push the node into the front of the free list.
+        request->NextRequest = request->RequestPool->FreeRequest;
+        request->PrevRequest = NULL;
+        request->RequestPool->FreeRequest = request;
+    }
+    LeaveCriticalSection(&request->RequestPool->ListLock);
+}
+
+/// @summary Retrieve the OS_IO_REQUEST for an OVERLAPPED address passed back from GetQueuedCompletionStatus.
+/// @param overlapped The OVERLAPPED instance corresponding to a completed request.
+/// @return The associated OS_IO_REQUEST.
+internal_function inline OS_IO_REQUEST*
+OsIoRequestForOVERLAPPED
+(
+    OVERLAPPED *overlapped
+)
+{
+    return ((OS_IO_REQUEST*)(((uint8_t*) overlapped) - offsetof(OS_IO_REQUEST, Overlapped)));
+}
+
+/// @summary Implement the entry point of an I/O worker thread.
+/// @param argp An OS_IO_THREAD_INIT instance specifying data that should be copied to thread-local memory.
+/// @return The function always returns 1.
+internal_function unsigned int __cdecl
+OsIoThreadMain
+(
+    void *argp
+)
+{
+    OS_IO_THREAD_INIT  init = {};
+    OS_IO_THREAD_POOL *pool = NULL;
+    OVERLAPPED          *ov = NULL;
+    uintptr_t       context = 0;
+    uintptr_t           key = 0;
+    HANDLE      term_signal = NULL;
+    HANDLE             iocp = NULL;
+    LARGE_INTEGER frequency = {};
+    DWORD               tid = GetCurrentThreadId();
+    DWORD            nbytes = 0;
+    DWORD            termrc = 0;
+    unsigned int  exit_code = 1;
+
+    // copy the initialization data into local stack memory.
+    // argp may have been allocated on the stack of the caller 
+    // and is only guaranteed to remain valid until ReadySignal is set.
+    CopyMemory(&init, argp, sizeof(OS_IO_THREAD_INIT));
+    term_signal = init.TerminateSignal;
+    context     = init.PoolContext;
+    iocp        = init.CompletionPort;
+    pool        = init.ThreadPool;
+
+    // retrieve the system clock frequency for converting ticks to nanoseconds.
+    QueryPerformanceFrequency(&frequency);
+
+    // spit out a message just prior to initialization:
+    OsLayerOutput("START: %S(%u): I/O thread starting on pool 0x%p.\n", __FUNCTION__, tid, pool);
+
+    // signal the main thread that this thread is ready to run.
+    SetEvent(init.ReadySignal);
+
+    __try
+    {   // enter the main I/O loop. the thread waits for an event to be available on the completion port.
+        for ( ; ; )
+        {   // prior to possibly entering a wait state, check the termination signal.
+            if ((termrc = WaitForSingleObject(term_signal, 0)) != WAIT_TIMEOUT)
+            {   // either termination was signaled, or an error occurred.
+                // either way, exit prior to entering the wait state.
+                if (termrc != WAIT_OBJECT_0)
+                {   // an error occurred while checking the termination signal.
+                    OsLayerError("ERROR: %S(%u): Checking termination signal failed with result 0x%08X (0x%08X).\n", __FUNCTION__, tid, termrc, GetLastError());
+                }
                 break;
             }
-            else ext--;
-        }
-        // now a bunch of if (wcsicmp(ext, L"zip") { ... } etc.
-        if (!_wcsicmp(ext, L"tar"))
-        {   // set up a tarball-based mount point.
-            if (OsCreateMount_Tarball(mount, source_wide) < 0)
-            {   // OsVfsCreateMount_Tarball outputs its own errors.
-                goto cleanup_and_fail;
+            // wait for an event on the completion port.
+            if (GetQueuedCompletionStatus(iocp, &nbytes, &key, &ov, INFINITE))
+            {   // check the termination signal prior to processing the request.
+                if ((termrc = WaitForSingleObject(term_signal, 0)) != WAIT_TIMEOUT)
+                {   // either termination was signaled, or an error occurred.
+                    if (termrc != WAIT_OBJECT_0)
+                    {   // an error occurred while checking the termination signal.
+                        OsLayerError("ERROR: %S(%u): Checking termination signal failed with result 0x%08X (0x%08X).\n", __FUNCTION__, tid, termrc, GetLastError());
+                    }
+                    break;
+                }
+                if (key == OS_IO_COMPLETION_KEY_SHUTDOWN)
+                {
+                    OsLayerOutput("EVENT: %S(%u): I/O worker received shutdown signal.\n", __FUNCTION__, tid);
+                    break;
+                }
+
+                OS_IO_REQUEST *request = OsIoRequestForOVERLAPPED(ov);
+                while (request != NULL)
+                {
+                    switch (request->RequestState)
+                    {
+                        case OS_IO_REQUEST_STATE_CHAINED:
+                        case OS_IO_REQUEST_STATE_SUBMITTED:
+                            { // launch the I/O operation. it may complete asynchronously.
+                              OS_IO_RESULT result;
+                              OS_IO_OPERATION_RESULT opres;
+                              OS_IO_REQUEST *chained = NULL;
+                              request->RequestState  = OS_IO_REQUEST_STATE_LAUNCHED;
+                              request->IoLaunchTime  = OsTimestampInTicks();
+                              OsIoExecuteRequest(request, iocp, opres, result);
+                              if (opres.CompletedSynchronously)
+                              {   // update the request state and execute the completion callback.
+                                  // there should be no additional events reported for this request.
+                                  request->RequestState = OS_IO_REQUEST_STATE_COMPLETED;
+                                  request->IoFinishTime = OsTimestampInTicks();
+                                  if (request->IoComplete != NULL)
+                                  {   // the request may return a chained request from its completion callback.
+                                      OS_IO_REQUEST_CONTEXT ctx;
+                                      OS_IO_PROFILE     profile;
+                                      ctx.RequestPool          = request->RequestPool;
+                                      ctx.ThreadPool           = pool;
+                                      ctx.PoolContext          = context;
+                                      profile.QueueDelay       = OsElapsedNanoseconds(request->IoSubmitTime, request->IoLaunchTime, frequency.QuadPart);
+                                      profile.ExecutionTime    = OsElapsedNanoseconds(request->IoLaunchTime, request->IoFinishTime, frequency.QuadPart);
+                                      profile.OsThreadId       = tid;
+                                      chained = request->IoComplete(opres.WasSuccessful, &result, &ctx, &profile);
+                                  }
+                                  OsReturnIoRequest(request);
+                                  request = chained;
+                              }
+                              else
+                              {   // since the request hasn't completed, there is no chained request.
+                                  // don't return the request until it completes.
+                                  request = NULL;
+                              }
+                            } break;
+                        case OS_IO_REQUEST_STATE_LAUNCHED:
+                            { // the asynchronous read or write operation has completed.
+                              OS_IO_RESULT    result;
+                              OS_IO_REQUEST *chained = NULL;
+                              DWORD      result_code = ERROR_SUCCESS;
+                              bool    was_successful = true;
+                              if (!GetOverlappedResult(request->FileHandle, ov, &nbytes, FALSE))
+                              {   // the I/O request may have completed unsuccessfully.
+                                  if ((result_code   = GetLastError()) != ERROR_HANDLE_EOF)
+                                      was_successful = false;
+                              }
+                              request->RequestState  = OS_IO_REQUEST_STATE_COMPLETED;
+                              request->IoFinishTime  = OsTimestampInTicks();
+                              result.RequestType     = request->RequestType;
+                              result.ResultCode      = result_code;
+                              result.UserContext     = request->UserContext;
+                              result.FileHandle      = request->FileHandle;
+                              result.PathBuffer      = request->PathBuffer;
+                              result.DataBuffer      = request->DataBuffer;
+                              result.DataAmount      = nbytes;
+                              result.BaseOffset      = request->BaseOffset;
+                              result.FileOffset      = request->FileOffset;
+                              if (request->IoComplete != NULL)
+                              {   // the request may return a chained request from its completion callback.
+                                  OS_IO_REQUEST_CONTEXT ctx;
+                                  OS_IO_PROFILE     profile;
+                                  ctx.RequestPool          = request->RequestPool;
+                                  ctx.ThreadPool           = pool;
+                                  ctx.PoolContext          = context;
+                                  profile.QueueDelay       = OsElapsedNanoseconds(request->IoSubmitTime, request->IoLaunchTime, frequency.QuadPart);
+                                  profile.ExecutionTime    = OsElapsedNanoseconds(request->IoLaunchTime, request->IoFinishTime, frequency.QuadPart);
+                                  profile.OsThreadId       = tid;
+                                  chained = request->IoComplete(was_successful, &result, &ctx, &profile);
+                              }
+                              OsReturnIoRequest(request);
+                              request = chained;
+                            } break;
+                        case OS_IO_REQUEST_STATE_COMPLETED:
+                            { OsLayerError("ERROR: %S(%u): I/O thread received already completed request %p from pool %p.\n", __FUNCTION__, GetCurrentThreadId(), request, request->RequestPool);
+                              OsReturnIoRequest(request);
+                            } break;
+                        default:
+                            { OsLayerError("ERROR: %S(%u): I/O thread received request %p from pool %p with unknown state %d.\n", __FUNCTION__, GetCurrentThreadId(), request, request->RequestPool, request->RequestState);
+                            } break;
+                    }
+                }
             }
-            ReleaseSRWLockExclusive(&file_system->MountpointLock);
-            return 0;
         }
+    }
+    __finally
+    {   // the I/O thread is terminating - clean up thread-local resources.
         // ...
-        else
-        {
-            OsLayerError("ERROR: %S(%u): Mountpoint extension %s has no associated driver.\n", __FUNCTION__, GetCurrentThreadId(), ext);
-            goto cleanup_and_fail;
-        }
+        // spit out a message just prior to termination.
+        OsLayerError("DEATH: %S(%u): I/O thread terminating in pool 0x%p.\n", __FUNCTION__, tid, init.ThreadPool);
+        return exit_code;
     }
-
-cleanup_and_fail:
-    if (mount != NULL) OsRemoveMountpointId(&file_system->MountpointTable, mount_id);
-    ReleaseSRWLockExclusive(&file_system->MountpointLock);
-    if (mount_root) free(mount_root);
-    return -1;
-}
-
-/// @summary Resolves a virtual path to a filesystem mount point, and then converts the path to an absolute path on the filesystem. Non-filesystem mount points are skipped.
-/// @param file_system The file system to search.
-/// @param path The virtual path to translate to a filesystem path.
-/// @param pathbuf The buffer that will receive the filesystem path.
-/// @param buflen The maximum number of wide characters to write to pathbuf.
-/// @return Zero if the path was successfully resolved, or -1 if an error occurred.
-internal_function int 
-OsResolveFilesystemPath
-(
-    OS_FILE_SYSTEM *file_system, 
-    char const            *path, 
-    WCHAR              *pathbuf, 
-    size_t               buflen
-)
-{   // iterate over the mount points, which are stored in priority order.
-    AcquireSRWLockShared(&file_system->MountpointLock);
-    OS_MOUNTPOINT *mounts = file_system->MountpointTable.MountpointData;
-    for (size_t i = 0,  n = file_system->MountpointTable.Count; i < n; ++i)
-    {
-        OS_MOUNTPOINT *m  = &mounts[i];
-        if (OsMountPointMatchStart(m->Root, path, m->RootLength) && m->OpenFile == OsOpenFile_Filesystem)
-        {   // resolve the absolute path of the file on the filesystem.
-            char const *relative_path = path + m->RootLength + 1;
-            size_t             offset = m->LocalPathLength;
-            int                nchars = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, relative_path, -1, NULL, 0);
-            if (nchars == 0 || buflen < (nchars + offset + 1))
-            {   // the path cannot be converted from UTF-8 to UCS-2.
-                OsLayerError("ERROR: %S(%u): Unable to retrieve UCS2 path length for file %S (%08X).\n", __FUNCTION__, GetCurrentThreadId(), path, GetLastError());
-                ReleaseSRWLockShared(&file_system->MountpointLock);
-                return -1;
-            }
-            // start with the local root, and then append the relative path portion.
-            memcpy(pathbuf, m->LocalPath, m->LocalPathLength * sizeof(WCHAR));
-            pathbuf[m->LocalPathLength] = L'\\';
-            if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, relative_path, -1, &pathbuf[m->LocalPathLength+1], nchars) == 0)
-            {   // the path cannot be converted from UTF-8 to UCS-2.
-                OsLayerError("ERROR: %S(%u): Unable to convert UTF8 path to UCS2 for file %S (%08X).\n", __FUNCTION__, GetCurrentThreadId(), path, GetLastError());
-                ReleaseSRWLockShared(&file_system->MountpointLock);
-                return -1;
-            }
-            ReleaseSRWLockShared(&file_system->MountpointLock);
-            // normalize the directory separator characters to the system default.
-            // on Windows, this is not strictly necessary, but on other OS's it is.
-            for (size_t ch = offset + 1, nch = offset + nchars; ch < nch; ++ch)
-            {
-                if (pathbuf[ch] == L'/')
-                    pathbuf[ch]  = L'\\';
-            }
-            return 0;
-        }
-    }
-    OsLayerError("ERROR: %S(%u): Unable to find filesystem mountpoint for file %S.\n", __FUNCTION__, GetCurrentThreadId(), path);
-    ReleaseSRWLockShared(&file_system->MountpointLock);
-    return -1;
-}
-
-/// @summary Opens a file for access. Information necessary to access the file is written to the OS_FILE structure. This function tests each mount point matching the path, in priority order, until one is successful at opening the file or all matching mount points have been tested.
-/// @param file_system The file system interface to query.
-/// @param path The absolute virtual path of the file to open.
-/// @param usage One of OS_FILE_USAGE specifying the intended use of the file.
-/// @param hints One or more of OS_FILE_USAGE_HINTS.
-/// @param file On return, this structure should be populated with the data necessary to access the file. If the file cannot be opened, check the OSError field.
-/// @param relative_path On return, this pointer is updated to point into path, at the start of the portion of the path representing the path to the file, relative to the mount point root path.
-/// @return One of OS_IO_RESULT.
-internal_function int 
-OsResolveAndOpenFile
-(
-    OS_FILE_SYSTEM *file_system, 
-    char const            *path, 
-    int                   usage, 
-    uint32_t              hints, 
-    OS_FILE               *file, 
-    char const  **relative_path
-)
-{   // iterate over the mount points, which are stored in priority order.
-    AcquireSRWLockShared(&file_system->MountpointLock);
-    int            result = OS_IO_RESULT_OSERROR;
-    OS_MOUNTPOINT *mounts = file_system->MountpointTable.MountpointData;
-    for (size_t i = 0,  n = file_system->MountpointTable.Count; i < n; ++i)
-    {
-        OS_MOUNTPOINT *m  = &mounts[i];
-        if (OsMountPointMatchStart(m->Root, path, m->RootLength))
-        {   // attempt to open the file on the mount point.
-            if  ((result = m->OpenFile(m, path + m->RootLength + 1, usage, hints, file)) == OS_IO_RESULT_SUCCESS)
-            {   // the file was successfully opened, so we're done.
-                if (relative_path != NULL)
-                {
-                    *relative_path =  path + m->RootLength + 1;
-                }
-                ReleaseSRWLockShared(&file_system->MountpointLock);
-                return result;
-            }
-            if (result == OS_IO_RESULT_NOT_SUPPORTED)
-            {   // continue checking downstream mount points. one might support the operation.
-                continue;
-            }
-            else if (file->OSError == ERROR_NOT_FOUND || file->OSError == ERROR_FILE_NOT_FOUND)
-            {   // continue checking downstream mount points. one might be able to open the file.
-                continue;
-            }
-            else
-            {   // an actual error was returned; push it upstream.
-                ReleaseSRWLockShared(&file_system->MountpointLock);
-                return result;
-            }
-        }
-    }
-    ReleaseSRWLockShared(&file_system->MountpointLock);
-    file->OSError = ERROR_FILE_NOT_FOUND;
-    return OS_IO_RESULT_OSERROR;
-}
-
-/// @summary Synchronously writes a file. If the file exists, its contents are overwritten; otherwise a new file is created. This operation is generally not supported by archive-based mount points. This function tests each mount point matching the path, in priority order, until one is successful at saving the file or until all matching mount points have been tested.
-/// @param file_system The file system interface.
-/// @param path The virtual path of the file to save.
-/// @param buffer The buffer containing the data to write to the file.
-/// @param amount The number of bytes to copy from the buffer into the file.
-/// @param relative_path On return, this pointer is updated to point into path, at the start of the portion of the path representing the path to the file, relative to the mount point root path.
-/// @return One of OS_IO_RESULT.
-internal_function int 
-OsResolveAndSaveFile
-(
-    OS_FILE_SYSTEM *file_system, 
-    char const            *path, 
-    void const          *buffer, 
-    int64_t              amount, 
-    char const  **relative_path
-)
-{   // iterate over the mount points, which are stored in priority order.
-    AcquireSRWLockShared(&file_system->MountpointLock);
-    int            result = ERROR_NOT_SUPPORTED;
-    OS_MOUNTPOINT *mounts = file_system->MountpointTable.MountpointData;
-    for (size_t i = 0,  n = file_system->MountpointTable.Count; i < n; ++i)
-    {
-        OS_MOUNTPOINT  *m = &mounts[i];
-        if (OsMountPointMatchStart(m->Root, path, m->RootLength))
-        {   // attempt to save the file on the mount point.
-            if ((result = m->SaveFile(m, path + m->RootLength + 1, buffer, amount)) == OS_IO_RESULT_SUCCESS)
-            {   // the file was successfully opened, so we're done.
-                if (relative_path != NULL)
-                {
-                    *relative_path =  path + m->RootLength + 1;
-                }
-                ReleaseSRWLockShared(&file_system->MountpointLock);
-                return result;
-            }
-            if (result == OS_IO_RESULT_NOT_SUPPORTED)
-            {   // continue checking downstream mount points. one might support the operation.
-                continue;
-            }
-            else
-            {   // an actual error was returned; push it upstream.
-                ReleaseSRWLockShared(&file_system->MountpointLock);
-                return result;
-            }
-        }
-    }
-    ReleaseSRWLockShared(&file_system->MountpointLock);
-    return OS_IO_RESULT_NOT_SUPPORTED;
 }
 
 /// @summary Search a list of layers for a given layer name to determine if a layer is supported.
@@ -4125,12 +3633,12 @@ OsVulkanDeviceExtensionEnabled
 }
 
 /// @summary Resolve functions exported directly from a Vulkan ICD.
-/// @param runtime The OS_VULKAN_RUNTIME instance, with the LoaderHandle field set.
+/// @param runtime The OS_VULKAN_RUNTIME_DISPATCH instance, with the LoaderHandle field set.
 /// @return VK_SUCCESS if all exported functions were resolved successfully.
 internal_function VkResult
 OsResolveVulkanExportFunctions
 (
-    OS_VULKAN_RUNTIME *runtime
+    OS_VULKAN_RUNTIME_DISPATCH *runtime
 )
 {
     OS_LAYER_RESOLVE_VULKAN_ICD_FUNCTION(runtime, vkGetInstanceProcAddr);
@@ -4138,12 +3646,12 @@ OsResolveVulkanExportFunctions
 }
 
 /// @summary Resolve global functions exported by a Vulkan ICD.
-/// @param runtime The OS_VULKAN_RUNTIME instance, with the LoaderHandle field set.
+/// @param runtime The OS_VULKAN_RUNTIME_DISPATCH instance, with the LoaderHandle field set.
 /// @return VK_SUCCESS if all global functions were resolved successfully.
 internal_function VkResult
 OsResolveVulkanGlobalFunctions
 (
-    OS_VULKAN_RUNTIME *runtime
+    OS_VULKAN_RUNTIME_DISPATCH *runtime
 )
 {
     OS_LAYER_RESOLVE_VULKAN_GLOBAL_FUNCTION(runtime, vkCreateInstance);
@@ -4153,15 +3661,15 @@ OsResolveVulkanGlobalFunctions
 }
 
 /// @summary Resolve instance-level functions exported by a Vulkan runtime.
-/// @param runtime The OS_VULKAN_RUNTIME object, with the vkGetInstanceProcAddr entry point set.
-/// @param instance The OS_VULKAN_INSTANCE object, with the InstanceHandle field set.
+/// @param runtime The OS_VULKAN_RUNTIME_DISPATCH object, with the vkGetInstanceProcAddr entry point set.
+/// @param instance The OS_VULKAN_INSTANCE_DISPATCH object, with the InstanceHandle field set.
 /// @param create_info The VkInstanceCreateInfo being used to initialize the instance. Used here to resolve instance-level function pointers for extensions.
 /// @return VK_SUCCESS if all instance-level functions were resolved successfully.
 internal_function VkResult
 OsResolveVulkanInstanceFunctions
 (
-    OS_VULKAN_RUNTIME               *runtime,
-    OS_VULKAN_INSTANCE             *instance,
+    OS_VULKAN_RUNTIME_DISPATCH      *runtime,
+    OS_VULKAN_INSTANCE_DISPATCH    *instance,
     VkInstanceCreateInfo  const *create_info 
 )
 {
@@ -4200,15 +3708,15 @@ OsResolveVulkanInstanceFunctions
 }
 
 /// @summary Resolve device-level functions exported by the Vulkan ICD.
-/// @param vkinstance The OS_VULKAN_INSTANCE object, with the vkGetDeviceProcAddr entry point set.
-/// @param vkdevice The OS_VULKAN_DEVICE object, with the LogicalDevice field set.
+/// @param vkinstance The OS_VULKAN_INSTANCE_DISPATCH object, with the vkGetDeviceProcAddr entry point set.
+/// @param vkdevice The OS_VULKAN_DEVICE_DISPATCH object, with the LogicalDevice field set.
 /// @param create_info The VkDeviceCreateInfo being used to initialize the logical device. Used here to resolve device-level function pointers for extensions.
 /// @return VkResult if all device-level functions were resolved successfully.
 internal_function VkResult
 OsResolveVulkanDeviceFunctions
 (
-    OS_VULKAN_INSTANCE          *instance,
-    OS_VULKAN_DEVICE              *device, 
+    OS_VULKAN_INSTANCE_DISPATCH *instance,
+    OS_VULKAN_DEVICE_DISPATCH     *device, 
     VkDeviceCreateInfo const *create_info
 )
 {
@@ -5178,6 +4686,7 @@ OsWorkerThreadMain
     OS_WORKER_THREAD_INIT  init = {};
     OS_WORKER_THREAD       args = {};
     OS_MEMORY_ARENA       arena = {};
+    os_arena_marker_t user_mark = 0;
     uintptr_t        signal_arg = 0;
     const DWORD          LAUNCH = 0;
     const DWORD       TERMINATE = 1;
@@ -5224,6 +4733,10 @@ OsWorkerThreadMain
         SetEvent(init.ErrorSignal);
         return 2;
     }
+
+    // save the thread-local memory arena marker.
+    // this allows global per-thread data to be maintained, but task data to be reset.
+    user_mark = OsMemoryArenaMark(&arena);
 
     // signal the main thread that this thread is ready to run.
     SetEvent(init.ReadySignal);
@@ -5281,13 +4794,15 @@ OsWorkerThreadMain
                         exit_code = 1;
                     } break;
             }
+            // reset the thread-local memory arena for the next iteration.
+            OsMemoryArenaResetToMarker(&arena, user_mark);
             // reset the wake signal to 0/NULL for the next iteration.
             signal_arg = 0;
         }
     }
     __finally
     {   // the worker is terminating - clean up thread-local resources.
-        // the AppThreadMain will not be called again by this thread.
+        // the ThreadMain will not be called again by this thread.
         OsDeleteMemoryArena(&arena);
         // spit out a message just prior to termination.
         OsLayerOutput("DEATH: %S(%u): Worker terminating in pool 0x%p.\n", __FUNCTION__, tid, init.ThreadPool);
@@ -5342,26 +4857,26 @@ OsCreateThreadPool
     if (!OsMemoryArenaCanSatisfyAllocation(arena, bytes_required, align_required))
     {
         OsLayerError("ERROR: %S(%u): Insufficient memory to create thread pool.\n", __FUNCTION__, tid);
-        OsZeroMemory(pool, sizeof(OS_THREAD_POOL));
+        ZeroMemory(pool, sizeof(OS_THREAD_POOL));
         return -1;
     }
     if ((evt_launch = CreateEvent(NULL, TRUE, FALSE, NULL)) == NULL)
     {   // without the launch event, there's no way to synchronize worker launch.
         OsLayerError("ERROR: %S(%u): Unable to create pool launch event (0x%08X).\n", __FUNCTION__, tid, GetLastError());
-        OsZeroMemory(pool, sizeof(OS_THREAD_POOL));
+        ZeroMemory(pool, sizeof(OS_THREAD_POOL));
         return -1;
     }
     if ((evt_terminate = CreateEvent(NULL, TRUE, FALSE, NULL)) == NULL)
     {   // without the termination event, there's no way to synchronize worker shutdown.
         OsLayerError("ERROR: %S(%u): Unable to create pool termination event (0x%08X).\n", __FUNCTION__, tid, GetLastError());
-        OsZeroMemory(pool, sizeof(OS_THREAD_POOL));
+        ZeroMemory(pool, sizeof(OS_THREAD_POOL));
         CloseHandle(evt_launch);
         return -1;
     }
     if ((iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, (DWORD) init->ThreadCount+1)) == NULL)
     {   // without the completion port, there's no way to synchronize worker execution.
         OsLayerError("ERROR: %S(%u): Unable to create pool I/O completion port (0x%08X).\n", __FUNCTION__, tid, GetLastError());
-        OsZeroMemory(pool, sizeof(OS_THREAD_POOL));
+        ZeroMemory(pool, sizeof(OS_THREAD_POOL));
         CloseHandle(evt_terminate);
         CloseHandle(evt_launch);
         return -1;
@@ -5374,7 +4889,7 @@ OsCreateThreadPool
     if (!SUCCEEDED((cv_result = CvInitProvider(&TaskProfilerGUID, &cv_provider))))
     {
         OsLayerError("ERROR: %S(%u): Unable to initialize task profiler provider (HRESULT 0x%08X).\n", __FUNCTION__, tid, cv_result);
-        OsZeroMemory(pool, sizeof(OS_THREAD_POOL));
+        ZeroMemory(pool, sizeof(OS_THREAD_POOL));
         CloseHandle(evt_terminate);
         CloseHandle(evt_launch);
         CloseHandle(iocp);
@@ -5383,7 +4898,7 @@ OsCreateThreadPool
     if (!SUCCEEDED((cv_result = CvCreateMarkerSeriesA(cv_provider, name, &cv_series))))
     {
         OsLayerError("ERROR: %S(%u): Unable to create task profiler marker series (HRESULT 0x%08X).\n", __FUNCTION__, tid, cv_result);
-        OsZeroMemory(pool, sizeof(OS_THREAD_POOL));
+        ZeroMemory(pool, sizeof(OS_THREAD_POOL));
         CvReleaseProvider(cv_provider);
         CloseHandle(evt_terminate);
         CloseHandle(evt_launch);
@@ -5400,12 +4915,12 @@ OsCreateThreadPool
     pool->CompletionPort  = iocp;
     pool->LaunchSignal    = evt_launch;
     pool->TerminateSignal = evt_terminate;
-    pool->TaskProfiler.Provider      = cv_provider;
-    pool->TaskProfiler.MarkerSeries  = cv_series;
-    OsZeroMemory(pool->OSThreadIds   , init->ThreadCount * sizeof(unsigned int));
-    OsZeroMemory(pool->OSThreadHandle, init->ThreadCount * sizeof(HANDLE));
-    OsZeroMemory(pool->WorkerReady   , init->ThreadCount * sizeof(HANDLE));
-    OsZeroMemory(pool->WorkerError   , init->ThreadCount * sizeof(HANDLE));
+    pool->TaskProfiler.Provider     = cv_provider;
+    pool->TaskProfiler.MarkerSeries = cv_series;
+    ZeroMemory(pool->OSThreadIds    , init->ThreadCount * sizeof(unsigned int));
+    ZeroMemory(pool->OSThreadHandle , init->ThreadCount * sizeof(HANDLE));
+    ZeroMemory(pool->WorkerReady    , init->ThreadCount * sizeof(HANDLE));
+    ZeroMemory(pool->WorkerError    , init->ThreadCount * sizeof(HANDLE));
 
     // set up the worker init structure and spawn all threads.
     for (size_t i = 0, n = init->ThreadCount; i < n; ++i)
@@ -5504,7 +5019,7 @@ cleanup_and_fail:
     // reset the memory arena back to its initial state.
     OsMemoryArenaResetToMarker(arena, mem_marker);
     // zero out the OS_THREAD_POOL prior to returning to the caller.
-    OsZeroMemory(pool, sizeof(OS_THREAD_POOL));
+    ZeroMemory(pool, sizeof(OS_THREAD_POOL));
     return -1;
 }
 
@@ -5568,10 +5083,10 @@ OsDestroyThreadPool
             CloseHandle(pool->WorkerReady[i]);
             CloseHandle(pool->WorkerError[i]);
         }
-        OsZeroMemory(pool->OSThreadIds   , pool->ActiveThreads * sizeof(unsigned int));
-        OsZeroMemory(pool->OSThreadHandle, pool->ActiveThreads * sizeof(HANDLE));
-        OsZeroMemory(pool->WorkerReady   , pool->ActiveThreads * sizeof(HANDLE));
-        OsZeroMemory(pool->WorkerError   , pool->ActiveThreads * sizeof(HANDLE));
+        ZeroMemory(pool->OSThreadIds   , pool->ActiveThreads * sizeof(unsigned int));
+        ZeroMemory(pool->OSThreadHandle, pool->ActiveThreads * sizeof(HANDLE));
+        ZeroMemory(pool->WorkerReady   , pool->ActiveThreads * sizeof(HANDLE));
+        ZeroMemory(pool->WorkerError   , pool->ActiveThreads * sizeof(HANDLE));
         pool->ActiveThreads = 0;
     }
     // clean up the task provider objects from the Concurrency Visualizer SDK.
@@ -5644,155 +5159,6 @@ OsSignalWorkerThreads
         return false;
     }
     return true;
-}
-
-/// @summary Parse a TAR file and construct the list of file and directory entries. Tarballs are intended to be unloadable, so a memory arena is not used.
-/// @param tar The TAR file mountpoint state to populate with entity data.
-/// @param tarfd The file descriptor to access for reading the TAR file data.
-/// @param result If the function returns -1, the system error code is returned in this location.
-/// @return Zero if the tarball loaded successfully, or -1 if an error occurred.
-public_function int 
-OsLoadTarball
-(
-    OS_TARBALL   *tar, 
-    HANDLE      tarfd, 
-    DWORD      result
-)
-{
-    LARGE_INTEGER offset = {};
-    LARGE_INTEGER newptr = {};
-    LARGE_INTEGER startp = {};
-    size_t   entry_count = 0;
-
-    // initialize the fields of the OS_TARBALL instance.
-    ZeroMemory(tar, sizeof(OS_TARBALL));
-
-    // save the offset of the start of the archive data.
-    if (!SetFilePointerEx(tarfd, offset, &startp, FILE_CURRENT))
-    {
-        OsLayerError("ERROR: %S(%u): Unable to retrieve the current file position (%08X).\n", __FUNCTION__, GetCurrentThreadId(), GetLastError());
-        result = GetLastError();
-        goto cleanup_and_fail;
-    }
-
-    // the first pass counts all of the regular file entries in the archive.
-    offset.QuadPart = startp.QuadPart;
-    newptr.QuadPart = startp.QuadPart;
-    for ( ; ; )
-    {   // read the next archive entry header and check for end-of-archive.
-        DWORD nread = 0;
-        OS_TAR_HEADER_ENCODED header  = {};
-        if (!ReadFile(tarfd, &header, sizeof(header), &nread, NULL) || nread < sizeof(header))
-        {   // unable to read a complete header block.
-            OsLayerError("ERROR: %S(%u): Unable to read complete TAR header block at %I64d (%08X).\n", __FUNCTION__, GetCurrentThreadId(), offset.QuadPart, GetLastError());
-            result = GetLastError();
-            goto cleanup_and_fail;
-        }
-        if (header.FileName[0] == 0)
-        {   // an entry with no filename indicates the end of the archive.
-            result = ERROR_SUCCESS;
-            break;
-        }
-        if (header.FileType == OS_TAR_ENTRY_TYPE_FILE)
-        {
-            entry_count++;
-        }
-
-        // seek to the start of the next archive entry.
-        int64_t  header_end  = offset.QuadPart + sizeof(OS_TAR_HEADER_ENCODED);
-        int64_t   file_size  = OsTarOctalToDecimal<int64_t>(header.FileSize, 12);
-        offset.QuadPart      = OsTarNextHeaderOffset(header_end, file_size);
-        if (!SetFilePointerEx(tarfd, offset, &newptr, FILE_BEGIN))
-        {
-            OsLayerError("ERROR: %S(%u): Unable to seek to start of next TAR header block at %I64d (%08X).\n", __FUNCTION__, GetCurrentThreadId(), offset.QuadPart, GetLastError());
-            result = GetLastError();
-            goto cleanup_and_fail;
-        }
-    }
-
-    // allocate storage and initialize the OS_TARBALL instance.
-    tar->EntryCount     = 0;
-    tar->EntryHash      =(uint32_t    *) malloc(entry_count * sizeof(uint32_t));
-    tar->EntryInfo      =(OS_TAR_ENTRY*) malloc(entry_count * sizeof(OS_TAR_ENTRY));
-    if (tar->EntryHash == NULL || tar->EntryInfo == NULL)
-    {
-        OsLayerError("ERROR: %S(%u): Unable to allocate memory for %Iu TAR entries.\n", __FUNCTION__, GetCurrentThreadId(), entry_count);
-        result = ERROR_OUTOFMEMORY;
-        goto cleanup_and_fail;
-    }
-
-    // seek back to the start of the archive data, and re-parse all entries.
-    if (!SetFilePointerEx(tarfd, startp, NULL, FILE_BEGIN))
-    {
-        OsLayerError("ERROR: %S(%u): Unable to rewind to the start of TAR data (%08X).\n", __FUNCTION__, GetCurrentThreadId(), GetLastError());
-        result = GetLastError();
-        goto cleanup_and_fail;
-    }
-    offset.QuadPart = startp.QuadPart;
-    newptr.QuadPart = startp.QuadPart;
-    for ( ; ; )
-    {   // read the next archive entry header and check for end-of-archive.
-        DWORD nread = 0;
-        OS_TAR_HEADER_ENCODED header  = {};
-        if (!ReadFile(tarfd, &header, sizeof(header), &nread, NULL) || nread < sizeof(header))
-        {   // unable to read a complete header block.
-            OsLayerError("ERROR: %S(%u): Unable to read complete TAR header block at %I64d (%08X).\n", __FUNCTION__, GetCurrentThreadId(), offset.QuadPart, GetLastError());
-            result = GetLastError();
-            goto cleanup_and_fail;
-        }
-        if (header.FileName[0] == 0)
-        {   // an entry with no filename indicates the end of the archive.
-            result = ERROR_SUCCESS;
-            break;
-        }
-        if (header.FileType == OS_TAR_ENTRY_TYPE_FILE)
-        {   // extract information for file entries.
-            size_t entry_index = tar->EntryCount;
-            OsTarDecodeEntry(&tar->EntryInfo[entry_index], &header, offset.QuadPart);
-            tar->EntryHash[entry_index] = OsHashPath(tar->EntryInfo[entry_index].FullPath);
-            tar->EntryCount++;
-        }
-
-        // seek to the start of the next archive entry.
-        int64_t  header_end  = offset.QuadPart + sizeof(OS_TAR_HEADER_ENCODED);
-        int64_t   file_size  = OsTarOctalToDecimal<int64_t>(header.FileSize, 12);
-        offset.QuadPart      = OsTarNextHeaderOffset(header_end, file_size);
-        if (!SetFilePointerEx(tarfd, offset, &newptr, FILE_BEGIN))
-        {
-            OsLayerError("ERROR: %S(%u): Unable to seek to start of next TAR header block at %I64d (%08X).\n", __FUNCTION__, GetCurrentThreadId(), offset.QuadPart, GetLastError());
-            result = GetLastError();
-            goto cleanup_and_fail;
-        }
-    }
-    return 0;
-
-cleanup_and_fail:
-    SetFilePointerEx(tarfd, startp, NULL, FILE_BEGIN);
-    if (tar->EntryInfo != NULL) free(tar->EntryInfo);
-    if (tar->EntryHash != NULL) free(tar->EntryHash);
-    ZeroMemory(tar, sizeof(OS_TARBALL));
-    return -1;
-}
-
-/// @summary Free resources associated with a loaded tarball.
-/// @param tar The OS_TARBALL instance to unload.
-public_function void
-OsUnloadTarball
-(
-    OS_TARBALL *tar
-)
-{
-    if (tar->EntryInfo != NULL)
-    {
-        free(tar->EntryInfo);
-        tar->EntryInfo = NULL;
-    }
-    if (tar->EntryHash != NULL)
-    {
-        free(tar->EntryHash);
-        tar->EntryHash = NULL;
-    }
-    tar->EntryCount = 0;
 }
 
 /// @summary Resets the state of the low-level input system.
@@ -6009,57 +5375,255 @@ OsConsumeInputEvents
     OsForwardGamepadBuffer (&system->GamepadBuffer [prev_buffer], &system->GamepadBuffer [curr_buffer]);
 }
 
-/// @summary Attempt to load the LunarG Vulkan loader and resolve all exported and global functions used to create a Vulkan instance or enumerate runtime layers and extensions.
-/// @param runtime The Vulkan runtime instance to populate with function pointers.
-/// @return VK_SUCCESS if Vulkan is available on the host system.
-public_function VkResult
-OsLoadVulkanRuntime
+/// @summary Enumerate the Vulkan drivers installed on the host. A host with no Vulkan drivers installed will have a return value of 0 and *icd_count = 0.
+/// @param icd_list The list of Vulkan ICD information to populate. Memory is allocated using malloc. This value may be NULL if max_icds is 0.
+/// @param max_icds The maximum number of ICD information structures to write to @a icd_list.  This value must be 0 if icd_list is NULL.
+/// @param icd_count On return, the number of ICDs available on the system is stored in this location.
+/// @return Zero if enumeration completed successfully, or -1 if an error occurred.
+public_function int
+OsEnumerateVulkanDrivers
 (
-    OS_VULKAN_RUNTIME *runtime
+    OS_VULKAN_ICD_INFO *icd_list, 
+    size_t              max_icds, 
+    size_t            *icd_count
 )
 {
-    HMODULE  dll_instance = NULL;
-    VkResult       result = VK_SUCCESS;
+    DWORD const MAX_VALUE_NAME = 32768;
+    DWORD          value_count = 0;
+    WCHAR           *value_buf = NULL;
+    size_t            num_icds = 0;
+    HKEY                   key = NULL;
+    LONG                   res = ERROR_SUCCESS;
 
-    // initialize all of the fields of the runtime loader instance.
-    ZeroMemory(runtime, sizeof(OS_VULKAN_RUNTIME));
+    if ((res = RegOpenKeyEx(HKEY_LOCAL_MACHINE, _T("SOFTWARE\\Khronos\\Vulkan\\Drivers"), 0, KEY_READ, &key)) != ERROR_SUCCESS)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to open registry key HKLM\\SOFTWARE\\Khronos\\Vulkan\\Drivers (%08X).\n", __FUNCTION__, GetCurrentThreadId(), res);
+        goto cleanup_and_fail;
+    }
+    if ((value_buf = (WCHAR*) malloc(MAX_VALUE_NAME * sizeof(WCHAR))) == NULL)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to allocate 64KB buffer for registry value name.\n", __FUNCTION__, GetCurrentThreadId());
+        goto cleanup_and_fail;
+    }
+    for ( ; ; )
+    {
+        DWORD nv = MAX_VALUE_NAME - 1;
+        DWORD nd =(DWORD) sizeof(DWORD);
+        DWORD dt = 0;
+        DWORD dv = 0;
+        if ((res = RegEnumValueW(key, value_count, value_buf, &nv, NULL, &dt, (LPBYTE) &dv, &nd)) != ERROR_SUCCESS)
+        {
+            if (res == ERROR_NO_MORE_ITEMS)
+                break;
+            OsLayerError("ERROR: %S(%u): Retrieving Vulkan ICD registry value failed (%08X).\n", __FUNCTION__, GetCurrentThreadId(), res);
+            goto cleanup_and_fail;
+        }
+        if (dt == REG_DWORD && dv == 0 && nd == (DWORD) sizeof(DWORD))
+        {   // this appears to be a valid JSON manifest value. can the manifest file be opened?
+            HANDLE json_fd = CreateFileW(value_buf, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+            if (json_fd != INVALID_HANDLE_VALUE)
+            {   // the manifest file was successfully opened.
+                if (num_icds < max_icds && icd_list != NULL)
+                {
+                    LARGE_INTEGER json_size = {};
+                    uint8_t      *json_data = NULL;
+                    size_t        path_size = wcslen(value_buf) + 1;
+                    WCHAR        *json_path = NULL;
+                    DWORD            nbread = 0;
 
-    // attempt to load the LunarG Vulkan loader into the process address space.
-    if ((dll_instance = LoadLibrary(_T("vulkan-1.dll"))) == NULL)
-    {   // if the LunarG loader isn't available, assume no ICD is present.
-        return VK_ERROR_INITIALIZATION_FAILED;
+                    // zero out the ICD info structure.
+                    ZeroMemory(&icd_list[num_icds], sizeof(OS_VULKAN_ICD_INFO));
+
+                    if (!GetFileSizeEx(json_fd, &json_size))
+                    {   // unable to retrieve the manifest file size, skip this ICD.
+                        OsLayerError("ERROR: %S(%u): Unable to retrieve Vulkan ICD JSON manifest size for \"%s\" (%08X).\n", __FUNCTION__, GetCurrentThreadId(), value_buf, GetLastError());
+                        CloseHandle(json_fd);
+                        continue;
+                    }
+                    if ((json_data = (uint8_t*) malloc((json_size.QuadPart + 4) * sizeof(uint8_t))) == NULL)
+                    {
+                        OsLayerError("ERROR: %S(%u): Unable to allocate %I64d bytes for Vulkan ICD JSON manifest \"%s\".\n", __FUNCTION__, GetCurrentThreadId(), (json_size.QuadPart+4)*sizeof(char), value_buf);
+                        CloseHandle(json_fd);
+                        continue;
+                    }
+                    if ((json_path = (WCHAR*) malloc(path_size * sizeof(WCHAR))) == NULL)
+                    {
+                        OsLayerError("ERROR: %S(%u): Unable to allocate memory for Vulkan ICD JSON manifest path \"%s\".\n", __FUNCTION__, GetCurrentThreadId(), value_buf);
+                        CloseHandle(json_fd);
+                        free(json_data);
+                        continue;
+                    }
+                    if (!ReadFile(json_fd, json_data, (DWORD) json_size.QuadPart, &nbread, NULL))
+                    {
+                        OsLayerError("ERROR: %S(%u): Unable to read JSON data for Vulkan ICD manifest \"%s\" (%08X).\n", __FUNCTION__, GetCurrentThreadId(), value_buf, GetLastError());
+                        CloseHandle(json_fd);
+                        free(json_path);
+                        free(json_data);
+                        continue;
+                    }
+                    // ensure the data is zero-terminated so it can be used with string searching functions.
+                    // since the file encoding is unknown, ensure the string is terminated with four zero-bytes (in case of UTF-32).
+                    json_data[json_size.QuadPart+0] = 0;
+                    json_data[json_size.QuadPart+1] = 0;
+                    json_data[json_size.QuadPart+2] = 0;
+                    json_data[json_size.QuadPart+3] = 0;
+                    // copy the manifest path string over to the user buffer.
+                    CopyMemory(json_path, value_buf, (nv+1) * sizeof(WCHAR));
+                    // TODO(rlk): parse out the "library_path": and "api_version": values within the JSON.
+                    // for now, only support ASCII and UTF-8 encoding, I guess?
+                    icd_list[num_icds].ManifestPath = json_path;
+                    icd_list[num_icds].ManifestData = json_data;
+                    icd_list[num_icds].DriverPath   = NULL; // TODO(rlk): parsed from JSON
+                    icd_list[num_icds].MajorVersion = 0; // TODO(rlk): parsed from JSON
+                    icd_list[num_icds].MinorVersion = 0; // TODO(rlk): parsed from JSON
+                    icd_list[num_icds].PatchVersion = 0; // TODO(rlk): parsed from JSON
+                }
+                CloseHandle(json_fd);
+                num_icds++;
+            }
+        }
+
+        // retrieve the next value under the registry key.
+        ++value_count;
     }
 
+    // cleanup and return.
+    if (icd_count != NULL) *icd_count = num_icds;
+    RegCloseKey(key);
+    free(value_buf);
+    return 0;
+
+cleanup_and_fail:
+    if (value_buf != NULL) free(value_buf);
+    if (key != NULL) RegCloseKey(key);
+    if (icd_list != NULL) ZeroMemory(icd_list, max_icds * sizeof(OS_VULKAN_ICD_INFO));
+    if (icd_count != NULL) *icd_count = 0;
+    return -1;
+}
+
+/// @summary Free memory allocated for a Vulkan ICD records populated by OsEnumerateVulkanDrivers. The ICD list itself is not freed.
+/// @param icd_list The Vulkan ICD list populated by OsEnumerateVulkanDrivers.
+/// @param icd_count The number of ICD records populated by OsEnumerateVulkanDrivers.
+public_function void
+OsFreeVulkanDriverList
+(
+    OS_VULKAN_ICD_INFO *icd_list, 
+    size_t             icd_count
+)
+{
+    if (icd_list != NULL)
+    {
+        for (size_t i = 0; i < icd_count; ++i)
+        {
+            free(icd_list[i].ManifestPath);
+            free(icd_list[i].ManifestData);
+            free(icd_list[i].DriverPath);
+            ZeroMemory(&icd_list[i], sizeof(OS_VULKAN_ICD_INFO));
+        }
+    }
+}
+
+/// @summary Attempt to resolve Vulkan exports and global functions used to create a Vulkan instance or enumerate runtime layers and extensions from an ICD module.
+/// @param runtime The Vulkan runtime instance to populate with function pointers.
+/// @param icd_module The handle to the Vulkan driver or runtime module.
+/// @return VK_SUCCESS if Vulkan is available on the host system.
+public_function VkResult
+OsLoadVulkanDriver
+(
+    OS_VULKAN_RUNTIME_DISPATCH *runtime, 
+    HMODULE                  icd_module
+)
+{
+    VkResult result = VK_SUCCESS;
+
+    // initialize all of the fields of the runtime loader instance.
+    ZeroMemory(runtime, sizeof(OS_VULKAN_RUNTIME_DISPATCH));
+
     // initialize the base loader object fields. this is required prior to resolving additional entry points.
-    runtime->LoaderHandle = dll_instance;
+    runtime->LoaderHandle = icd_module;
 
     // resolve the core Vulkan loader entry points.
     if ((result = OsResolveVulkanExportFunctions(runtime)) != VK_SUCCESS)
     {   // the loader will be unable to load additional required entry points or create an instance.
-        CloseHandle(dll_instance);
-        ZeroMemory(runtime, sizeof(OS_VULKAN_RUNTIME));
+        ZeroMemory(runtime, sizeof(OS_VULKAN_RUNTIME_DISPATCH));
         return result;
     }
     if ((result = OsResolveVulkanGlobalFunctions(runtime)) != VK_SUCCESS)
     {   // the loader will be unable to create an instance or enumerate devices.
-        CloseHandle(dll_instance);
-        ZeroMemory(runtime, sizeof(OS_VULKAN_RUNTIME));
+        ZeroMemory(runtime, sizeof(OS_VULKAN_RUNTIME_DISPATCH));
         return result;
     }
 
     return VK_SUCCESS;
 }
 
+/// @summary Attempt to resolve Vulkan exports and global functions used to create a Vulkan instance or enumerate runtime layers and extensions from an ICD module.
+/// @param runtime The Vulkan runtime instance to populate with function pointers.
+/// @param icd_info A description of the Vulkan client driver to load.
+/// @return VK_SUCCESS if Vulkan is available on the host system.
+public_function VkResult
+OsLoadVulkanIcd
+(
+    OS_VULKAN_RUNTIME_DISPATCH *runtime, 
+    OS_VULKAN_ICD_INFO        *icd_info
+)
+{
+    HMODULE icd_instance = NULL;
+    VkResult      result = VK_SUCCESS;
+
+    if ((icd_instance = LoadLibraryW(icd_info->DriverPath)) == NULL)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to load Vulkan ICD module from \"%s\" (%08X).\n", __FUNCTION__, GetCurrentThreadId(), icd_info->DriverPath, GetLastError());
+        ZeroMemory(runtime, sizeof(OS_VULKAN_RUNTIME_DISPATCH));
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    if ((result = OsLoadVulkanDriver(runtime, icd_instance)) != VK_SUCCESS)
+    {
+        ZeroMemory(runtime, sizeof(OS_VULKAN_RUNTIME_DISPATCH));
+        CloseHandle(icd_instance);
+        return result;
+    }
+    return VK_SUCCESS;
+}
+
+/// @summary Attempt to load the LunarG Vulkan runtime library and resolve all exported and global functions used to create a Vulkan instance or enumerate runtime layers and extensions.
+/// @param runtime The Vulkan runtime instance to populate with function pointers.
+/// @return VK_SUCCESS if Vulkan is available on the host system.
+public_function VkResult
+OsLoadVulkanRuntime
+(
+    OS_VULKAN_RUNTIME_DISPATCH *runtime
+)
+{
+    HMODULE vrt_instance = NULL;
+    VkResult      result = VK_SUCCESS;
+
+    // attempt to load the LunarG Vulkan loader into the process address space.
+    if ((vrt_instance = LoadLibrary(_T("vulkan-1.dll"))) == NULL)
+    {   // if the LunarG loader isn't available, assume no ICD is present.
+        OsLayerError("ERROR: %S(%u): Unable to load LunarG Vulkan runtime module \"vulkan-1.dll\" (%08X).\n", __FUNCTION__, GetCurrentThreadId(), GetLastError());
+        ZeroMemory(runtime, sizeof(OS_VULKAN_RUNTIME_DISPATCH));
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    if ((result = OsLoadVulkanDriver(runtime, vrt_instance)) != VK_SUCCESS)
+    {
+        ZeroMemory(runtime, sizeof(OS_VULKAN_RUNTIME_DISPATCH));
+        CloseHandle(vrt_instance);
+        return result;
+    }
+    return VK_SUCCESS;
+}
+
 /// @summary Retrieve the validation layers and extensions supported by the Vulkan runtime,
 /// @param props The runtime properties structure to populate.
-/// @param runtime A valid OS_VULKAN_RUNTIME structure with global function pointers set.
+/// @param runtime A valid OS_VULKAN_RUNTIME_DISPATCH structure with global function pointers set.
 /// @param arena The memory arena to use to allocate memory for the runtime property data.
 /// @return VK_SUCCESS if the operation is successful.
 public_function VkResult
 OsQueryVulkanRuntimeProperties
 (
     OS_VULKAN_RUNTIME_PROPERTIES *props, 
-    OS_VULKAN_RUNTIME          *runtime, 
+    OS_VULKAN_RUNTIME_DISPATCH *runtime, 
     OS_MEMORY_ARENA              *arena
 )
 {
@@ -6165,8 +5729,8 @@ cleanup_and_fail:
 }
 
 /// @summary Create a new Vulkan instance object and resolve instance-level function pointers for the core API and any enabled extensions.
-/// @param instance The OS_VULKAN_INSTANCE to initialize.
-/// @param runtime A valid OS_VULKAN_RUNTIME structure with global function pointers set.
+/// @param instance The OS_VULKAN_INSTANCE_DISPATCH to initialize.
+/// @param runtime A valid OS_VULKAN_RUNTIME_DISPATCH structure with global function pointers set.
 /// @param create_info The VkInstanceCreateInfo to pass to vkCreateInstance.
 /// @param allocation_callbacks The VkAllocationCallbacks to pass to vkCreateInstance.
 /// @param result If the function returns OS_VULKAN_LOADER_RESULT_VKERROR, the Vulkan result code is stored at this location.
@@ -6174,8 +5738,8 @@ cleanup_and_fail:
 public_function VkResult
 OsCreateVulkanInstance
 (
-    OS_VULKAN_INSTANCE                      *instance,
-    OS_VULKAN_RUNTIME                        *runtime, 
+    OS_VULKAN_INSTANCE_DISPATCH             *instance,
+    OS_VULKAN_RUNTIME_DISPATCH               *runtime, 
     VkInstanceCreateInfo  const          *create_info, 
     VkAllocationCallbacks const *allocation_callbacks
 )
@@ -6183,7 +5747,7 @@ OsCreateVulkanInstance
     VkResult result = VK_SUCCESS;
 
     // initialize all of the fields of the Vulkan instance.
-    ZeroMemory(instance, sizeof(OS_VULKAN_INSTANCE));
+    ZeroMemory(instance, sizeof(OS_VULKAN_INSTANCE_DISPATCH));
 
     // create the Vulkan API context (instance) used to enumerate physical devices and extensions.
     if ((result = runtime->vkCreateInstance(create_info, allocation_callbacks, &instance->InstanceHandle)) != VK_SUCCESS)
@@ -6195,7 +5759,7 @@ OsCreateVulkanInstance
     if ((result = OsResolveVulkanInstanceFunctions(runtime, instance, create_info)) != VK_SUCCESS)
     {
         OsLayerError("ERROR: %S(%u): Unable to resolve one or more Vulkan instance-level functions (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
-        ZeroMemory(instance, sizeof(OS_VULKAN_INSTANCE));
+        ZeroMemory(instance, sizeof(OS_VULKAN_INSTANCE_DISPATCH));
         return result;
     }
 
@@ -6322,7 +5886,7 @@ OsSupportsAllVulkanInstanceExtensions
 
 /// @summary Enumerate all Vulkan-capable physical devices and display outputs on the host.
 /// @param device_list The list of device properties to populate.
-/// @param instance A valid OS_VULKAN_INSTANCE structure with instance-level function pointers set.
+/// @param instance A valid OS_VULKAN_INSTANCE_DISPATCH structure with instance-level function pointers set.
 /// @param arena The memory arena to use to allocate memory for the runtime property data.
 /// @param exe_instance The HINSTANCE passed to the WinMain of the application.
 /// @return VK_SUCCESS if the operation is successful.
@@ -6330,7 +5894,7 @@ public_function VkResult
 OsEnumerateVulkanPhysicalDevices
 (
     OS_VULKAN_PHYSICAL_DEVICE_LIST *device_list, 
-    OS_VULKAN_INSTANCE                *instance,
+    OS_VULKAN_INSTANCE_DISPATCH       *instance,
     OS_MEMORY_ARENA                      *arena, 
     HINSTANCE                      exe_instance
 )
@@ -6774,8 +6338,8 @@ cleanup_and_fail:
 }
 
 /// @summary Create a new Vulkan logical device object and resolve device-level function pointers for the core API and any enabled extensions.
-/// @param device The OS_VULKAN_DEVICE to initialize.
-/// @param instance A valid OS_VULKAN_INSTANCE structure with instance function pointers set.
+/// @param device The OS_VULKAN_DEVICE_DISPATCH to initialize.
+/// @param instance A valid OS_VULKAN_INSTANCE_DISPATCH structure with instance function pointers set.
 /// @param physical_device The handle of the Vulkan-capable physical device to associate with the logical device.
 /// @param create_info The VkDeviceCreateInfo to pass to vkCreateDevice.
 /// @param allocation_callbacks The VkAllocationCallbacks to pass to vkCreateInstance.
@@ -6784,8 +6348,8 @@ cleanup_and_fail:
 public_function VkResult
 OsCreateVulkanLogicalDevice
 (
-    OS_VULKAN_DEVICE                          *device,
-    OS_VULKAN_INSTANCE                      *instance,
+    OS_VULKAN_DEVICE_DISPATCH                 *device,
+    OS_VULKAN_INSTANCE_DISPATCH             *instance,
     VkPhysicalDevice                  physical_device, 
     VkDeviceCreateInfo    const          *create_info, 
     VkAllocationCallbacks const *allocation_callbacks
@@ -6794,7 +6358,7 @@ OsCreateVulkanLogicalDevice
     VkResult result = VK_SUCCESS;
 
     // initialize all of the fields of the Vulkan logical device.
-    ZeroMemory(device, sizeof(OS_VULKAN_DEVICE));
+    ZeroMemory(device, sizeof(OS_VULKAN_DEVICE_DISPATCH));
 
     // create the Vulkan logical device object.
     if ((result = instance->vkCreateDevice(physical_device, create_info, allocation_callbacks, &device->DeviceHandle)) != VK_SUCCESS)
@@ -6806,7 +6370,7 @@ OsCreateVulkanLogicalDevice
     if ((result = OsResolveVulkanDeviceFunctions(instance, device, create_info)) != VK_SUCCESS)
     {
         OsLayerError("ERROR: %S(%u): Unable to resolve one or more Vulkan device-level functions (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), result);
-        ZeroMemory(device, sizeof(OS_VULKAN_DEVICE));
+        ZeroMemory(device, sizeof(OS_VULKAN_DEVICE_DISPATCH));
         return result;
     }
     // save the associated physical device handle for later reference.
@@ -8734,395 +8298,389 @@ OsCreateNativeDirectory
     return 0;
 }
 
-/*
-/// @summary Initializes a file system driver.
-/// @param driver The file system driver to initialize.
-/// @param init Configuration data used to initialize the filesystem implementation.
-/// @param arena The OS_MEMORY_ARENA used to allocate filesystem resources.
-/// @return Zero on success, or -1 if an error occurred.
-public_function int 
-OsCreateFilesystem
+/// @summary Calculate the number of bytes in a string.
+/// @param beg A pointer to the first character of the string.
+/// @param end This value either points to the end of the string/zero terminator, or points to NULL, in which case the input string is scanned for a zero terminator and the location is written to this address.
+/// @return The number of bytes in the string, including the zero terminator.
+public_function size_t
+OsStringByteCount
 (
-    OS_FILE_SYSTEM              *fs,
-    OS_FILE_SYSTEM_INIT const *init,
-    OS_MEMORY_ARENA          *arena
+    char const  *beg, 
+    char const **end
+)
+{   // length is the length in characters.
+    size_t length = 0;
+    if (beg != NULL)
+    {   // typical case; the input string is not NULL.
+        if ((end != NULL) && (*end > beg))
+        {   // fast path - caller already knows where the end of the string is.
+            length = (size_t)(*end - beg);
+        }
+        else
+        {   // slow(er) path - scan for a zero terminator character.
+            length = strlen(beg);
+            if (end != NULL)
+            {   // set the end-of-string pointer for the caller.
+                *end = beg + length;
+            }
+            length++; // +1 to include zero-terminator character.
+        }
+    }
+    return length;
+}
+
+/// @summary Calculate the number of bytes in a string.
+/// @param beg A pointer to the first codepoint of the string.
+/// @param end This value either points to the end of the string/zero terminator, or points to NULL, in which case the input string is scanned for a zero terminator and the location is written to this address.
+/// @return The number of bytes in the string, including the zero terminator.
+public_function size_t
+OsStringByteCount
+(
+    WCHAR const  *beg, 
+    WCHAR const **end
+)
+{   // length is the length in characters.
+    size_t length = 0;
+    if (beg != NULL)
+    {   // typical case; the input string is not NULL.
+        if ((end != NULL) && (*end > beg))
+        {   // fast path - caller already knows where the end of the string is.
+            length = (size_t)(*end - beg);
+        }
+        else
+        {   // slow(er) path - scan for a zero terminator character.
+            length = wcslen(beg);
+            if (end != NULL)
+            {   // set the end-of-string pointer for the caller.
+                *end = beg + length;
+            }
+            length++; // +1 to include zero-terminator character.
+        }
+    }
+    return length * sizeof(WCHAR);
+}
+
+/// @summary Calculate the amount of memory required to create an OS thread pool.
+/// @param thread_count The number of threads in the thread pool.
+/// @return The number of bytes required to create an OS_IO_THREAD_POOL with the specified number of worker threads. This value does not include the thread-local memory or thread stack memory.
+public_function size_t
+OsCalculateMemoryForIoThreadPool
+(
+    size_t thread_count
 )
 {
-    os_arena_marker_t marker = OsMemoryArenaMark(arena);
-
-    // initialize the fields of the filesystem object.
-    ZeroMemory(fs, sizeof(OS_FILE_SYSTEM));
-    
-    // create the table used for storing mount point data.
-    InitializeSRWLock(&fs->MountpointLock);
-    if (OsCreateMountpointTable(&fs->MountpointTable, init->MaxMountPoints) < 0)
-    {
-        OsLayerError("ERROR: %S(%u): Unable to allocate memory for %Iu-entry mount point table.\n", __FUNCTION__, GetCurrentThreadId(), init->MaxMountPoints);
-        goto cleanup_and_fail;
-    }
-    // ...
-    return 0;
-
-cleanup_and_fail:
-    OsMemoryArenaResetToMarker(arena, marker);
-    ZeroMemory(fs, sizeof(OS_FILE_SYSTEM));
-    return -1;
+    size_t size_in_bytes = 0;
+    size_in_bytes += OsAllocationSizeForArray<unsigned int>(thread_count);
+    size_in_bytes += OsAllocationSizeForArray<HANDLE>(thread_count);
+    size_in_bytes += OsAllocationSizeForArray<HANDLE>(thread_count);
+    size_in_bytes += OsAllocationSizeForArray<HANDLE>(thread_count);
+    return size_in_bytes;
 }
 
-/// @summary Creates a mount point backed by a well-known directory.
-/// @param fs The file system driver.
-/// @param folder_id One of OS_KNOWN_PATH specifying the well-known directory.
-/// @param mount_path The NULL-terminated UTF-8 string specifying the root of the mount point as exposed to the application code. Multiple mount points may share the same mount_path, but have different source_path, mount_id and priority values.
-/// @param priority The priority assigned to this specific mount point, with higher numeric values corresponding to higher priority values.
-/// @param mount_id A unique application-defined identifier for the mount point. This identifier can be used to reference the specific mount point.
-/// @return Zero if the mount point was successfully created, or -1 if an error occurred.
-public_function int 
-OsMountKnownPath
-(
-    OS_FILE_SYSTEM     *fs, 
-    int          folder_id, 
-    char const *mount_path, 
-    uint32_t      priority, 
-    uintptr_t     mount_id
-)
-{   // retrieve the path specified by folder_id for use as the source path.
-    size_t const MAX_PATH_CHARS = 32768;
-    size_t         source_bytes = 0;
-    size_t         buffer_bytes = MAX_PATH_CHARS * sizeof(WCHAR);
-    WCHAR  source_wide[MAX_PATH_CHARS]; // 64KB - probably overkill
-    if (!OsKnownPath(source_wide, buffer_bytes, source_bytes, folder_id))
-    {   // unrecognized folder_id.
-        return -1;
-    }
-    if (OsSetupMountpoint(fs, source_wide, FILE_ATTRIBUTE_DIRECTORY, mount_path, priority, mount_id) < 0)
-    {   // unable to finish internal setup of the mount point.
-        return -1;
-    }
-    return 0;
-}
-
-/// @summary Creates a mount point backed by the specified archive file or directory.
-/// @param fs The file system driver.
-/// @param source_path The NULL-terminated UTF-8 string specifying the path of the file or directory that represents the root of the mount point.
-/// @param mount_path The NULL-terminated UTF-8 string specifying the root of the mount point as exposed to the application code. Multiple mount points may share the same mount_path, but have different source_path, mount_id and priority values.
-/// @param priority The priority assigned to this specific mount point, with higher numeric values corresponding to higher priority values.
-/// @param mount_id A unique application-defined identifier for the mount point. This identifier can be used to reference the specific mount point.
-/// @return Zero if the mount point was successfully created, or -1 if an error occurred.
+/// @summary Create a thread pool. The calling thread is blocked until all worker threads have successfully started and initialized.
+/// @param pool The OS_IO_THREAD_POOL instance to initialize.
+/// @param init An OS_IO_THREAD_POOL_INIT object describing the thread pool configuration.
+/// @param arena The OS_MEMORY_ARENA from which all thread pool memory is allocated.
+/// @param name A zero-terminated string constant specifying a human-readable name for the thread pool, or NULL. This name is used for task profiler display.
+/// @return Zero if the thread pool is created successfully and worker threads are ready-to-run, or -1 if an error occurs.
 public_function int
-OsMountPhysicalPath
+OsCreateIoThreadPool
 (
-    OS_FILE_SYSTEM      *fs, 
-    char const *source_path, 
-    char const  *mount_path, 
-    uint32_t       priority, 
-    uintptr_t      mount_id
+    OS_IO_THREAD_POOL      *pool, 
+    OS_IO_THREAD_POOL_INIT *init,
+    OS_MEMORY_ARENA       *arena,
+    char const             *name=NULL
 )
-{   // convert the source path to a wide character string once during mounting.
-    size_t source_chars = 0;
-    size_t source_bytes = 0;
-    DWORD  source_attr  = 0;
-    WCHAR *source_wide  = NULL;
-    if   ((source_wide  = OsUtf8ToNativeMalloc(source_path, source_chars, source_bytes)) == NULL)
-    {   // unable to convert UTF-8 to wide character string.
+{
+    HANDLE                  iocp = NULL;
+    HANDLE         evt_terminate = NULL;
+    os_arena_marker_t mem_marker = OsMemoryArenaMark(arena);
+    size_t        bytes_required = OsCalculateMemoryForIoThreadPool(init->ThreadCount);
+    size_t        align_required = std::alignment_of<HANDLE>::value;
+    DWORD                    tid = GetCurrentThreadId();
+
+    UNREFERENCED_PARAMETER(name);
+
+    // Zero the fields of the OS_IO_THREAD_POOL instance to start from a known state.
+    ZeroMemory(pool, sizeof(OS_IO_THREAD_POOL));
+
+    if (!OsMemoryArenaCanSatisfyAllocation(arena, bytes_required, align_required))
+    {
+        OsLayerError("ERROR: %S(%u): Insufficient memory to create thread pool.\n", __FUNCTION__, tid);
+        goto cleanup_and_fail;
+    }
+    if ((evt_terminate = CreateEvent(NULL, TRUE, FALSE, NULL)) == NULL)
+    {   // without the termination event, there's no way to synchronize worker shutdown.
+        OsLayerError("ERROR: %S(%u): Unable to create I/O pool termination event (0x%08X).\n", __FUNCTION__, tid, GetLastError());
+        goto cleanup_and_fail;
+    }
+    if ((iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, (DWORD) init->ThreadCount+1)) == NULL)
+    {   // without the completion port, there's no way to synchronize worker execution.
+        OsLayerError("ERROR: %S(%u): Unable to create I/O pool completion port (0x%08X).\n", __FUNCTION__, tid, GetLastError());
         goto cleanup_and_fail;
     }
 
-    // determine whether the source path is a directory or a file.
-    // TODO(rlk): GetFileAttributes() won't work (GetLastError() => ERROR_BAD_NETPATH)
-    // in that case that source_path is the root of a network share. maybe fix this.
-    if ((source_attr = GetFileAttributesW(source_wide)) == INVALID_FILE_ATTRIBUTES)
-    {   // the source path must exist. mount fails.
-        OsLayerError("ERROR: %S(%u): Unable to retrieve attributes for path %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), source_wide, GetLastError());
+    // initialize the thread pool fields and allocate memory for per-thread arrays.
+    pool->ActiveThreads    = 0;
+    pool->OSThreadIds      = OsMemoryArenaAllocateArray<unsigned int>(arena, init->ThreadCount);
+    pool->OSThreadHandle   = OsMemoryArenaAllocateArray<HANDLE      >(arena, init->ThreadCount);
+    pool->WorkerReady      = OsMemoryArenaAllocateArray<HANDLE      >(arena, init->ThreadCount);
+    pool->WorkerError      = OsMemoryArenaAllocateArray<HANDLE      >(arena, init->ThreadCount);
+    if (pool->OSThreadIds == NULL || pool->OSThreadHandle == NULL || 
+        pool->WorkerReady == NULL || pool->WorkerError    == NULL)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to allocate I/O pool memory.\n", __FUNCTION__, tid);
         goto cleanup_and_fail;
     }
-    if (OsSetupMountpoint(fs, source_wide, source_attr, mount_path, priority, mount_id) < 0)
-    {   // unable to finish internal setup of the mount point.
-        goto cleanup_and_fail;
+    pool->CompletionPort  = iocp;
+    pool->TerminateSignal = evt_terminate;
+    ZeroMemory(pool->OSThreadIds    , init->ThreadCount * sizeof(unsigned int));
+    ZeroMemory(pool->OSThreadHandle , init->ThreadCount * sizeof(HANDLE));
+    ZeroMemory(pool->WorkerReady    , init->ThreadCount * sizeof(HANDLE));
+    ZeroMemory(pool->WorkerError    , init->ThreadCount * sizeof(HANDLE));
+
+    // set up the worker init structure and spawn all threads.
+    for (size_t i = 0, n = init->ThreadCount; i < n; ++i)
+    {
+        OS_IO_THREAD_INIT  winit  = {};
+        HANDLE             whand  = NULL;
+        HANDLE            wready  = NULL;
+        HANDLE            werror  = NULL;
+        unsigned int   thread_id  = 0;
+        const DWORD THREAD_READY  = 0;
+        const DWORD THREAD_ERROR  = 1;
+        const DWORD   WAIT_COUNT  = 2;
+        HANDLE   wset[WAIT_COUNT] = {};
+        DWORD             waitrc  = 0;
+
+        // create the manual-reset events signaled by the worker to indicate that it is ready.
+        if ((wready = CreateEvent(NULL, TRUE, FALSE, NULL)) == NULL)
+        {
+            OsLayerError("ERROR: %S(%u): Unable to create ready signal for I/O worker %Iu of %Iu (0x%08X).\n", __FUNCTION__, tid, i, n, GetLastError());
+            goto cleanup_and_fail;
+        }
+        if ((werror = CreateEvent(NULL, TRUE, FALSE, NULL)) == NULL)
+        {
+            OsLayerError("ERROR: %S(%u): Unable to create error signal for I/O worker %Iu of %Iu (0x%08X).\n", __FUNCTION__, tid, i, n, GetLastError());
+            CloseHandle(wready);
+            goto cleanup_and_fail;
+        }
+
+        // populate the IO_THREAD_INIT and then spawn the worker thread.
+        // the worker thread will need to copy this structure if it wants to access it 
+        // past the point where it signals the wready event.
+        winit.ThreadPool      = pool;
+        winit.ReadySignal     = wready;
+        winit.ErrorSignal     = werror;
+        winit.TerminateSignal = evt_terminate;
+        winit.CompletionPort  = iocp;
+        winit.PoolContext     = init->PoolContext;
+        if ((whand = (HANDLE) _beginthreadex(NULL, Kilobytes(64), OsIoThreadMain, &winit, 0, &thread_id)) == NULL)
+        {
+            OsLayerError("ERROR: %S(%u): Unable to spawn I/O worker %Iu of %Iu (errno = %d).\n", __FUNCTION__, tid, i, n, errno);
+            CloseHandle(werror);
+            CloseHandle(wready);
+            goto cleanup_and_fail;
+        }
+
+        // save the various thread attributes in case 
+        pool->OSThreadHandle[i] = whand;
+        pool->OSThreadIds[i] = thread_id;
+        pool->WorkerReady[i] = wready;
+        pool->WorkerError[i] = werror;
+        pool->ActiveThreads++;
+
+        // wait for the thread to become ready.
+        wset[THREAD_READY] = wready; 
+        wset[THREAD_ERROR] = werror;
+        if ((waitrc = WaitForMultipleObjects(WAIT_COUNT, wset, FALSE, INFINITE)) != (WAIT_OBJECT_0+THREAD_READY))
+        {   // thread initialization failed, or the wait failed.
+            // events are already in the IO_THREAD_POOL arrays, so don't clean up here.
+            OsLayerError("ERROR: %S(%u): Failed to initialize I/O worker %Iu of %Iu (0x%08X).\n", __FUNCTION__, tid, i, n, waitrc);
+            goto cleanup_and_fail;
+        }
     }
 
-    // the wide character string is no longer needed.
-    free(source_wide);
+    // everything has been successfully initialized. 
+    // all worker threads are waiting on the completion port.
     return 0;
 
 cleanup_and_fail:
-    if (source_wide != NULL) free(source_wide);
+    if (pool->ActiveThreads > 0)
+    {   // signal all threads to terminate, and then wait until they all die.
+        // all workers are blocked waiting on the launch event.
+        SetEvent(evt_terminate);
+        WaitForMultipleObjects((DWORD) pool->ActiveThreads, pool->OSThreadHandle, TRUE, INFINITE);
+        // now that all threads have exited, close their handles.
+        for (size_t i = 0, n = pool->ActiveThreads; i < n; ++i)
+        {
+            if (pool->OSThreadHandle != NULL) CloseHandle(pool->OSThreadHandle[i]);
+            if (pool->WorkerReady    != NULL) CloseHandle(pool->WorkerReady[i]);
+            if (pool->WorkerError    != NULL) CloseHandle(pool->WorkerError[i]);
+        }
+    }
+    // clean up the I/O completion port and synchronization objects.
+    if (evt_terminate) CloseHandle(evt_terminate);
+    if (iocp) CloseHandle(iocp);
+    // reset the memory arena back to its initial state.
+    OsMemoryArenaResetToMarker(arena, mem_marker);
+    // zero out the OS_IO_THREAD_POOL prior to returning to the caller.
+    ZeroMemory(pool, sizeof(OS_IO_THREAD_POOL));
     return -1;
 }
 
-/// @summary Creates a mount point backed by the specified archive or directory, specified as a virtual path.
-/// @param fs The file system driver.
-/// @param virtual_path The NULL-terminated UTF-8 string specifying the virtual path of the file or directory that represents the root of the mount point.
-/// @param mount_path The NULL-terminated UTF-8 string specifying the root of the mount point as exposed to the application code. Multiple mount points may share the same mount_path, but have different source_path, mount_id and priority values.
-/// @param priority The priority assigned to this specific mount point, with higher numeric values corresponding to higher priority values.
-/// @param mount_id A unique application-defined identifier for the mount point. This identifier can be used to reference the specific mount point.
-/// @return Zero if the mount point was successfully created, or -1 if an error occurred.
-public_function int 
-OsMountVirtualPath
+/// @summary Perform a fast shutdown of a thread pool. The calling thread does not wait for the worker threads to exit. No handles are closed.
+/// @param pool The OS_IO_THREAD_POOL to shut down.
+public_function void
+OsTerminateIoThreadPool
 (
-    OS_FILE_SYSTEM       *fs, 
-    char const *virtual_path, 
-    char const   *mount_path, 
-    uint32_t        priority, 
-    uintptr_t       mount_id
+    OS_IO_THREAD_POOL *pool
 )
-{   // convert the virtual path to a native filesystem path.
-    size_t const      MAX_PATH_CHARS = 32768;
-    DWORD                source_attr = 0;
-    WCHAR source_wide[MAX_PATH_CHARS]; // 64KB - probably overkill
-    if (OsResolveFilesystemPath(fs, virtual_path, source_wide, MAX_PATH_CHARS) < 0)
-    {   // cannot resolve the virtual path to a filesystem mount point.
-        return -1;
+{
+    if (pool->ActiveThreads > 0)
+    {   // signal the termination event prior to waking any waiting threads.
+        SetEvent(pool->TerminateSignal);
+        // signal all worker threads in the pool. any active processing will complete before this signal is received.
+        for (size_t i = 0; i < pool->ActiveThreads; ++i)
+        {
+            if (!PostQueuedCompletionStatus(pool->CompletionPort, 0, OS_IO_COMPLETION_KEY_SHUTDOWN, NULL))
+            {
+                OsLayerError("ERROR: %S(%u): Failed to post shutdown signal to I/O worker %Iu (%08X).\n", __FUNCTION__, GetCurrentThreadId(), i, GetLastError());
+            }
+        }
     }
+}
 
-    // determine whether the source path is a directory or a file.
-    // TODO(rlk): GetFileAttributes() won't work (GetLastError() => ERROR_BAD_NETPATH)
-    // in that case that source_path is the root of a network share. maybe fix this.
-    if ((source_attr = GetFileAttributesW(source_wide)) == INVALID_FILE_ATTRIBUTES)
-    {   // the source path must exist. mount fails.
-        OsLayerError("ERROR: %S(%u): Unable to retrieve attributes for path %s (%08X).\n", __FUNCTION__, GetCurrentThreadId(), source_wide, GetLastError());
+/// @summary Perform a complete shutdown and cleanup of a thread pool. The calling thread is blocked until all threads exit.
+/// @param pool The OS_IO_THREAD_POOL to shut down and clean up.
+public_function void
+OsDestroyIoThreadPool
+(
+    OS_IO_THREAD_POOL *pool
+)
+{
+    if (pool->ActiveThreads > 0)
+    {   // signal the termination event prior to waking any waiting threads.
+        SetEvent(pool->TerminateSignal);
+        // signal all worker threads in the pool. any active processing will complete before this signal is received.
+        for (size_t i = 0; i < pool->ActiveThreads; ++i)
+        {
+            if (!PostQueuedCompletionStatus(pool->CompletionPort, 0, OS_IO_COMPLETION_KEY_SHUTDOWN, NULL))
+            {
+                OsLayerError("ERROR: %S(%u): Failed to post shutdown signal to I/O worker %Iu (%08X).\n", __FUNCTION__, GetCurrentThreadId(), i, GetLastError());
+            }
+        }
+        // finally, wait for all threads to terminate gracefully.
+        WaitForMultipleObjects((DWORD) pool->ActiveThreads, pool->OSThreadHandle, TRUE, INFINITE);
+        // now that all threads have exited, close their handles.
+        for (size_t i = 0, n = pool->ActiveThreads; i < n; ++i)
+        {
+            CloseHandle(pool->OSThreadHandle[i]);
+            CloseHandle(pool->WorkerReady[i]);
+            CloseHandle(pool->WorkerError[i]);
+        }
+        ZeroMemory(pool->OSThreadIds   , pool->ActiveThreads * sizeof(unsigned int));
+        ZeroMemory(pool->OSThreadHandle, pool->ActiveThreads * sizeof(HANDLE));
+        ZeroMemory(pool->WorkerReady   , pool->ActiveThreads * sizeof(HANDLE));
+        ZeroMemory(pool->WorkerError   , pool->ActiveThreads * sizeof(HANDLE));
+        pool->ActiveThreads = 0;
+    }
+    if (pool->TerminateSignal != NULL)
+    {
+        CloseHandle(pool->TerminateSignal);
+        pool->TerminateSignal = NULL;
+    }
+    if (pool->CompletionPort != NULL)
+    {
+        CloseHandle(pool->CompletionPort);
+        pool->CompletionPort = NULL;
+    }
+}
+
+/// @summary Create an I/O request pool.
+/// @param pool The I/O request pool to initialize.
+/// @param arena The memory arena from which the request pool will be allocated.
+/// @param pool_capacity The maximum number of I/O requests that can be allocated from the pool at any one time.
+/// @return Zero if the pool is successfully initialized, or -1 if an error occurred.
+public_function int
+OsCreateIoRequestPool
+(
+    OS_IO_REQUEST_POOL *pool, 
+    OS_MEMORY_ARENA   *arena, 
+    size_t     pool_capacity
+)
+{
+    OS_IO_REQUEST *node_pool = NULL;
+
+    // initialize the fields of the OS_IO_REQUEST_POOL instance.
+    ZeroMemory(pool, sizeof(OS_IO_REQUEST_POOL));
+
+    // allocate and initialize the pool nodes and free list.
+    if ((node_pool = OsMemoryArenaAllocateArray<OS_IO_REQUEST>(arena, pool_capacity)) == NULL)
+    {
+        OsLayerError("ERROR: %S(%u): Unable to allocate I/O request pool of %Iu items.\n", __FUNCTION__, GetCurrentThreadId(), pool_capacity);
         return -1;
     }
-    if (OsSetupMountpoint(fs, source_wide, source_attr, mount_path, priority, mount_id) < 0)
-    {   // unable to finish internal setup of the mount point.
-        return -1;
+    ZeroMemory(node_pool,  pool_capacity * sizeof(OS_IO_REQUEST));
+    for (size_t i = 0; i < pool_capacity; ++i)
+    {
+        node_pool[i].NextRequest = pool->FreeRequest;
+        pool->FreeRequest = &node_pool[i];
     }
+    InitializeCriticalSectionAndSpinCount(&pool->ListLock, 0x1000);
+    pool->NodePool = node_pool;
     return 0;
 }
 
-/// @summary Removes a mount point associated with a specific application mount point identifier.
-/// @param fs The file system driver.
-/// @param mount_id The application-defined mount point identifer, as supplied to one of the OsMount* functions.
-public_function void 
-OsUnmount
+/// @summary Allocate an I/O request from an I/O request pool.
+/// @param pool The I/O request pool to allocate from.
+/// @return The I/O request, or NULL if no requests are available in the pool.
+public_function OS_IO_REQUEST*
+OsAllocateIoRequest
 (
-    OS_FILE_SYSTEM *fs, 
-    uintptr_t mount_id
+    OS_IO_REQUEST_POOL *pool
 )
 {
-    AcquireSRWLockExclusive(&fs->MountpointLock);
-    OsRemoveMountpointId(&fs->MountpointTable, mount_id);
-    ReleaseSRWLockExclusive(&fs->MountpointLock);
-}
-
-/// @summary Deletes all mount points attached to a given root path.
-/// @param fs The file system driver.
-/// @param mount_path A NULL-terminated UTF-8 string specifying the mount point root, as was supplied to one of the OsMount* functions. All mount points that were mounted to this path will be deleted.
-public_function void 
-OsUnmountAll
-(
-    OS_FILE_SYSTEM     *fs, 
-    char const *mount_path
-)
-{   // create version of mount_path with trailing slash.
-    size_t len        = strlen(mount_path);
-    char  *mount_root = (char*)mount_path;
-    if (len > 0 && mount_path[len-1]  != '/')
-    {   // allocate a temporary buffer on the stack.
-        mount_root = (char*)alloca(len + 2);
-        memcpy(mount_root , mount_path , len);
-        mount_root[len]   = '/';
-        mount_root[len+1] = 0;
-    }
-    // search for matches and remove items in reverse.
-    // this minimizes data movement and simplifies logic.
-    AcquireSRWLockExclusive(&fs->MountpointLock);
-    for (intptr_t i = fs->MountpointTable.Count - 1; i >= 0; --i)
+    OS_IO_REQUEST *node = NULL;
+    EnterCriticalSection(&pool->ListLock);
     {
-        if (OsMountPointMatchExact(fs->MountpointTable.MountpointData[i].Root, mount_root))
-        {   // the mount point paths match, so remove this item.
-            OsRemoveMountpointAt(&fs->MountpointTable, i);
+        if ((node = pool->FreeRequest) != NULL)
+        {   // pop a node from the head of the free list.
+            pool->FreeRequest      = pool->FreeRequest->NextRequest;
+            // insert the node at the head of the live list.
+            node->NextRequest      = pool->LiveRequest;
+            node->PrevRequest      = NULL;
+            node->RequestPool      = pool;
+            if (pool->LiveRequest != NULL)
+                pool->LiveRequest->PrevRequest = node;
+            pool->LiveRequest      = node;
+            node->RequestState     = OS_IO_REQUEST_STATE_CHAINED;
         }
     }
-    ReleaseSRWLockExclusive(&fs->MountpointLock);
+    LeaveCriticalSection(&pool->ListLock);
+    return node;
 }
 
-/// @summary Closes the underlying file handle and releases the VFS driver's reference to the underlying stream decoder.
-/// @param file_info Internal information relating to the file to close.
-public_function void 
-OsCloseFile
+/// @summary Submit an I/O request for asynchronous execution.
+/// @param io_pool The I/O thread pool that will execute the asynchronous I/O request.
+/// @param request The I/O request to submit to the queue. The request will be executed by a worker thread.
+/// @return true if the request is successfully submitted.
+public_function bool
+OsSubmitIoRequest
 (
-    OS_FILE *file_info
+    OS_IO_THREAD_POOL *io_pool, 
+    OS_IO_REQUEST     *request
 )
 {
-    if (file_info->Filemap != NULL)
+    request->RequestState = OS_IO_REQUEST_STATE_SUBMITTED;
+    request->IoSubmitTime = OsTimestampInTicks();
+    if (!PostQueuedCompletionStatus(io_pool->CompletionPort, 0, 0, &request->Overlapped))
     {
-        CloseHandle(file_info->Filemap);
-        file_info->Filemap = NULL;
+        OsReturnIoRequest(request);
+        OsLayerError("ERROR: %S(%u): Failed to submit request %p from pool %p (%08X).\n", __FUNCTION__, GetCurrentThreadId(), request, request->RequestPool, GetLastError());
+        return false;
     }
-    if (file_info->Filedes != INVALID_HANDLE_VALUE)
-    {
-        CloseHandle(file_info->Filedes);
-        file_info->Filedes = INVALID_HANDLE_VALUE;
-    }
+    return true;
 }
 
-/// @summary Open a file. Close the file using OsCloseFile().
-/// @param fs The file system driver.
-/// @param path A NULL-terminated UTF-8 string specifying the virtual file path.
-/// @param usage One of OS_FILE_USAGE specifying how the file will be accessed.
-/// @param hints One or more of OS_FILE_USAGE_HINTS specifying how to open the file. The file is opened for reading and writing.
-/// @param file On return, this structure is populated with file information.
-/// @return One of OS_IO_RESULT indicating the result of the operation.
-public_function int 
-OsOpenFile
-(
-    OS_FILE_SYSTEM  *fs, 
-    char const    *path, 
-    int           usage,
-    uint32_t      hints, 
-    OS_FILE       *file
-)
-{
-    char const  *relpath = NULL;
-    int           result = OS_IO_RESULT_SUCCESS;
-    if ((result = OsResolveAndOpenFile(fs, path, usage, hints, file, &relpath)) == OS_IO_RESULT_SUCCESS)
-    {
-        if (hints & OS_FILE_USAGE_HINT_ASYNCHRONOUS)
-        {   // associate the file handle with the I/O completion port managed by the AIO driver.
-            //DWORD    asio_result = aio_driver_prepare(driver->AIO, file->Fildes);
-            //if (!SUCCESS(asio_result))
-            //{   // could not associate the file handle with the I/O completion port.
-            //    OsCloseFile(file);
-            //    return asio_result;
-            //}
-        }
-    }
-    return result;
-}
-
-/// @summary Synchronously reads data from a file opened for manual I/O.
-/// @param file The file state returned from OsOpenFile().
-/// @param offset The absolute byte offset at which to start reading data.
-/// @param buffer The buffer into which data will be written.
-/// @param size The maximum number of bytes to read.
-/// @param bytes_read On return, this value is set to the number of bytes actually read. This may be less than the number of bytes requested, or 0 at end-of-file.
-/// @return One of OS_IO_RESULT.
-public_function int 
-OsReadFile
-(
-    OS_FILE      *file, 
-    int64_t     offset, 
-    void       *buffer, 
-    size_t        size, 
-    size_t &bytes_read
-)
-{
-    LARGE_INTEGER oldpos;
-    LARGE_INTEGER newpos;
-    oldpos.QuadPart  = 0;
-    newpos.QuadPart  = offset;
-    if (!SetFilePointerEx(file->Filedes, newpos, &oldpos, FILE_BEGIN))
-    {   // unable to seek to the specified offset.
-        bytes_read    = 0;
-        file->OSError = GetLastError();
-        return OS_IO_RESULT_OSERROR;
-    }
-    // safely read the requested number of bytes. for very large reads,
-    // size > UINT32_MAX, the result is undefined, so possibly split the
-    // read up into several sub-reads (though this case is unlikely...)
-    bytes_read      = 0;
-    uint8_t*bufferp =(uint8_t*) buffer;
-    while  (bytes_read < size)
-    {
-        DWORD nread = 0;
-        DWORD rsize = Megabytes(1);
-        if (size_t(rsize) > (size - bytes_read))
-        {   // read only the amount remaining.
-            rsize = (DWORD) (size - bytes_read);
-        }
-        if (ReadFile(file->Filedes, &bufferp[bytes_read], rsize, &nread, NULL))
-        {   // the synchronous read completed successfully.
-            bytes_read += nread;
-        }
-        else
-        {   // an error occurred; save the error code.
-            file->OSError = GetLastError();
-            return OS_IO_RESULT_OSERROR;
-        }
-    }
-    return OS_IO_RESULT_SUCCESS;
-}
-
-/// @summary Synchronously writes data to a file opened for manual I/O.
-/// @param file The file state returned from OsOpenFile().
-/// @param offset The absolute byte offset at which to start writing data.
-/// @param buffer The data to be written to the file.
-/// @param size The number of bytes to write to the file.
-/// @param bytes_written On return, this value is set to the number of bytes actually written to the file.
-/// @return One of OS_IO_RESULT.
-public_function int 
-OsWriteFile
-(
-    OS_FILE         *file, 
-    int64_t        offset, 
-    void const    *buffer, 
-    size_t           size, 
-    size_t &bytes_written
-)
-{
-    LARGE_INTEGER oldpos;
-    LARGE_INTEGER newpos;
-    oldpos.QuadPart  = 0;
-    newpos.QuadPart  = offset;
-    if (!SetFilePointerEx(file->Filedes, newpos, &oldpos, FILE_BEGIN))
-    {   // unable to seek to the specified offset.
-        bytes_written = 0;
-        file->OSError = GetLastError();
-        return OS_IO_RESULT_OSERROR;
-    }
-    // safely write the requested number of bytes. for very large writes,
-    // size > UINT32_MAX, the result is undefined, so possibly split the
-    // write up into several sub-writes (though this case is unlikely...)
-    bytes_written  = 0;
-    uint8_t const *bufferp = (uint8_t const*) buffer;
-    while  (bytes_written  <  size)
-    {
-        DWORD nwritten = 0;
-        DWORD wsize    = Megabytes(1);
-        if (size_t(wsize) > (size - bytes_written))
-        {   // write only the amount remaining.
-            wsize = (DWORD) (size - bytes_written);
-        }
-        if (WriteFile(file->Filedes, &bufferp[bytes_written], wsize, &nwritten, NULL))
-        {   // the synchronous write completed successfully.
-            bytes_written += nwritten;
-        }
-        else
-        {   // an error occurred; save the error code.
-            file->OSError = GetLastError();
-            return OS_IO_RESULT_OSERROR;
-        }
-    }
-    return OS_IO_RESULT_SUCCESS;
-}
-
-/// @summary Flush any buffered writes to the file and update file metadata.
-/// @param file The file state populated by OsOpenFile().
-/// @return One of OS_IO_RESULT.
-public_function int 
-OsFlushFile
-(
-    OS_FILE *file
-)
-{
-    if (!FlushFileBuffers(file->Filedes))
-    {
-        file->OSError = GetLastError();
-        return OS_IO_RESULT_OSERROR;
-    }
-    return OS_IO_RESULT_SUCCESS;
-}
-*/
-
-// TODO(rlk): mmap I/O synchronous functions
-// TODO(rlk): bounded MPSC FIFO for async, prioritized I/O ops => feeds
-// TODO(rlk): bounded LPLC priority queue of non-submitted ops => feeds
-// TODO(rlk): bounded small array of in-flight async I/O ops
-// TODO(rlk): typically, each async I/O op will be for entire set of needed data
-// TODO(rlk): no crazy streaming modes or anything - that's all handled by app
-
-// start with VFS implementation. know that we want to support prioritized ASIO.
-// each op has callback to run when complete.
-// to integrate with task system, allocate task handle for pseudo-task, in ASIO
-// completion callback, complete task (on ASIO thread, so must be fast!)
 
