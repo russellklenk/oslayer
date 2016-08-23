@@ -524,6 +524,7 @@ struct OS_IO_REQUEST_CONTEXT
     OS_IO_REQUEST_POOL *RequestPool;                 /// The I/O request pool from which the I/O request was allocated.
     OS_IO_THREAD_POOL  *ThreadPool;                  /// The thread pool that executed the I/O request.
     uintptr_t           PoolContext;                 /// Opaque application-defined data associated with the I/O thread pool.
+    uintptr_t           ThreadContext;               /// Opaque application-defined data associated with the thread that executed the request.
 };
 
 /// @summary Data specifying profiling data for an I/O operation.
@@ -597,10 +598,20 @@ struct OS_IO_RESULT
     int64_t             FileOffset;                  /// The byte offset of the start of the operation from the start of the logical file.
 };
 
+/// @summary Define the signature for the callback function invoked for and from each worker thread in an I/O thread pool.
+/// The application should use this function to create any per-thread data to be passed back in the OS_IO_REQUEST_CONTEXT::ThreadContext field.
+/// @param io_pool The I/O thread pool that owns the worker thread.
+/// @param pool_context Opaque data provided by the application and associated with the I/O thread pool.
+/// @param thread_id The operating system identifier of the worker thread that is initializing.
+/// @param thread_context On return, the application should store any opaque application data in this location.
+/// @return Zero if initialization completes successfully, or -1 if initialization has failed.
+typedef int           (*OS_IO_WORKER_INIT)(OS_IO_THREAD_POOL *io_pool, uintptr_t pool_context, uint32_t thread_id, uintptr_t *thread_context);
+
 /// @summary Define the data passed to an I/O worker thread on startup. The thread should copy the data into thread-local memory.
 struct OS_IO_THREAD_INIT
 {
     OS_IO_THREAD_POOL  *ThreadPool;                  /// The OS_IO_THREAD_POOL to which the worker belongs.
+    OS_IO_WORKER_INIT   ThreadInit;                  /// The callback function to invoke from each worker thread at startup time to create any thread-local 
     HANDLE              ReadySignal;                 /// A manual-reset event to be signaled by the worker when it has successfully completed initialization and is ready-to-run.
     HANDLE              ErrorSignal;                 /// A manual-reset event to be signaled by the worker before it terminates when it encounters a fatal error.
     HANDLE              TerminateSignal;             /// A manual-reset event to be signaled by the application when the worker should terminate.
@@ -623,6 +634,7 @@ struct OS_IO_THREAD_POOL
 /// @summary Define the data used by the application to configure an I/O thread pool.
 struct OS_IO_THREAD_POOL_INIT
 {
+    OS_IO_WORKER_INIT   ThreadInit;                  /// The callback to invoke for each worker thread in the pool.
     size_t              ThreadCount;                 /// The number of threads in the pool. 
     uintptr_t           PoolContext;                 /// Opaque data associated with the pool.
 };
@@ -1353,8 +1365,9 @@ public_function uint64_t             OsMillisecondsToNanoseconds(uint32_t millis
 public_function uint32_t             OsNanosecondsToWholeMillisecons(uint64_t nanoseconds);
 public_function bool                 OsQueryHostCpuLayout(OS_CPU_INFO *cpu_info, OS_MEMORY_ARENA *arena);
 
+public_function uint32_t             OsThreadId(void);
 public_function unsigned int __cdecl OsWorkerThreadMain(void *argp);
-public_function size_t               OsCalculateMemoryForThreadPool(size_t thread_count);
+public_function size_t               OsAllocationSizeForThreadPool(size_t thread_count);
 public_function int                  OsCreateThreadPool(OS_THREAD_POOL *pool, OS_THREAD_POOL_INIT *init, OS_MEMORY_ARENA *arena, char const *name);
 public_function void                 OsLaunchThreadPool(OS_THREAD_POOL *pool);
 public_function void                 OsTerminateThreadPool(OS_THREAD_POOL *pool);
@@ -1420,9 +1433,11 @@ public_function void                 OsCloseFileMapping(OS_FILE_MAPPING *filemap
 public_function int                  OsMapFileRegion(OS_FILE_DATA *data, int64_t offset, int64_t size, OS_FILE_MAPPING *filemap);
 public_function void                 OsFreeFileData(OS_FILE_DATA *data);
 
+public_function size_t               OsAllocationSizeForIoThreadPool(size_t thread_count);
 public_function int                  OsCreateIoThreadPool(OS_IO_THREAD_POOL *pool, OS_IO_THREAD_POOL_INIT *init, OS_MEMORY_ARENA *arena, char const *name);
 public_function void                 OsTerminateIoThreadPool(OS_IO_THREAD_POOL *pool);
 public_function void                 OsDestroyIoThreadPool(OS_IO_THREAD_POOL *pool);
+public_function size_t               OsAllocationSizeForIoRequestPool(size_t pool_capacity);
 public_function int                  OsCreateIoRequestPool(OS_IO_REQUEST_POOL *pool, OS_MEMORY_ARENA *arena, size_t pool_capacity);
 public_function OS_IO_REQUEST*       OsAllocateIoRequest(OS_IO_REQUEST_POOL *pool);
 public_function bool                 OsSubmitIoRequest(OS_IO_THREAD_POOL *pool, OS_IO_REQUEST *request);
@@ -3637,18 +3652,19 @@ OsIoThreadMain
     void *argp
 )
 {
-    OS_IO_THREAD_INIT  init = {};
-    OS_IO_THREAD_POOL *pool = NULL;
-    OVERLAPPED          *ov = NULL;
-    uintptr_t       context = 0;
-    uintptr_t           key = 0;
-    HANDLE      term_signal = NULL;
-    HANDLE             iocp = NULL;
-    LARGE_INTEGER frequency = {};
-    DWORD               tid = GetCurrentThreadId();
-    DWORD            nbytes = 0;
-    DWORD            termrc = 0;
-    unsigned int  exit_code = 1;
+    OS_IO_THREAD_INIT   init = {};
+    OS_IO_THREAD_POOL  *pool = NULL;
+    OVERLAPPED           *ov = NULL;
+    uintptr_t thread_context = 0;
+    uintptr_t        context = 0;
+    uintptr_t            key = 0;
+    HANDLE       term_signal = NULL;
+    HANDLE              iocp = NULL;
+    LARGE_INTEGER  frequency = {};
+    DWORD                tid = GetCurrentThreadId();
+    DWORD             nbytes = 0;
+    DWORD             termrc = 0;
+    unsigned int   exit_code = 1;
 
     // copy the initialization data into local stack memory.
     // argp may have been allocated on the stack of the caller 
@@ -3664,6 +3680,15 @@ OsIoThreadMain
 
     // spit out a message just prior to initialization:
     OsLayerOutput("START: %S(%u): I/O thread starting on pool 0x%p.\n", __FUNCTION__, tid, pool);
+
+    // perform application-level per-thread initialization.
+    if (init.ThreadInit(pool, context, tid, &thread_context) < 0)
+    {
+        OsLayerError("ERROR: %S(%u): I/O thread initialization failed on pool 0x%p.\n", __FUNCTION__, tid, pool);
+        OsLayerError("DEATH: %S(%u): I/O thread terminating in pool 0x%p.\n", __FUNCTION__, tid, pool);
+        SetEvent(init.ErrorSignal);
+        return 0;
+    }
 
     // signal the main thread that this thread is ready to run.
     SetEvent(init.ReadySignal);
@@ -3724,6 +3749,7 @@ OsIoThreadMain
                                       ctx.RequestPool          = request->RequestPool;
                                       ctx.ThreadPool           = pool;
                                       ctx.PoolContext          = context;
+                                      ctx.ThreadContext        = thread_context;
                                       profile.QueueDelay       = OsElapsedNanoseconds(request->IoSubmitTime, request->IoLaunchTime, frequency.QuadPart);
                                       profile.ExecutionTime    = OsElapsedNanoseconds(request->IoLaunchTime, request->IoFinishTime, frequency.QuadPart);
                                       profile.OsThreadId       = tid;
@@ -3767,6 +3793,7 @@ OsIoThreadMain
                                   ctx.RequestPool          = request->RequestPool;
                                   ctx.ThreadPool           = pool;
                                   ctx.PoolContext          = context;
+                                  ctx.ThreadContext        = thread_context;
                                   profile.QueueDelay       = OsElapsedNanoseconds(request->IoSubmitTime, request->IoLaunchTime, frequency.QuadPart);
                                   profile.ExecutionTime    = OsElapsedNanoseconds(request->IoLaunchTime, request->IoFinishTime, frequency.QuadPart);
                                   profile.OsThreadId       = tid;
@@ -4943,6 +4970,17 @@ OsQueryHostCpuLayout
     return true;
 }
 
+/// @summary Retrieve the operating system identifier of the calling thread.
+/// @return The operating system identifier of the calling thread.
+public_function uint32_t
+OsThreadId
+(
+    void
+)
+{
+    return GetCurrentThreadId();
+}
+
 /// @summary Implement the internal entry point of a worker thread.
 /// @param argp Pointer to an OS_WORKER_THREAD_INIT instance specific to this thread.
 /// @return Zero if the thread terminated normally, or non-zero for abnormal termination.
@@ -5083,7 +5121,7 @@ OsWorkerThreadMain
 /// @param thread_count The number of threads in the thread pool.
 /// @return The number of bytes required to create an OS_THREAD_POOL with the specified number of worker threads. This value does not include the thread-local memory or thread stack memory.
 public_function size_t
-OsCalculateMemoryForThreadPool
+OsAllocationSizeForThreadPool
 (
     size_t thread_count
 )
@@ -5116,7 +5154,7 @@ OsCreateThreadPool
     HANDLE         evt_terminate = NULL;
     DWORD                    tid = GetCurrentThreadId();
     os_arena_marker_t mem_marker = OsMemoryArenaMark(arena);
-    size_t        bytes_required = OsCalculateMemoryForThreadPool(init->ThreadCount);
+    size_t        bytes_required = OsAllocationSizeForThreadPool(init->ThreadCount);
     size_t        align_required = std::alignment_of<HANDLE>::value;
     CV_PROVIDER     *cv_provider = NULL;
     CV_MARKERSERIES   *cv_series = NULL;
@@ -8675,7 +8713,7 @@ OsFreeFileData
 /// @param thread_count The number of threads in the thread pool.
 /// @return The number of bytes required to create an OS_IO_THREAD_POOL with the specified number of worker threads. This value does not include the thread-local memory or thread stack memory.
 public_function size_t
-OsCalculateMemoryForIoThreadPool
+OsAllocationSizeForIoThreadPool
 (
     size_t thread_count
 )
@@ -8706,7 +8744,7 @@ OsCreateIoThreadPool
     HANDLE                  iocp = NULL;
     HANDLE         evt_terminate = NULL;
     os_arena_marker_t mem_marker = OsMemoryArenaMark(arena);
-    size_t        bytes_required = OsCalculateMemoryForIoThreadPool(init->ThreadCount);
+    size_t        bytes_required = OsAllocationSizeForIoThreadPool(init->ThreadCount);
     size_t        align_required = std::alignment_of<HANDLE>::value;
     DWORD                    tid = GetCurrentThreadId();
 
@@ -8781,6 +8819,7 @@ OsCreateIoThreadPool
         // the worker thread will need to copy this structure if it wants to access it 
         // past the point where it signals the wready event.
         winit.ThreadPool      = pool;
+        winit.ThreadInit      = init->ThreadInit;
         winit.ReadySignal     = wready;
         winit.ErrorSignal     = werror;
         winit.TerminateSignal = evt_terminate;
@@ -8906,6 +8945,18 @@ OsDestroyIoThreadPool
         CloseHandle(pool->CompletionPort);
         pool->CompletionPort = NULL;
     }
+}
+
+/// @summary Calculate the amount of memory required for an I/O request pool.
+/// @param pool_capacity The maximum number of I/O requests that can be allocated from the pool at any one time.
+/// @return The number of bytes required for the I/O request pool.
+public_function size_t
+OsAllocationSizeForIoRequestPool
+(
+    size_t pool_capacity
+)
+{
+    return OsAllocationSizeForArray<OS_IO_REQUEST_POOL>(pool_capacity);
 }
 
 /// @summary Create an I/O request pool.
