@@ -48,6 +48,7 @@ XCOPY %VULKAN_SDK%\Source\lib\vulkan-1.pdb %OUTPUTDIR% /Y /Q
 PUSHD %OUTPUTDIR%
 cl %CPPFLAGS% ..\main.cc %DEFINES% %LIBRARIES% %LNKFLAGS% /Feoslayer.exe
 cl %CPPFLAGS% ..\threadpool.cc %DEFINES% %LIBRARIES% %LNKFLAGS% /Fethreadpool.exe
+cl %CPPFLAGS% ..\scheduler.cc %DEFINES% %LIBRARIES% %LNKFLAGS% /Fescheduler.exe
 cl %CPPFLAGS% ..\vulkan.cc %DEFINES% %LIBRARIES% %LNKFLAGS% /Fevulkan.exe
 cl %CPPFLAGS% ..\audio.cc %DEFINES% %LIBRARIES% %LNKFLAGS% /Feaudio.exe
 cl %CPPFLAGS% ..\filepath.cc %DEFINES% %LIBRARIES% %LNKFLAGS% /Fefilepath.exe
