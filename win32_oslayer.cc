@@ -461,7 +461,8 @@ struct OS_CACHELINE_ALIGN OS_TASK_POOL
     uint32_t            ThreadId;                    /// The operating system identifier of the thread that owns the pool.
     int32_t             LastError;                   /// The error code reported by the last attempt to define a task on the pool.
     uint32_t            PoolId;                      /// The application-defined identifier of the associated pool type.
-    uint32_t            Reserved;                    /// Reserved for future use, set to zero.
+    uint16_t            NextWorker;                  /// The zero-based index of the next worker to notify.
+    uint16_t            WorkerCount;                 /// The total number of worker threads in the scheduler thread pool.
     OS_TASK_POOL       *TaskPoolList;                /// A local pointer to the set of all task pools within the scheduler.
     OS_TASK_DATA       *TaskPoolData;                /// The buffer storing per-task data.
     OS_TASK_POOL       *NextFreePool;                /// Pointer to the next OS_TASK_POOL in the free list, or NULL if this pool is allocated.
@@ -472,17 +473,17 @@ struct OS_CACHELINE_ALIGN OS_TASK_POOL
 /// @summary Define the data that might be needed by a thread when defining or executing tasks.
 struct OS_TASK_ENVIRONMENT
 {
+    OS_TASK_PROFILER   *TaskProfiler;                /// The task profiler associated with the task scheduler.
+    OS_TASK_SCHEDULER  *TaskScheduler;               /// The OS_TASK_SCHEDULER that owns the task pool.
     OS_TASK_POOL       *TaskPool;                    /// The OS_TASK_POOL allocated to the thread.
+    OS_CPU_INFO        *HostCpuInfo;                 /// Information about the host CPU layout.
     uint32_t            ThreadId;                    /// The operating system identifier of the thread associated with the execution environment.
     uint32_t            PoolUsage;                   /// One or more of OS_TASK_POOL_USAGE indicating whether the pool can be used to run tasks.
-    uintptr_t           TaskContextData;             /// The opaque value passed through to each task and specified in the OS_TASK_SCHEDULER_INIT::TaskContextData field.
+    uintptr_t           ContextData;                 /// The opaque value passed through to each task and specified in the OS_TASK_SCHEDULER_INIT::TaskContextData field.
     OS_MEMORY_ARENA    *LocalMemory;                 /// The thread-local memory arena used for temporary working space.
     OS_MEMORY_ARENA    *GlobalMemory;                /// The shared global memory arena used for persistent storage.
-    CRITICAL_SECTION   *GlobalMemoryLock;            /// The CRITICAL_SECTION protecting access to the global memory arena.
     OS_IO_THREAD_POOL  *IoThreadPool;                /// The application thread pool used for submitting asynchronous I/O requests.
     OS_IO_REQUEST_POOL *IoRequestPool;               /// The OS_IO_REQUEST_POOL allocated to the thread.
-    OS_CPU_INFO        *HostCpuInfo;                 /// Information about the host CPU layout.
-    OS_TASK_SCHEDULER  *TaskScheduler;               /// The OS_TASK_SCHEDULER that owns the task pool.
 };
 
 /// @summary Define the data passed to a task scheduler worker thread during initialization.
@@ -5398,6 +5399,161 @@ OsAllocationSizeForTaskScheduler
     return num_bytes;
 }
 
+/// @summary Create a task ID from its constituent parts.
+/// @param type One of the values of the OS_TASK_ID_TYPE enumeration specifying whether the task is an internal or external task.
+/// @param pool The zero-based index of the OS_TASK_POOL that is creating the task ID.
+/// @param index The zero-based index of the task within the OS_TASK_POOL storage.
+/// @param valid One of the values of the OS_TASK_ID_VALIDITY enumeration specifying whether the task ID indicates a valid task.
+/// @return The task identifier.
+public_function inline os_task_id_t
+OsMakeTaskId
+(
+    uint32_t type, 
+    uint32_t pool, 
+    uint32_t index, 
+    uint32_t valid=OS_TASK_ID_VALID
+)
+{
+    return ((valid & OS_TASK_ID_MASK_VALID) << OS_TASK_ID_SHIFT_VALID) | 
+           ((type  & OS_TASK_ID_MASK_TYPE ) << OS_TASK_ID_SHIFT_TYPE ) |
+           ((pool  & OS_TASK_ID_MASK_POOL ) << OS_TASK_ID_SHIFT_POOL ) | 
+           ((index & OS_TASK_ID_MASK_INDEX) << OS_TASK_ID_SHIFT_INDEX);
+}
+
+/// @summary Determine whether an ID identifies a valid task.
+/// @param task_id The task identifier.
+/// @return true if the identifier specifies a valid task.
+public_function inline bool
+OsIsValidTask
+(
+    os_task_id_t task_id
+)
+{
+    return ((task_id & OS_TASK_ID_MASK_VALID) != 0);
+}
+
+/// @summary Determine whether a task ID identifies an external task.
+/// @param task_id The task identifier.
+/// @return true if the identifier specifies an external task.
+public_function inline bool
+OsIsExternalTask
+(
+    os_task_id_t task_id
+)
+{
+    return ((task_id & OS_TASK_ID_MASK_TYPE) == 0);
+}
+
+/// @summary Determine whether a task ID identifies an internal task.
+/// @param task_id The task identifier.
+/// @return true if the identifier specifies an internal task.
+public_function inline bool
+OsIsInternalTask
+(
+    os_task_id_t task_id
+)
+{
+    return ((task_id & OS_TASK_ID_MASK_TYPE) != 0);
+}
+
+/// @summary Publish notifications to worker threads to steak tasks from the calling thread.
+/// @param taskenv The OS_TASK_ENVIRONMENT associated with the calling thread.
+/// @param task_count The number of steal notifications to publish.
+public_function void
+OsPublishTasks
+(
+    OS_TASK_ENVIRONMENT *taskenv, 
+    size_t            task_count
+)
+{
+    HANDLE         *iocp_list = taskenv->TaskScheduler->WorkerThreadPort;
+    OS_TASK_POOL   *task_pool = taskenv->TaskPool;
+    if ((task_pool->PoolUsage & OS_TASK_POOL_USAGE_FLAG_PUBLISH) == 0)
+    {
+        OsLayerError("ERROR: %S(%u): Attempt to publish %Iu tasks from thread without OS_TASK_POOL_USAGE_FLAG_PUBLISH.\n", __FUNCTION__, task_pool->ThreadId, task_count);
+        return;
+    }
+    if (task_pool->WorkerCount == 0)
+    {
+        OsLayerError("ERROR: %S(%u): Attempt to publish %Iu tasks, but scheduler has no worker threads.\n", __FUNCTION__, task_pool->ThreadId, task_count);
+        return;
+    }
+    for (size_t i = 0; i < task_count; ++i)
+    {   // just go round-robin through the worker threads. allow NextWorker to wrap-around.
+        // TODO(rlk): maybe do something smarter that just this dumb thing?
+        // TODO(rlk): the dwBytesTransferred argument is currently specified as 1. this 
+        // could be used to indicate the number of tasks to steal from the thread, if there 
+        // are many tasks avaiable to steal.
+        uint16_t worker_index =(task_pool->NextWorker++) % task_pool->WorkerCount;
+        if (PostQueuedCompletionStatus(iocp_list[worker_index], 1, (ULONG_PTR) task_pool, NULL) == FALSE)
+        {
+            OsLayerError("ERROR: %S(%u): Failed to publish steal notification to worker %u (%08X).\n", __FUNCTION__, task_pool->ThreadId, worker_index, GetLastError());
+            return;
+        }
+    }
+}
+
+/// @summary Indicate the completion of a particular task. This function should be called from the thread that executed the task.
+/// @param taskenv The OS_TASK_ENVIRONMENT associated with the calling thread.
+/// @param task_id The identifier of the completed task.
+/// @return The number of ready-to-run tasks added to the thread's local ready-to-run queue.
+public_function size_t
+OsCompleteTask
+(
+    OS_TASK_ENVIRONMENT *taskenv, 
+    os_task_id_t         task_id
+)
+{   // multiple threads can be concurrently executing CompleteTask for the same task_id.
+    // this can happen when multiple child tasks have finished executing on different 
+    // threads, and are calling OsCompleteTask for their parent task.
+    OS_TASK_POOL *task_pool = taskenv->TaskPool;
+    OS_TASK_POOL *pool_list = taskenv->TaskPool->TaskPoolList;
+    uint32_t const     tsrc =(task_id & OS_TASK_ID_MASK_POOL) >> OS_TASK_ID_SHIFT_POOL;
+    uint32_t const     tidx =(task_id & OS_TASK_ID_MASK_INDEX) >> OS_TASK_ID_SHIFT_INDEX;
+    OS_TASK_DATA      *task =&pool_list[tsrc].TaskPoolData[tidx];
+    uint32_t          usage = task_pool->PoolUsage;
+    size_t   ready_to_run_s = 0;
+    size_t   ready_to_run_p = 0;
+    os_task_id_t   *permits = NULL;
+    int32_t        npermits = 0;
+    int32_t      work_count = 0;
+    bool       did_complete = false;
+
+    // decrement the number of work items. when this counter reaches zero, the task is completed.
+    if ((work_count  = task->WorkCount.fetch_sub(1, std::memory_order_seq_cst)) == 1)
+    {   // the calling thread will process the permits list.
+        permits      = task->PermitIds;
+        npermits     = task->PermitCount.exchange(-1, std::memory_order_seq_cst);
+        did_complete = true;
+        // process the permits list, decrementing the WaitCount for each permitted task.
+        // if the WaitCount for a task reaches zero, the task is added to the ready-to-run queue.
+        for (int32_t i = 0; i < npermits; ++i)
+        {
+            uint32_t const psrc = (permits[i] & OS_TASK_ID_MASK_POOL) >> OS_TASK_ID_SHIFT_POOL;
+            uint32_t const pidx = (permits[i] & OS_TASK_ID_MAKS_INDEX) >> OS_TASK_ID_SHIFT_INDEX;
+            OS_TASK_DATA *ptask = &pool_list[psrc].TaskPoolData[pidx];
+            int32_t       nwait = ptask->WaitCount.fetch_sub(1, std::memory_order_seq_cst);
+            if (nwait == 0)
+            {   // this task is ready-to-run.
+                OsTaskQueuePush(&task_pool->WorkQueue, permits[i]);
+                ready_to_run_s++;
+            }
+        }
+
+        // if the task has a parent, bubble the completion up the chain.
+        if (task->ParentId != INVALID_TASK_ID)
+        {   // this may increase the number of ready-to-run tasks.
+            ready_to_run_p  = OsCompleteTask(taskenv, task->ParentId);
+        }
+        // TODO(rlk): If this is *not* a worker thread, then OsPublishTasks should be called.
+        // For worker threads, or threads that have the EXECUTE usage set, let the caller decide.
+
+        // finally, mark the slot as being available on the owning task pool.
+        pool_list[tsrc].SlotStatus[tidx].store(OS_TASK_SLOT_STATUS_FREE, std::memory_order_release);
+    }
+    return (ready_to_run_s + ready_to_run_p);
+}
+
 /// @summary Implement the internal entry point of a task scheduler worker thread.
 /// @param argp Pointer to an OS_TASK_SCHEDULER_THREAD_INIT instance specific to this thread.
 /// @return Zero if the thread terminated normally, or non-zero for abnormal termination.
@@ -5523,6 +5679,29 @@ OsCreateTaskScheduler
                 found_worker_pool = true;
             }
         }
+        size_t ntasks = init->TaskPoolTypes[i].MaxActiveTasks;
+        if ((ntasks & (ntasks-1)) != 0)
+        {   // the maximum number of active tasks must be a power of two.
+            // round up to the next largest power of two.
+            size_t user = ntasks;
+            size_t newv = 1;
+            while (newv < user)
+            {
+                newv <<= 1;
+            }
+            init->TaskPoolTypes[i].MaxActiveTasks = newv;
+            OsLayerError("WARNING: %S(%u): MaxActiveTasks (%Iu) for Task Pool Id %u must be a power-of-two; rounding up to %Iu.\n", __FUNCTION__, GetCurrentThreadId(), user, init->TaskPoolTypes[i].PoolId, newv);
+        }
+        if (init->TaskPoolTypes[i].MaxActiveTasks < OS_MIN_TASKS_PER_POOL)
+        {
+            OsLayerError("WARNING: %S(%u): MaxActiveTasks (%Iu) for Task Pool Id %u increased to minimum (%u).\n", __FUNCTION__, GetCurrentThreadId(), init->TaskPoolTypes[i].MaxActiveTasks, init->TaskPoolTypes[i].PoolId, OS_MIN_TASKS_PER_POOL);
+            init->TaskPoolTypes[i].MaxActiveTasks = OS_MIN_TASKS_PER_POOL;
+        }
+        if (init->TaskPoolTypes[i].MaxActiveTasks > OS_MAX_TASKS_PER_POOL)
+        {
+            OsLayerError("WARNING: %S(%u): MaxActiveTasks (%Iu) for Task Pool Id %u decreased to maximum (%u).\n", __FUNCTION__, GetCurrentThreadId(), init->TaskPoolTypes[i].MaxActiveTasks, init->TaskPoolTypes[i].PoolId, OS_MAX_TASKS_PER_POOL);
+            init->TaskPoolTypes[i].MaxActiveTasks = OS_MAX_TASKS_PER_POOL;
+        }
         pool_count += init->TaskPoolTypes[i].PoolCount;
     }
     if (init->WorkerThreadCount > 0 && !found_worker_pool)
@@ -5624,7 +5803,8 @@ OsCreateTaskScheduler
             pool->ThreadId        = 0;
             pool->LastError       = OS_TASK_ERROR_NONE;
             pool->PoolId          = pool_def.PoolId;
-            pool->Reserved        = 0;
+            pool->NextWorker      = 0;
+            pool->WorkerCount     =(uint16_t)  init->WorkerThreadCount;
             pool->TaskPoolList    = pool_list;
             pool->TaskPoolData    = OsMemoryArenaAllocateArray<OS_TASK_DATA>(arena, pool_def.MaxActiveTasks);
             pool->NextFreePool    = free_lists[type_idx];
@@ -5634,7 +5814,7 @@ OsCreateTaskScheduler
                 OsLayerError("ERROR: %S(%u): Failed to allocate task pool memory.\n", __FUNCTION__, GetCurrentThreadId());
                 goto cleanup_and_fail;
             }
-            if (OsCreateIoRequestPool(&iorp_list[pool_index], arena, pool_def.MaxIoRequests) < 0)
+            if (pool_def.MaxIoRequests > 0 && OsCreateIoRequestPool(&iorp_list[pool_index], arena, pool_def.MaxIoRequests) < 0)
             {
                 OsLayerError("ERROR: %S(%u): Failed to allocate I/O request pool for task pool.\n", __FUNCTION__, GetCurrentThreadId());
                 goto cleanup_and_fail;
