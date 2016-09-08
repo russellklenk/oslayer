@@ -143,9 +143,26 @@
 /// @param span The OS_TASK_PROFILER_SPAN associated with the interval being measured.
 /// @param fmt The printf-style format string.
 /// @param ... Substitution arguments for the format string.
-#define OsTaskEvent(env, fmt, ...)                  CvWriteAlertW((env)->TaskProfiler->MarkerSeries, _T(fmt), __VA_ARGS__)
-#define OsTaskSpanEnter(env, span, fmt, ...)        CvEnterSpanW((env)->TaskProfiler->MarkerSeries, &(span).CvSpan, _T(fmt), __VA_ARGS__)
-#define OsTaskSpanLeave(env, span)                  CvLeaveSpan((span).CvSpan)
+#ifdef  OS_DISABLE_TASK_PROFILER
+    #define OsTaskEvent(env, fmt, ...)              
+    #define OsTaskSpanEnter(env, span, fmt, ...)    
+    #define OsTaskSpanLeave(env, span)              
+#else
+    #define OsTaskEvent(env, fmt, ...)              CvWriteAlertW((env)->TaskProfiler->MarkerSeries, _T(fmt), __VA_ARGS__)
+    #define OsTaskSpanEnter(env, span, fmt, ...)    CvEnterSpanW((env)->TaskProfiler->MarkerSeries, &(span).CvSpan, _T(fmt), __VA_ARGS__)
+    #define OsTaskSpanLeave(env, span)              CvLeaveSpan((span).CvSpan)
+#endif
+
+/// @summary Helper macro used to declare a scoped variable to automatically enter a span when a task begins execution and leave the span when it finished.
+/// @param id The os_task_id_t of the task being executed.
+/// @param env The OS_TASK_ENVIRONMENT associated with the thread executing the task.
+#ifndef OS_PROFILE_TASK
+    #ifdef  OS_DISABLE_TASK_PROFILER
+        #define OS_PROFILE_TASK(id, env)    
+    #else
+        #define OS_PROFILE_TASK(id, env)            OS_TASK_SCOPE __cv_task_scope__(__FUNCTION__, (id), (env))
+    #endif
+#endif
 
 /// @summary Macro used to declare a function resolved at runtime.
 #ifndef OS_LAYER_DECLARE_RUNTIME_FUNCTION
@@ -584,6 +601,8 @@ struct OS_TASK_SCOPE
         : 
         Env(taskenv)
     {
+        UNREFERENCED_PARAMETER(name);                // For builds that #define OS_DISABLE_TASK_PROFILER
+        UNREFERENCED_PARAMETER(task_id);             // For builds that #define OS_DISABLE_TASK_PROFILER
         OsTaskSpanEnter(taskenv, Span, "%S %08X", name, task_id);
     }
     inline ~OS_TASK_SCOPE(void)
@@ -592,7 +611,11 @@ struct OS_TASK_SCOPE
     }
 };
 #ifndef OS_PROFILE_TASK
-#define OS_PROFILE_TASK(id, env)    OS_TASK_SCOPE __cv_task_scope__(__FUNCTION__, (id), (env))
+    #ifdef  OS_DISABLE_TASK_PROFILER
+        #define OS_PROFILE_TASK(id, env)    
+    #else
+        #define OS_PROFILE_TASK(id, env)    OS_TASK_SCOPE __cv_task_scope__(__FUNCTION__, (id), (env))
+    #endif
 #endif
 
 /// @summary Define the data associated with a fence task, which can be used to put an OS thread into a wait state until one or more tasks have completed.
@@ -7039,10 +7062,13 @@ OsFenceTaskMain
     OS_TASK_ENVIRONMENT *taskenv
 )
 {
-    UNREFERENCED_PARAMETER(task_id);
-    UNREFERENCED_PARAMETER(taskenv);
-    OS_TASK_FENCE *fence =(OS_TASK_FENCE*) task_args;
-    SetEvent(fence->FenceSignal);
+    OS_PROFILE_TASK(task_id, taskenv);
+    {
+        UNREFERENCED_PARAMETER(task_id);
+        UNREFERENCED_PARAMETER(taskenv);
+        OS_TASK_FENCE *fence =(OS_TASK_FENCE*) task_args;
+        SetEvent(fence->FenceSignal);
+    }
 }
 
 /// @summary Create a task that waits on one or more previously-defined tasks to complete. An operating system thread can enter a wait state until the fence becomes signaled. The fence is reset to a non-signaled state before the new task is created.
