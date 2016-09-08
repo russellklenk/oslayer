@@ -2,6 +2,8 @@
 /// @summary Test the thread pool and task profiler functionality.
 ///////////////////////////////////////////////////////////////////////////80*/
 
+//#define OS_DISABLE_TASK_PROFILER
+
 /*////////////////
 //   Includes   //
 ////////////////*/
@@ -75,6 +77,7 @@ struct TEST_SCOPE
         uint64_t ElapsedNs = OsElapsedNanoseconds(StartTime, EndTime);
         uint32_t ElapsedMs = OsNanosecondsToWholeMilliseconds(ElapsedNs);
         OsTaskEvent(Env, "FINISH: %S %ums (%I64uns)", TestName, ElapsedMs, ElapsedNs);
+        OsLayerOutput("FINISH: %S %ums (%I64uns)\n", TestName, ElapsedMs, ElapsedNs);
     }
 };
 
@@ -193,6 +196,8 @@ EmptyTest
     OS_TASK_ENVIRONMENT *taskenv
 )
 {
+    UNREFERENCED_PARAMETER(task_id);
+    UNREFERENCED_PARAMETER(taskenv);
     OS_PROFILE_TASK(task_id, taskenv);
     {
         TEST_TASK_ARGS *args = (TEST_TASK_ARGS*) task_args;
@@ -247,6 +252,7 @@ WriteTaskIdChunk
                 return;
             }
         }
+        OsPublishTasks(taskenv, 1);
     }
 }
     
@@ -261,7 +267,7 @@ EmptyChildTestInit
     uintptr_t        *test_state
 )
 {
-    uint32_t const               N = 65000;
+    uint32_t const               N = 128000;
     os_arena_marker_t       marker = OsMemoryArenaMark(taskenv->GlobalMemory);
     EMPTY_CHILD_TEST_STATE  *state = OsMemoryArenaAllocate<EMPTY_CHILD_TEST_STATE >(taskenv->GlobalMemory);
     TASK_ID_AND_THREAD     *expect = OsMemoryArenaAllocateArray<TASK_ID_AND_THREAD>(taskenv->GlobalMemory, N);
@@ -333,7 +339,7 @@ EmptyChildTest
         EMPTY_CHILD_TEST_STATE  *st = (EMPTY_CHILD_TEST_STATE*) args->TestState;
         TASK_ID_AND_THREAD  *expect =  st->Expect;
         TASK_ID_AND_THREAD  *result =  st->Result;
-        uint32_t            threads = (uint32_t) 7; //taskenv->HostCpuInfo->PhysicalCores;
+        uint32_t            threads = (uint32_t) taskenv->HostCpuInfo->HardwareThreads;
         uint32_t              count =  st->ChildCount / threads;
         uint32_t              extra =  st->ChildCount % threads;
         
@@ -417,13 +423,13 @@ main
 
     pool_init[SCHEDULER_THREAD_POOL].PoolId          = SCHEDULER_THREAD_POOL;
     pool_init[SCHEDULER_THREAD_POOL].PoolUsage       = OS_TASK_POOL_USAGE_FLAG_DEFINE | OS_TASK_POOL_USAGE_FLAG_EXECUTE | OS_TASK_POOL_USAGE_FLAG_PUBLISH | OS_TASK_POOL_USAGE_FLAG_WORKER;
-    pool_init[SCHEDULER_THREAD_POOL].PoolCount       = 7;//cpu_info.PhysicalCores;
+    pool_init[SCHEDULER_THREAD_POOL].PoolCount       = cpu_info.HardwareThreads;
     pool_init[SCHEDULER_THREAD_POOL].MaxIoRequests   = 512;
     pool_init[SCHEDULER_THREAD_POOL].MaxActiveTasks  = OS_MAX_TASKS_PER_POOL;
     pool_init[SCHEDULER_THREAD_POOL].LocalMemorySize = Megabytes(32);
 
     // the task scheduler will create and manage its own pool of worker threads.
-    scheduler_init.WorkerThreadCount = 7; //cpu_info.PhysicalCores;
+    scheduler_init.WorkerThreadCount = cpu_info.HardwareThreads;
     scheduler_init.GlobalMemorySize  = Megabytes(256);
     scheduler_init.PoolTypeCount     = TASK_POOL_COUNT;
     scheduler_init.TaskPoolTypes     = pool_init;
