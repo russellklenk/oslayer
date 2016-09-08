@@ -59,14 +59,11 @@ WorkerSignal
         return;
     }
 
-    OS_TASK_PROFILER_SPAN span;
-
     // else, this worker thread received an explicit wakeup signal.
     // in this case, signal is always non-zero.
     TASK_DATA *work_item = (TASK_DATA*) signal;
     uint64_t  start_time =  OsTimestampInTicks();
     uint64_t   work_time =  OsMillisecondsToNanoseconds(work_item->WorkTime);
-    OsThreadSpanEnter(worker->ThreadPool, span, "Work for %ums", work_item->WorkTime);
     do
     { /* spin spin spin */
     } while (OsElapsedNanoseconds(start_time, OsTimestampInTicks()) < work_time);
@@ -74,7 +71,6 @@ WorkerSignal
     // mark the work item as having completed.
     std::atomic<uint32_t> *counter = (std::atomic<uint32_t>*) worker->PoolContext;
     counter->fetch_add(1);
-    OsThreadSpanLeave(worker->ThreadPool, span);
 }
 
 /*////////////////////////

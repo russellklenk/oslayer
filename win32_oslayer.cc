@@ -2,7 +2,7 @@
 /// @summary Implement the OS layer services for the Win32 platform, including
 /// the following functionality:
 /// - Memory arena (Memory resource management)
-/// - Thread pool (CPU resource management)
+/// - Thread pool and task scheduler (CPU resource management)
 /// - Disk I/O (Asynchronous storage resource management)
 /// - HID I/O (User input device management)
 /// - Low-latency audio (audio input and output device management)
@@ -139,9 +139,13 @@
 #endif
 
 /// @summary Helper macros to emit task profiler events and span markers.
-#define OsThreadEvent(pool, fmt, ...)               CvWriteAlertW((pool)->TaskProfiler.MarkerSeries, _T(fmt), __VA_ARGS__)
-#define OsThreadSpanEnter(pool, span, fmt, ...)     CvEnterSpanW((pool)->TaskProfiler.MarkerSeries, &(span).CvSpan, _T(fmt), __VA_ARGS__)
-#define OsThreadSpanLeave(pool, span)               CvLeaveSpan((span).CvSpan)
+/// @param env The OS_TASK_ENVIRONMENT associated with the calling thread.
+/// @param span The OS_TASK_PROFILER_SPAN associated with the interval being measured.
+/// @param fmt The printf-style format string.
+/// @param ... Substitution arguments for the format string.
+#define OsTaskEvent(env, fmt, ...)                  CvWriteAlertW((env)->TaskProfiler->MarkerSeries, _T(fmt), __VA_ARGS__)
+#define OsTaskSpanEnter(env, span, fmt, ...)        CvEnterSpanW((env)->TaskProfiler->MarkerSeries, &(span).CvSpan, _T(fmt), __VA_ARGS__)
+#define OsTaskSpanLeave(env, span)                  CvLeaveSpan((span).CvSpan)
 
 /// @summary Macro used to declare a function resolved at runtime.
 #ifndef OS_LAYER_DECLARE_RUNTIME_FUNCTION
@@ -355,6 +359,8 @@ struct OS_TASK_SCHEDULER;
 struct OS_TASK_SCHEDULER_INIT;
 struct OS_TASK_PROFILER;
 struct OS_TASK_PROFILER_SPAN;
+struct OS_TASK_FENCE;
+struct OS_TASK_SCOPE;
 
 struct OS_VULKAN_ICD_INFO;
 struct OS_VULKAN_DEVICE_DISPATCH;
@@ -552,6 +558,47 @@ struct OS_TASK_SCHEDULER_INIT
     OS_TASK_POOL_INIT  *TaskPoolTypes;               /// An array of one or more OS_TASK_POOL_INIT structures used to define the task pools.
     OS_IO_THREAD_POOL  *IoThreadPool;                /// The thread pool to use for executing I/O requests.
     uintptr_t           TaskContextData;             /// An opaque value to be passed through to each task when it executes.
+};
+
+/// @summary Define a scope-based object used for reporting the execution duration for a task.
+/// Declare on the stack as the first thing in your task entrypoint, for example:
+/// void MyTaskMain(os_task_id_t task_id, void *task_args, OS_TASK_ENVIRONMENT *taskenv) {
+///     OS_TASK_SCOPE task_scope(__FUNCTION__, task_id, taskenv);
+///     {
+///         // do your work here
+///     }
+/// }
+/// 
+/// - or -
+/// 
+/// void MyTaskMain(os_task_id_t task_id, void *task_args, OS_TASK_ENVIRONMENT *taskenv) {
+///     OS_PROFILE_TASK(task_id, taskenv);
+///     // do your work here
+/// }
+/// This will cause a span to appear in Concurrency Visualizer profiling sessions named "MyTaskMain 1234ABCD".
+struct OS_TASK_SCOPE
+{
+    OS_TASK_ENVIRONMENT  *Env;                       /// The OS_TASK_ENVIRONMENT associated with the calling thread.
+    OS_TASK_PROFILER_SPAN Span;                      /// The Concurrency Visualizer SDK object representing the time span.
+    inline OS_TASK_SCOPE(char const *name, os_task_id_t task_id, OS_TASK_ENVIRONMENT *taskenv)
+        : 
+        Env(taskenv)
+    {
+        OsTaskSpanEnter(taskenv, Span, "%S %08X", name, task_id);
+    }
+    inline ~OS_TASK_SCOPE(void)
+    {
+        OsTaskSpanLeave(Env, Span);
+    }
+};
+#ifndef OS_PROFILE_TASK
+#define OS_PROFILE_TASK(id, env)    OS_TASK_SCOPE __cv_task_scope__(__FUNCTION__, (id), (env))
+#endif
+
+/// @summary Define the data associated with a fence task, which can be used to put an OS thread into a wait state until one or more tasks have completed.
+struct OS_TASK_FENCE
+{
+    HANDLE              FenceSignal;                 /// The manual-reset event signaled when all of the fence task dependencies have completed.
 };
 
 /// @summary Define the data available to an application callback executing on a worker thread.
@@ -1601,6 +1648,14 @@ public_function void                 OsSetTaskPoolError(OS_TASK_ENVIRONMENT *tas
 public_function void                 OsPublishTasks(OS_TASK_ENVIRONMENT *taskenv, size_t task_count);
 public_function size_t               OsCompleteTask(OS_TASK_ENVIRONMENT *taskenv, os_task_id_t task_id);
 public_function size_t               OsFinishTaskDefinition(OS_TASK_ENVIRONMENT *taskenv, os_task_id_t task_id);
+public_function os_task_id_t         OsDefineTask(OS_TASK_ENVIRONMENT *taskenv, uint32_t const task_type, OS_TASK_ENTRYPOINT task_main, void const *task_args, size_t const args_size, os_task_id_t const *dependency_list, size_t const dependency_count);
+public_function os_task_id_t         OsDefineChildTask(OS_TASK_ENVIRONMENT *taskenv, uint32_t const task_type, OS_TASK_ENTRYPOINT task_main, void const *task_args, size_t const args_size, os_task_id_t const parent_id, os_task_id_t const *dependency_list, size_t const dependency_count);
+public_function void                 OsWaitForTask(OS_TASK_ENVIRONMENT *taskenv, os_task_id_t wait_task);
+public_function int                  OsAllocateTaskFence(OS_TASK_FENCE *fence);
+public_function void                 OsDestroyTaskFence(OS_TASK_FENCE *fence);
+public_function void                 OsResetTaskFence(OS_TASK_FENCE *fence);
+public_function bool                 OsWaitTaskFence(OS_TASK_FENCE *fence, uint64_t timeout_ns);
+public_function os_task_id_t         OsCreateTaskFence(OS_TASK_ENVIRONMENT *taskenv, OS_TASK_FENCE *fence, os_task_id_t const *dependency_list, size_t const dependency_count);
 
 public_function unsigned int __cdecl OsWorkerThreadMain(void *argp);
 public_function size_t               OsAllocationSizeForThreadPool(size_t thread_count);
@@ -5423,10 +5478,10 @@ OsMakeTaskId
     uint32_t valid=OS_TASK_ID_VALID
 )
 {
-    return ((valid & OS_TASK_ID_MASK_VALID) << OS_TASK_ID_SHIFT_VALID) | 
-           ((type  & OS_TASK_ID_MASK_TYPE ) << OS_TASK_ID_SHIFT_TYPE ) |
-           ((pool  & OS_TASK_ID_MASK_POOL ) << OS_TASK_ID_SHIFT_POOL ) | 
-           ((index & OS_TASK_ID_MASK_INDEX) << OS_TASK_ID_SHIFT_INDEX);
+    return ((valid & 0x0001) << OS_TASK_ID_SHIFT_VALID) | 
+           ((type  & 0x0001) << OS_TASK_ID_SHIFT_TYPE ) |
+           ((pool  & 0x0FFF) << OS_TASK_ID_SHIFT_POOL ) | 
+           ((index & 0xFFFF) << OS_TASK_ID_SHIFT_INDEX);
 }
 
 /// @summary Determine whether an ID identifies a valid task.
@@ -5476,13 +5531,16 @@ OsTaskSchedulerThreadMain
 {
     OS_TASK_SCHEDULER_THREAD_INIT  init = {};
     OS_TASK_ENVIRONMENT         taskenv = {};
+    OS_TASK_POOL                *victim = NULL;
     HANDLE                         iocp = NULL;
     OVERLAPPED              *overlapped = NULL;
     uintptr_t                signal_arg = 0;
     DWORD                     num_bytes = 0;
     DWORD                           tid = GetCurrentThreadId();
-    bool                   keep_running = true;
+    os_task_id_t              work_item = OS_INVALID_TASK_ID;
     unsigned int              exit_code = 1;
+    bool                   keep_running = true;
+    bool                      more_work = false;
 
     // copy the initialization data into local stack memory.
     // argp may have been allocated on the stack of the caller 
@@ -5492,13 +5550,13 @@ OsTaskSchedulerThreadMain
 
     // spit out a message just prior to initialization:
     OsLayerOutput("START: %S(%u): Task scheduler worker thread starting.\n", __FUNCTION__, tid);
-    //OsThreadEvent(init.ThreadPool, "Task scheduler worker thread %u starting", tid);
 
     // allocate the task pool and bind it to the worker thread for the duration of the thread's execution.
     if (OsAllocateTaskPool(&taskenv, init.TaskScheduler, init.PoolId, tid) < 0)
     {
         OsLayerError("ERROR: %S(%u): Task scheduler worker failed to allocate task pool.\n", __FUNCTION__, tid);
         OsLayerError("DEATH: %S(%u): Task scheduler worker terminating.\n", __FUNCTION__, tid);
+        SetEvent(init.ErrorSignal);
         return 1;
     }
 
@@ -5516,10 +5574,65 @@ OsTaskSchedulerThreadMain
                 {   // the task scheduler is being shut down gracefully.
                     keep_running = false;
                     exit_code = 0;
+                    break;
                 }
                 else
                 {   // the completion key is the OS_TASK_POOL to steal from.
-                    // TODO(rlk): steal an item.
+                    // num_bytes is set to the number of tasks to steal (for now, always 1.)
+                    victim = (OS_TASK_POOL*) signal_arg;
+                }
+                // loop for as long as we can get work. the thread went to sleep because 
+                // its local task queue was empty, and woke up because another thread sent
+                // a notification that it has some work available to steal, so first attempt
+                // to steal a task from the victim task pool. if successful, execute the 
+                // stolen task, which may produce additional work in the local task queue.
+                // continue to execute work from the local task queue until it is empty.
+                for ( ; ; )
+                {   // first attempt to steal a task from the victim task pool that woke us.
+                    for (size_t steal_attempts = 0; steal_attempts < 4; ++steal_attempts)
+                    {   // due to queue contention, a steal attempt may fail even though 
+                        // there's still a task available in the victim's ready-to-run queue.
+                        if ((work_item = OsTaskQueueSteal(&victim->WorkQueue, more_work)) != OS_INVALID_TASK_ID)
+                            break;
+                    }
+                    if (work_item == OS_INVALID_TASK_ID)
+                    {   // no work could be stolen from the victim's work queue, so this time
+                        // select another victim task pool to steal from - we might get lucky.
+                        // since the thread is already awake, try as hard as possible to get work 
+                        // before putting the thread back to sleep - context switches are expensive.
+                        size_t      steal_index = taskenv.TaskPool->PoolIndex;
+                        size_t      start_index = taskenv.TaskPool->PoolIndex;
+                        OS_TASK_POOL *pool_list = taskenv.TaskPool->TaskPoolList;
+                        size_t       pool_count = taskenv.TaskScheduler->TaskPoolCount;
+                        do
+                        {   // execute a single attempt to steal from the next pool in the list.
+                            steal_index = (steal_index + 1) % pool_count;
+                            if ((work_item = OsTaskQueueSteal(&pool_list[steal_index].WorkQueue, more_work)) != OS_INVALID_TASK_ID)
+                                break; // break out of do...while.
+                        } while (steal_index != start_index);
+
+                        if (work_item == OS_INVALID_TASK_ID)
+                        {   // all attempts to steal work failed. go back to sleep 
+                            // unless there's something waiting on the completion port.
+                            break; // break out of for ( ; ; )
+                        }
+                    }
+                    // at this point, a valid work item has been stolen from some victim.
+                    // begin the main task execution loop, executing a work item and then
+                    // taking from the local ready-to-run queue for as long as possible.
+                    do
+                    {   // execute a single task, which may produce additional tasks in the thread-local ready-to-run queue.
+                        uint32_t const tsrc = (work_item & OS_TASK_ID_MASK_POOL) >> OS_TASK_ID_SHIFT_POOL;
+                        uint32_t const tidx = (work_item & OS_TASK_ID_MASK_INDEX) >> OS_TASK_ID_SHIFT_INDEX;
+                        OS_TASK_DATA  *task = &taskenv.TaskPool->TaskPoolList[tsrc].TaskPoolData[tidx];
+
+                        // set up the work environment and execute the task.
+                        OsMemoryArenaReset(taskenv.LocalMemory);
+                        task->TaskMain(work_item, task->TaskData, &taskenv);
+                        OsCompleteTask(&taskenv, work_item);
+
+                        // and then attempt to grab another task from the thread-local ready-to-run queue.
+                    } while ((work_item = OsTaskQueueTake(&taskenv.TaskPool->WorkQueue, more_work)) != OS_INVALID_TASK_ID);
                 }
             }
             // reset the wake signal to 0/NULL for the next iteration.
@@ -6133,7 +6246,7 @@ OsCompleteTask
             uint32_t const psrc = (permits[i] & OS_TASK_ID_MASK_POOL) >> OS_TASK_ID_SHIFT_POOL;
             uint32_t const pidx = (permits[i] & OS_TASK_ID_MASK_INDEX) >> OS_TASK_ID_SHIFT_INDEX;
             OS_TASK_DATA *ptask = &pool_list[psrc].TaskPoolData[pidx];
-            if (ptask->WaitCount.fetch_add(1, std::memory_order_seq_cst) == 1)
+            if (ptask->WaitCount.fetch_add(1, std::memory_order_seq_cst) == -1)
             {   // this task is ready-to-run; push it onto the front of the local RTR queue.
                 OsTaskQueuePush(&task_pool->WorkQueue, permits[i]);
                 ready_to_run_s++;
@@ -6210,6 +6323,55 @@ OsFinishTaskDefinition
     else return 0;
 }
 
+/// @summary Execute tasks on the calling thread until the specified task has completed. The calling thread never enters an operating system wait state.
+/// @param taskenv The OS_TASK_ENVIRONMENT associated with the calling thread.
+/// @param wait_task The identifier of the task to wait for.
+public_function void
+OsWaitForTask
+(
+    OS_TASK_ENVIRONMENT *taskenv, 
+    os_task_id_t       wait_task
+)
+{
+    if ((wait_task & OS_TASK_ID_MASK_VALID) != 0)
+    {   // the wait_task specifies a valid task. run tasks until it completes.
+        uint32_t const    wsrc = (wait_task & OS_TASK_ID_MASK_POOL) >> OS_TASK_ID_SHIFT_POOL;
+        uint32_t const    widx = (wait_task & OS_TASK_ID_MASK_INDEX) >> OS_TASK_ID_SHIFT_INDEX;
+        size_t      pool_count =  taskenv->TaskScheduler->TaskPoolCount;
+        OS_TASK_POOL     *self =  taskenv->TaskPool;
+        OS_TASK_DATA     *wait = &self->TaskPoolList[wsrc].TaskPoolData[widx];
+        OS_TASK_QUEUE   *local = &self->WorkQueue;
+        size_t      this_index =  self->PoolIndex;
+        size_t    victim_index =  0;
+        os_task_id_t   work_id =  OS_INVALID_TASK_ID;
+        bool         more_work =  false;
+        while (wait->WorkCount.load(std::memory_order_seq_cst) != 0)
+        {   // the task hasn't completed yet, so first try and take a task from the local ready-to-run queue.
+            if ((work_id = OsTaskQueueTake(local, more_work)) == OS_INVALID_TASK_ID)
+            {   
+                do
+                {   // continue to check for completion of the waited-on task.
+                    if (wait->WorkCount.load(std::memory_order_seq_cst) == 0)
+                        return;
+                    // there's nothing in the local queue, so attempt to steal some work.
+                    if ((victim_index = ((self->NextWorker++) % pool_count)) != this_index)
+                    {   // attempt to steal a single task from the selected victim.
+                        work_id = OsTaskQueueSteal(&self->TaskPoolList[victim_index].WorkQueue, more_work);
+                    }
+                } while(work_id == OS_INVALID_TASK_ID);
+            }
+            // at this point, work_id identifies a valid task, so execute it on this thread.
+            // if this task spawns additional tasks, they'll appear in the local work queue.
+            uint32_t const tsrc = (work_id & OS_TASK_ID_MASK_POOL) >> OS_TASK_ID_SHIFT_POOL;
+            uint32_t const tidx = (work_id & OS_TASK_ID_MASK_INDEX) >> OS_TASK_ID_SHIFT_INDEX;
+            OS_TASK_DATA  *task = &self->TaskPoolList[tsrc].TaskPoolData[tidx];
+            OsMemoryArenaReset(taskenv->LocalMemory);
+            task->TaskMain(work_id, task->TaskData, taskenv);
+            OsCompleteTask(taskenv, work_id);
+        }
+    }
+}
+
 /// @summary Create a new task. If all dependencies have been satisfied, add the task to the ready-to-run queue. The task cannot complete until FinishTaskDefinition is called.
 /// @param taskenv The OS_TASK_ENVIRONMENT associated with the calling thread.
 /// @param task_type One of the values of the TASK_ID_TYPE enumeration specifying the type of task.
@@ -6274,7 +6436,7 @@ OsDefineTask
     // initialize the task data slot. the WorkCount starts as 2; one for the task definition 
     // and one for the actual work executed by the task. this ensures that the task cannot 
     // complete (though it may execute) before this function returns. 
-    os_task_id_t    task_id = OsMakeTaskId(task_type, taskenv->TaskPool->PoolId, array_index);
+    os_task_id_t    task_id = OsMakeTaskId(task_type, taskenv->TaskPool->PoolIndex, array_index);
     OS_TASK_DATA *task_data = &taskenv->TaskPool->TaskPoolData[array_index];
     task_data->ParentId     = OS_INVALID_TASK_ID;
     task_data->TaskMain     = task_main;
@@ -6406,7 +6568,7 @@ OsDefineChildTask
     // initialize the task data slot. the WorkCount starts as 2; one for the task definition 
     // and one for the actual work executed by the task. this ensures that the task cannot 
     // complete (though it may execute) before this function returns. 
-    os_task_id_t    task_id = OsMakeTaskId(task_type, taskenv->TaskPool->PoolId, array_index);
+    os_task_id_t    task_id = OsMakeTaskId(task_type, taskenv->TaskPool->PoolIndex, array_index);
     OS_TASK_DATA *task_data = &taskenv->TaskPool->TaskPoolData[array_index];
     task_data->ParentId     = parent_id;
     task_data->TaskMain     = task_main;
@@ -6460,6 +6622,463 @@ OsDefineChildTask
     return task_id;
 }
 
+/// @summary Create a new task and call OsFinishTaskDefinition. If all dependencies have been satisfied, add the task to the ready-to-run queue.
+/// @param taskenv The OS_TASK_ENVIRONMENT associated with the calling thread.
+/// @param task_type One of the values of the OS_TASK_ID_TYPE enumeration specifying the type of task.
+/// @param task_main The entry point of the new task.
+/// @param task_args Optional data to be supplied to the task when it executes. This data is memcpy'd into the new task.
+/// @param args_size The size of the optional task data, in bytes.
+/// @param dependency_list The optional list of task identifiers for all tasks that must complete before the new task is made ready-to-run.
+/// @param dependency_count The number of valid task identifiers in the dependency list.
+/// @return The identifier of the new task, or OS_INVALID_TASK_ID.
+public_function inline os_task_id_t
+OsSpawnTask
+(
+    OS_TASK_ENVIRONMENT         *taskenv, 
+    uint32_t     const         task_type, 
+    OS_TASK_ENTRYPOINT         task_main, 
+    void         const        *task_args, 
+    size_t       const         args_size, 
+    os_task_id_t const  *dependency_list, 
+    size_t       const  dependency_count
+)
+{
+    os_task_id_t task_id = OsDefineTask(taskenv, task_type, task_main, task_args, args_size, dependency_list, dependency_count);
+    OsFinishTaskDefinition(taskenv, task_id);
+    return task_id;
+}
+
+/// @summary Create a new task and call OsFinishTaskDefinition. If all dependencies have been satisfied, add the task to the ready-to-run queue.
+/// @param taskenv The OS_TASK_ENVIRONMENT associated with the calling thread.
+/// @param task_type One of the values of the OS_TASK_ID_TYPE enumeration specifying the type of task.
+/// @param task_main The entry point of the new task.
+/// @param task_args Optional data to be supplied to the task when it executes. This data is memcpy'd into the new task.
+/// @param args_size The size of the optional task data, in bytes.
+/// @param parent_id The valid identifier of the parent task, which must not have completed yet.
+/// @param dependency_list The optional list of task identifiers for all tasks that must complete before the new task is made ready-to-run.
+/// @param dependency_count The number of valid task identifiers in the dependency list.
+/// @return The identifier of the new task, or OS_INVALID_TASK_ID.
+public_function inline os_task_id_t
+OsSpawnChildTask
+(
+    OS_TASK_ENVIRONMENT         *taskenv, 
+    uint32_t     const         task_type, 
+    OS_TASK_ENTRYPOINT         task_main, 
+    void         const        *task_args, 
+    size_t       const         args_size, 
+    os_task_id_t const         parent_id,
+    os_task_id_t const  *dependency_list, 
+    size_t       const  dependency_count
+)
+{
+    os_task_id_t task_id = OsDefineChildTask(taskenv, task_type, task_main, task_args, args_size, parent_id, dependency_list, dependency_count);
+    OsFinishTaskDefinition(taskenv, task_id);
+    return task_id;
+}
+
+/// @summary Create a new task that is completed based on an external event. Do not call OsFinishTaskDefinition. Call OsCompleteTask when the external event occurs.
+/// @param taskenv The OS_TASK_ENVIRONMENT associated with the calling thread.
+/// @return The identifier of the new task, or OS_INVALID_TASK_ID.
+public_function inline os_task_id_t
+OsCreateExternalTask
+(
+    OS_TASK_ENVIRONMENT *taskenv 
+)
+{
+    os_task_id_t task_id = OsDefineTask(taskenv, OS_TASK_ID_TYPE_EXTERNAL, NULL, NULL, 0, NULL, 0);
+    OsFinishTaskDefinition(taskenv, task_id); // decrement the outstanding work counter to 1
+    return task_id;
+}
+
+/// @summary Create a new child task that is completed based on an external event. Do not call OsFinishTaskDefinition. Call OsCompleteTask when the external event occurs.
+/// @param taskenv The OS_TASK_ENVIRONMENT associated with the calling thread.
+/// @param parent_id The valid identifier of the parent task. The parent task will not complete until all children have completed.
+/// @return The identifier of the new task, or OS_INVALID_TASK_ID.
+public_function os_task_id_t
+OsCreateExternalChildTask
+(
+    OS_TASK_ENVIRONMENT *taskenv,
+    os_task_id_t const parent_id
+)
+{
+    os_task_id_t task_id = OsDefineChildTask(taskenv, OS_TASK_ID_TYPE_EXTERNAL, NULL, NULL, 0, parent_id, NULL, 0);
+    OsFinishTaskDefinition(taskenv, task_id); // decrement the outstanding work counter to 1
+    return task_id;
+}
+
+/// @summary Create a new task and add the task to the ready-to-run queue. The task cannot complete before OsFinishTaskDefinition is called.
+/// @param taskenv The OS_TASK_ENVIRONMENT associated with the calling thread.
+/// @param task_main The entry point of the new task.
+/// @return The identifier of the new task, or OS_INVALID_TASK_ID.
+public_function inline os_task_id_t
+OsDefineTask
+(
+    OS_TASK_ENVIRONMENT *taskenv,
+    OS_TASK_ENTRYPOINT task_main
+)
+{
+    return OsDefineTask(taskenv, OS_TASK_ID_TYPE_INTERNAL, task_main, NULL, 0, NULL, 0);
+}
+
+/// @summary Create a new task and call OsFinishTaskDefinition. Add the task to the ready-to-run queue.
+/// @param taskenv The OS_TASK_ENVIRONMENT associated with the calling thread.
+/// @param task_main The entry point of the new task.
+/// @return The identifier of the new task, or OS_INVALID_TASK_ID.
+public_function inline os_task_id_t
+OsSpawnTask
+(
+    OS_TASK_ENVIRONMENT *taskenv,
+    OS_TASK_ENTRYPOINT task_main
+)
+{
+    os_task_id_t task_id = OsDefineTask(taskenv, OS_TASK_ID_TYPE_INTERNAL, task_main, NULL, 0, NULL, 0);
+    OsFinishTaskDefinition(taskenv, task_id);
+    return task_id;
+}
+
+/// @summary Create a new task and add the task to the ready-to-run queue. The task cannot complete before FinishTaskDefinition is called.
+/// @typeparam ArgsType The type of the task argument data.
+/// @param taskenv The OS_TASK_ENVIRONMENT associated with the calling thread.
+/// @param task_main The entry point of the new task.
+/// @param task_args Data to be supplied to the task when it executes. This data is memcpy'd into the new task.
+/// @return The identifier of the new task, or INVALID_TASK_ID.
+template <typename ArgsType>
+public_function inline os_task_id_t
+OsDefineTask
+(
+    OS_TASK_ENVIRONMENT *taskenv,
+    OS_TASK_ENTRYPOINT task_main,
+    ArgsType const    *task_args 
+)
+{
+    return OsDefineTask(taskenv, OS_TASK_ID_TYPE_INTERNAL, task_main, task_args, sizeof(ArgsType), NULL, 0);
+}
+
+/// @summary Create a new task and call OsFinishTaskDefinition. Add the task to the ready-to-run queue.
+/// @typeparam ArgsType The type of the task argument data.
+/// @param taskenv The OS_TASK_ENVIRONMENT associated with the calling thread.
+/// @param task_main The entry point of the new task.
+/// @param task_args Data to be supplied to the task when it executes. This data is memcpy'd into the new task.
+/// @return The identifier of the new task, or OS_INVALID_TASK_ID.
+template <typename ArgsType>
+public_function inline os_task_id_t
+OsSpawnTask
+(
+    OS_TASK_ENVIRONMENT *taskenv,
+    OS_TASK_ENTRYPOINT task_main,
+    ArgsType const    *task_args 
+)
+{
+    os_task_id_t task_id = OsDefineTask(taskenv, OS_TASK_ID_TYPE_INTERNAL, task_main, task_args, sizeof(ArgsType), NULL, 0);
+    OsFinishTaskDefinition(taskenv, task_id);
+    return task_id;
+}
+
+/// @summary Create a new task and call OsFinishTaskDefinition. If all dependencies have been satisfied, add the task to the ready-to-run queue.
+/// @typeparam ArgsType The type of the task argument data.
+/// @param taskenv The OS_TASK_ENVIRONMENT associated with the calling thread.
+/// @param task_main The entry point of the new task.
+/// @param task_args Data to be supplied to the task when it executes. This data is memcpy'd into the new task.
+/// @param dependency_list The list of task identifiers for all tasks that must complete before the new task is made ready-to-run.
+/// @param dependency_count The number of valid task identifiers in the dependencies list.
+/// @return The identifier of the new task, or OS_INVALID_TASK_ID.
+template <typename ArgsType>
+public_function inline os_task_id_t
+OsSpawnTask
+(
+    OS_TASK_ENVIRONMENT         *taskenv,
+    OS_TASK_ENTRYPOINT         task_main,
+    ArgsType     const        *task_args, 
+    os_task_id_t const  *dependency_list, 
+    size_t       const  dependency_count
+)
+{
+    os_task_id_t task_id = OsDefineTask(taskenv, OS_TASK_ID_TYPE_INTERNAL, task_main, task_args, sizeof(ArgsType), dependency_list, dependency_count);
+    OsFinishTaskDefinition(taskenv, task_id);
+    return task_id;
+}
+
+/// @summary Create a new child task and add the task to the ready-to-run queue. The task cannot complete until OsFinishTaskDefinition is called.
+/// @param taskenv The OS_TASK_ENVIRONMENT associated with the calling thread.
+/// @param task_main The entry point of the new task.
+/// @param parent_id The identifier of the parent task. This must specify a valid task ID.
+/// @return The identifier of the new task, or OS_INVALID_TASK_ID.
+public_function inline os_task_id_t
+OsDefineChildTask
+(
+    OS_TASK_ENVIRONMENT  *taskenv,
+    OS_TASK_ENTRYPOINT  task_main,
+    os_task_id_t const  parent_id
+)
+{
+    return OsDefineChildTask(taskenv, OS_TASK_ID_TYPE_INTERNAL, task_main, NULL, 0, parent_id, NULL, 0);
+}
+
+/// @summary Create a new child task and call OsFinishTaskDefinition. Add the task to the ready-to-run queue.
+/// @param taskenv The OS_TASK_ENVIRONMENT associated with the calling thread.
+/// @param task_main The entry point of the new task.
+/// @param parent_id The identifier of the parent task. This must specify a valid task ID.
+/// @return The identifier of the new task, or OS_INVALID_TASK_ID.
+public_function inline os_task_id_t
+OsSpawnChildTask
+(
+    OS_TASK_ENVIRONMENT  *taskenv,
+    OS_TASK_ENTRYPOINT  task_main,
+    os_task_id_t const  parent_id
+)
+{
+    os_task_id_t task_id = OsDefineChildTask(taskenv, OS_TASK_ID_TYPE_INTERNAL, task_main, NULL, 0, parent_id, NULL, 0);
+    OsFinishTaskDefinition(taskenv, task_id);
+    return task_id;
+}
+
+/// @summary Create a new child task. If all dependencies have been satisfied, add the task to the ready-to-run queue. The task cannot complete until OsFinishTaskDefinition is called.
+/// @param taskenv The OS_TASK_ENVIRONMENT associated with the calling thread.
+/// @param task_main The entry point of the new task.
+/// @param parent_id The identifier of the parent task. This must specify a valid task ID.
+/// @param dependency_list The list of task identifiers for all tasks that must complete before the new task is made ready-to-run.
+/// @param dependency_count The number of valid task identifiers in the dependency list.
+/// @return The identifier of the new task, or OS_INVALID_TASK_ID.
+public_function inline os_task_id_t
+OsDefineChildTask
+(
+    OS_TASK_ENVIRONMENT        *taskenv,
+    OS_TASK_ENTRYPOINT        task_main,
+    os_task_id_t const        parent_id,
+    os_task_id_t const *dependency_list, 
+    size_t       const dependency_count
+)
+{
+    return OsDefineChildTask(taskenv, OS_TASK_ID_TYPE_INTERNAL, task_main, NULL, 0, parent_id, dependency_list, dependency_count);
+}
+
+/// @summary Create a new task and call OsFinishTaskDefinition. If all dependencies have been satisfied, add the task to the ready-to-run queue.
+/// @param taskenv The OS_TASK_ENVIRONMENT associated with the calling thread.
+/// @param task_main The entry point of the new task.
+/// @param parent_id The identifier of the parent task.
+/// @param dependency_list The list of task identifiers for all tasks that must complete before the new task is made ready-to-run.
+/// @param dependency_count The number of valid task identifiers in the dependency list.
+/// @return The identifier of the new task, or OS_INVALID_TASK_ID.
+public_function inline os_task_id_t
+OsSpawnChildTask
+(
+    OS_TASK_ENVIRONMENT        *taskenv,
+    OS_TASK_ENTRYPOINT        task_main,
+    os_task_id_t const        parent_id,
+    os_task_id_t const *dependency_list, 
+    size_t       const dependency_count
+)
+{
+    os_task_id_t task_id = OsDefineChildTask(taskenv, OS_TASK_ID_TYPE_INTERNAL, task_main, NULL, 0, parent_id, dependency_list, dependency_count);
+    OsFinishTaskDefinition(taskenv, task_id);
+    return task_id;
+}
+
+/// @summary Create a new child task and add the task to the ready-to-run queue.
+/// @typeparam ArgsType The type of the task argument data.
+/// @param taskenv The OS_TASK_ENVIRONMENT associated with the calling thread.
+/// @param task_main The entry point of the new task.
+/// @param task_args Data to be supplied to the task when it executes. This data is memcpy'd into the new task.
+/// @param parent_id The identifier of the parent task.
+/// @return The identifier of the new task, or OS_INVALID_TASK_ID.
+template <typename ArgsType>
+public_function inline os_task_id_t
+OsDefineChildTask
+(
+    OS_TASK_ENVIRONMENT  *taskenv,
+    OS_TASK_ENTRYPOINT  task_main,
+    ArgsType     const *task_args, 
+    os_task_id_t const  parent_id
+)
+{
+    return OsDefineChildTask(taskenv, OS_TASK_ID_TYPE_INTERNAL, task_main, task_args, sizeof(ArgsType), parent_id, NULL, 0);
+}
+
+/// @summary Create a new child task and call FinishTaskDefinition. Add the task to the ready-to-run queue.
+/// @typeparam ArgsType The type of the task argument data.
+/// @param taskenv The OS_TASK_ENVIRONMENT associated with the calling thread.
+/// @param task_main The entry point of the new task.
+/// @param task_args Data to be supplied to the task when it executes. This data is memcpy'd into the new task.
+/// @param parent_id The identifier of the parent task.
+/// @return The identifier of the new task, or OS_INVALID_TASK_ID.
+template <typename ArgsType>
+public_function inline os_task_id_t
+OsSpawnChildTask
+(
+    OS_TASK_ENVIRONMENT  *taskenv,
+    OS_TASK_ENTRYPOINT  task_main,
+    ArgsType     const *task_args, 
+    os_task_id_t const  parent_id
+)
+{
+    os_task_id_t task_id = OsDefineChildTask(taskenv, OS_TASK_ID_TYPE_INTERNAL, task_main, task_args, sizeof(ArgsType), parent_id, NULL, 0);
+    OsFinishTaskDefinition(taskenv, task_id);
+    return task_id;
+}
+
+/// @summary Create a new child task. If all dependencies have been satisfied, add the task to the ready-to-run queue. The task cannot complete until OsFinishTaskDefinition is called.
+/// @typeparam ArgsType The type of the task argument data.
+/// @param taskenv The OS_TASK_ENVIRONMENT associated with the calling thread.
+/// @param task_main The entry point of the new task.
+/// @param task_args Data to be supplied to the task when it executes. This data is memcpy'd into the new task.
+/// @param parent_id The identifier of the parent task.
+/// @param dependency_list The list of task identifiers for all tasks that must complete before the new task is made ready-to-run.
+/// @param dependency_count The number of valid task identifiers in the dependencies list.
+/// @return The identifier of the new task, or OS_INVALID_TASK_ID.
+template <typename ArgsType>
+public_function inline os_task_id_t
+OsDefineChildTask
+(
+    OS_TASK_ENVIRONMENT        *taskenv,
+    OS_TASK_ENTRYPOINT        task_main,
+    ArgsType     const       *task_args, 
+    os_task_id_t const        parent_id,
+    os_task_id_t const *dependency_list, 
+    size_t       const dependency_count
+)
+{
+    return OsDefineChildTask(taskenv, OS_TASK_ID_TYPE_INTERNAL, task_main, task_args, sizeof(ArgsType), parent_id, dependency_list, dependency_count);
+}
+
+/// @summary Create a new child task and call OsFinishTaskDefinition. If all dependencies have been satisfied, add the task to the ready-to-run queue.
+/// @typeparam ArgsType The type of the task argument data.
+/// @param taskenv The OS_TASK_ENVIRONMENT associated with the calling thread.
+/// @param task_main The entry point of the new task.
+/// @param task_args Data to be supplied to the task when it executes. This data is memcpy'd into the new task.
+/// @param parent_id The identifier of the parent task.
+/// @param dependency_list The list of task identifiers for all tasks that must complete before the new task is made ready-to-run.
+/// @param dependency_count The number of valid task identifiers in the dependencies list.
+/// @return The identifier of the new task, or OS_INVALID_TASK_ID.
+template <typename ArgsType>
+public_function inline os_task_id_t
+OsSpawnChildTask
+(
+    OS_TASK_ENVIRONMENT        *taskenv,
+    OS_TASK_ENTRYPOINT        task_main,
+    ArgsType     const       *task_args, 
+    os_task_id_t const        parent_id,
+    os_task_id_t const *dependency_list, 
+    size_t       const dependency_count
+)
+{
+    os_task_id_t task_id = OsDefineChildTask(taskenv, OS_TASK_ID_TYPE_INTERNAL, task_main, task_args, sizeof(ArgsType), parent_id, dependency_list, dependency_count);
+    OsFinishTaskDefinition(taskenv, task_id);
+    return task_id;
+}
+
+/// @summary Allocate the operating system object necessary to wait for task completion. The object is placed into a non-signaled state.
+/// @param fence The OS_TASK_FENCE to allocate.
+/// @return Zero if the fence object is successfully allocated, or non-zero if an error occurs.
+public_function int
+OsAllocateTaskFence
+(
+    OS_TASK_FENCE *fence
+)
+{   // initialize the fields of the OS_TASK_FENCE instance.
+    ZeroMemory(fence, sizeof(OS_TASK_FENCE));
+
+    // allocate a new manual-reset event in the non-signaled state.
+    if ((fence->FenceSignal = CreateEvent(NULL, TRUE, FALSE, NULL)) == NULL)
+    {
+        OsLayerError("ERROR: %S(%u): Failed to allocate manual-reset event for task fence (%08X).\n", __FUNCTION__, GetCurrentThreadId(), GetLastError());
+        return -1;
+    }
+    return 0;
+}
+
+/// @summary Delete an OS_TASK_FENCE object.
+/// @param fence The OS_TASK_FENCE to delete.
+public_function void
+OsDestroyTaskFence
+(
+    OS_TASK_FENCE *fence
+)
+{
+    if (fence->FenceSignal != NULL)
+    {
+        CloseHandle(fence->FenceSignal);
+        fence->FenceSignal = NULL;
+    }
+}
+
+/// @summary Place a task fence into a non-signaled state.
+/// @param fence The OS_TASK_FENCE to reset.
+public_function void
+OsResetTaskFence
+(
+    OS_TASK_FENCE *fence
+)
+{
+    ResetEvent(fence->FenceSignal);
+}
+
+/// @summary Block the calling thread until a task fence enters the signaled state (all of its dependent tasks have completed.)
+/// @param fence The OS_TASK_FENCE to wait on.
+/// @param timeout_ns The maximum amount of time to wait, specified in nanoseconds.
+/// @return true if the task fence becomes signaled, or false if a timeout or error occurs.
+public_function bool
+OsWaitTaskFence
+(
+    OS_TASK_FENCE *fence, 
+    uint64_t  timeout_ns=0xFFFFFFFFFFFFFFFFULL
+)
+{
+    uint32_t timeout_ms = (timeout_ns == 0xFFFFFFFFFFFFFFFFULL) ? INFINITE : OsNanosecondsToWholeMilliseconds(timeout_ns);
+    return (WaitForSingleObject(fence->FenceSignal, timeout_ms) == WAIT_OBJECT_0);
+}
+
+/// @summary Implement the entry point for a fence task. The state of the associated fence is set to signaled.
+/// @param task_id The identifier of the fence task.
+/// @param task_args Parameter data associated with the fence task. In this case, this is a pointer to the OS_TASK_FENCE to signal.
+/// @param taskenv The OS_TASK_ENVIRONMENT for the thread executing the task.
+public_function void
+OsFenceTaskMain
+(
+    os_task_id_t         task_id, 
+    void              *task_args, 
+    OS_TASK_ENVIRONMENT *taskenv
+)
+{
+    UNREFERENCED_PARAMETER(task_id);
+    UNREFERENCED_PARAMETER(taskenv);
+    OS_TASK_FENCE *fence =(OS_TASK_FENCE*) task_args;
+    SetEvent(fence->FenceSignal);
+}
+
+/// @summary Create a task that waits on one or more previously-defined tasks to complete. An operating system thread can enter a wait state until the fence becomes signaled. The fence is reset to a non-signaled state before the new task is created.
+/// @param taskenv The OS_TASK_ENVIRONMENT associated with the calling thread.
+/// @param fence The OS_TASK_FENCE object to reset and signal when all tasks in dependency_list have completed.
+/// @param dependency_list The list of task IDs that must complete before the task fence becomes signaled.
+/// @param dependency_count The number of task IDs in the dependency list.
+/// @return The identifier of the fence task, or OS_INVALID_TASK_ID.
+public_function os_task_id_t
+OsCreateTaskFence
+(
+    OS_TASK_ENVIRONMENT        *taskenv, 
+    OS_TASK_FENCE                *fence, 
+    os_task_id_t const *dependency_list, 
+    size_t       const dependency_count
+)
+{
+    if (dependency_count < 1)
+    {
+        OsLayerError("ERROR: %S(%u): A task fence needs to have a non-empty dependency list.\n", __FUNCTION__, GetCurrentThreadId());
+        return OS_INVALID_TASK_ID;
+    }
+    if (fence->FenceSignal == NULL)
+    {   // allocate the fence object for the caller.
+        if (OsAllocateTaskFence(fence) < 0)
+        {
+            OsLayerError("ERROR: %S(%u): Failed to allocate task fence.\n", __FUNCTION__, GetCurrentThreadId());
+            return OS_INVALID_TASK_ID;
+        }
+    }
+    // ensure that the manual-reset event is non-signaled.
+    ResetEvent(fence->FenceSignal);
+    // spawn the task; fence tasks do not have any children.
+    return OsSpawnTask(taskenv, OsFenceTaskMain, fence, dependency_list, dependency_count);
+}
+
 /// @summary Implement the internal entry point of a worker thread.
 /// @param argp Pointer to an OS_WORKER_THREAD_INIT instance specific to this thread.
 /// @return Zero if the thread terminated normally, or non-zero for abnormal termination.
@@ -6491,7 +7110,6 @@ OsWorkerThreadMain
 
     // spit out a message just prior to initialization:
     OsLayerOutput("START: %S(%u): Worker thread starting on pool 0x%p.\n", __FUNCTION__, tid, init.ThreadPool);
-    OsThreadEvent(init.ThreadPool, "Worker thread %u starting", tid);
 
     // create a thread-local memory arena to be used by the callback executing on the worker.
     if (OsCreateMemoryArena(&arena, init.ArenaSize, false, true) < 0)
