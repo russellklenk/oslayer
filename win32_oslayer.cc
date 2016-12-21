@@ -1068,7 +1068,6 @@ struct OS_VULKAN_INSTANCE_DISPATCH
     OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkDestroyInstance);                            /// The vkDestroyInstance function.
     OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkEnumeratePhysicalDevices);                   /// The vkEnumeratePhysicalDevices function.
     OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkEnumerateDeviceExtensionProperties);         /// The vkEnumerateDeviceExtensionProperties function.
-    OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkEnumerateDeviceLayerProperties);             /// The vkEnumerateDeivceLayerProperties function.
     OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetDeviceProcAddr);                          /// The vkGetDeviceProcAddr function.
     OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceFeatures);                  /// The vkGetPhysicalDeviceFeatures function.
     OS_LAYER_VULKAN_INSTANCE_FUNCTION(vkGetPhysicalDeviceFormatProperties);          /// The vkGetPhysicalDeviceFormatProperties function.
@@ -1100,10 +1099,6 @@ struct OS_VULKAN_PHYSICAL_DEVICE_LIST
     VkPhysicalDeviceFeatures         *DeviceFeatures;                                /// An array where each element [Device] describes the fine-grained features of a physical device.
     VkPhysicalDeviceProperties       *DeviceProperties;                              /// An array where each element [Device] specifies the basic capabilities of a physical device.
     VkPhysicalDeviceMemoryProperties *DeviceMemory;                                  /// An array where each element [Device] specifies the types of memory heaps available on a physical device.
-    size_t                           *DeviceLayerCount;                              /// An array where each element [Device] specifies the number of device-level layers exposed by the runtime for a physical device.
-    VkLayerProperties               **DeviceLayerProperties;                         /// An array where each element [Device][Layer] specifies the properties of a single device-level runtime layer for a physical device.
-    size_t                          **DeviceLayerExtensionCount;                     /// An array where each element [Device][Layer] specifies the number of extensions for a single device-level runtime layer for a physical device.
-    VkExtensionProperties          ***DeviceLayerExtensionProperties;                /// An array where each element [Device][Layer][Extension] specifies the properties of a single device-level runtime layer extension for a physical device.
     size_t                           *DeviceExtensionCount;                          /// An array where each element [Device] specifies the number of device-level extensions exposed by the runtime for a physical device.
     VkExtensionProperties           **DeviceExtensionProperties;                     /// An array where each element [Device][Extension] specifies the properties of a single device-level extension exposed by the runtime for a physical device.
     size_t                           *DeviceQueueFamilyCount;                        /// An array where each element [Device] specifies the number of queue families exposed by a physical device.
@@ -4416,7 +4411,6 @@ OsResolveVulkanInstanceFunctions
     OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkDestroyInstance);
     OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkEnumeratePhysicalDevices);
     OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkEnumerateDeviceExtensionProperties);
-    OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkEnumerateDeviceLayerProperties);
     OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkGetDeviceProcAddr);
     OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkGetPhysicalDeviceFeatures);
     OS_LAYER_RESOLVE_VULKAN_INSTANCE_FUNCTION(instance, runtime, vkGetPhysicalDeviceFormatProperties);
@@ -8465,10 +8459,6 @@ OsEnumerateVulkanPhysicalDevices
     device_list->DeviceFeatures                      = OsMemoryArenaAllocateArray<VkPhysicalDeviceFeatures        >(arena, device_count);
     device_list->DeviceProperties                    = OsMemoryArenaAllocateArray<VkPhysicalDeviceProperties      >(arena, device_count);
     device_list->DeviceMemory                        = OsMemoryArenaAllocateArray<VkPhysicalDeviceMemoryProperties>(arena, device_count);
-    device_list->DeviceLayerCount                    = OsMemoryArenaAllocateArray<size_t                          >(arena, device_count);
-    device_list->DeviceLayerProperties               = OsMemoryArenaAllocateArray<VkLayerProperties*              >(arena, device_count);
-    device_list->DeviceLayerExtensionCount           = OsMemoryArenaAllocateArray<size_t*                         >(arena, device_count);
-    device_list->DeviceLayerExtensionProperties      = OsMemoryArenaAllocateArray<VkExtensionProperties**         >(arena, device_count);
     device_list->DeviceExtensionCount                = OsMemoryArenaAllocateArray<size_t                          >(arena, device_count);
     device_list->DeviceExtensionProperties           = OsMemoryArenaAllocateArray<VkExtensionProperties*          >(arena, device_count);
     device_list->DeviceQueueFamilyCount              = OsMemoryArenaAllocateArray<size_t                          >(arena, device_count);
@@ -8486,10 +8476,6 @@ OsEnumerateVulkanPhysicalDevices
         device_list->DeviceFeatures                 == NULL ||
         device_list->DeviceProperties               == NULL || 
         device_list->DeviceMemory                   == NULL || 
-        device_list->DeviceLayerCount               == NULL || 
-        device_list->DeviceLayerProperties          == NULL || 
-        device_list->DeviceLayerExtensionCount      == NULL || 
-        device_list->DeviceLayerExtensionProperties == NULL || 
         device_list->DeviceExtensionCount           == NULL || 
         device_list->DeviceExtensionProperties      == NULL || 
         device_list->DeviceQueueFamilyCount         == NULL || 
@@ -8516,8 +8502,6 @@ OsEnumerateVulkanPhysicalDevices
     {
         VkPhysicalDevice   handle = device_list->DeviceHandle[i];
         uint32_t     family_count = 0;
-        uint32_t      layer_count = 0;
-        uint32_t  layer_ext_count = 0;
         uint32_t  extension_count = 0;
 
         instance->vkGetPhysicalDeviceFeatures(handle, &device_list->DeviceFeatures[i]);
@@ -8553,63 +8537,13 @@ OsEnumerateVulkanPhysicalDevices
                 }
             }
         }
-        if ((result = instance->vkEnumerateDeviceLayerProperties(handle, &layer_count, NULL)) < 0)
-        {
-            OsLayerError("ERROR: %S(%u): Unable to retrieve the number of layers exposed by Vulkan physical device %S (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), device_list->DeviceProperties[i].deviceName, result);
-            goto cleanup_and_fail;
-        }
         if ((result = instance->vkEnumerateDeviceExtensionProperties(handle, NULL, &extension_count, NULL)) < 0)
         {
             OsLayerError("ERROR: %S(%u): Unable to retrieve the number of extensions exposed by Vulkan physical device %S (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), device_list->DeviceProperties[i].deviceName, result);
             goto cleanup_and_fail;
         }
-        device_list->DeviceLayerCount[i] = layer_count;
         device_list->DeviceExtensionCount[i] = extension_count;
-        device_list->DeviceLayerProperties[i] = NULL;
         device_list->DeviceExtensionProperties[i] = NULL;
-        if (layer_count != 0)
-        {   // retrieve the layer and layer extension information.
-            device_list->DeviceLayerProperties[i]               = OsMemoryArenaAllocateArray<VkLayerProperties     >(arena, layer_count);
-            device_list->DeviceLayerExtensionCount[i]           = OsMemoryArenaAllocateArray<size_t                >(arena, layer_count);
-            device_list->DeviceLayerExtensionProperties[i]      = OsMemoryArenaAllocateArray<VkExtensionProperties*>(arena, layer_count);
-            if (device_list->DeviceLayerProperties[i]          == NULL || 
-                device_list->DeviceLayerExtensionCount[i]      == NULL || 
-                device_list->DeviceLayerExtensionProperties[i] == NULL)
-            {
-                OsLayerError("ERROR: %S(%u): Unable to allocate memory for Vulkan physical device layer properties.\n", __FUNCTION__, GetCurrentThreadId());
-                result = VK_ERROR_OUT_OF_HOST_MEMORY;
-                goto cleanup_and_fail;
-            }
-            if ((result = instance->vkEnumerateDeviceLayerProperties(handle, &layer_count, device_list->DeviceLayerProperties[i])) < 0)
-            {
-                OsLayerError("ERROR: %S(%u): Unable to retrieve layer information for Vulkan physical device %S (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), device_list->DeviceProperties[i].deviceName, result);
-                goto cleanup_and_fail;
-            }
-            for (size_t j = 0, m = layer_count; j < m; ++j)
-            {   // retrieve the number of layer-level extensions for this layer.
-                if ((result = instance->vkEnumerateDeviceExtensionProperties(handle, device_list->DeviceLayerProperties[i][j].layerName, &layer_ext_count, NULL)) < 0)
-                {
-                    OsLayerError("ERROR: %S(%u): Unable to retrieve the number of extensions exposed by layer %S on Vulkan physical device %S (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), device_list->DeviceLayerProperties[i][j].layerName, device_list->DeviceProperties[i].deviceName, result);
-                    goto cleanup_and_fail;
-                }
-                device_list->DeviceLayerExtensionCount[i][j] = layer_ext_count;
-                device_list->DeviceLayerExtensionProperties[i][j] = NULL;
-                if (layer_ext_count != 0)
-                {   // retrieve the layer-level device extension information.
-                    if ((device_list->DeviceLayerExtensionProperties[i][j] = OsMemoryArenaAllocateArray<VkExtensionProperties>(arena, layer_ext_count)) == NULL)
-                    {
-                        OsLayerError("ERROR: %S(%u): Unable to allocate memory for Vulkan physical device layer extension list.\n", __FUNCTION__, GetCurrentThreadId());
-                        result = VK_ERROR_OUT_OF_HOST_MEMORY;
-                        goto cleanup_and_fail;
-                    }
-                    if ((result = instance->vkEnumerateDeviceExtensionProperties(handle, device_list->DeviceLayerProperties[i][j].layerName, &layer_ext_count, device_list->DeviceLayerExtensionProperties[i][j])) < 0)
-                    {
-                        OsLayerError("ERROR: %S(%u): Unable to retrieve extension information for layer %S on Vulkan physical device %S (VkResult = %08X).\n", __FUNCTION__, GetCurrentThreadId(), device_list->DeviceLayerProperties[i][j].layerName, device_list->DeviceProperties[i].deviceName, result);
-                        goto cleanup_and_fail;
-                    }
-                }
-            }
-        }
         if (extension_count != 0)
         {   // retrieve the device-level extension information.
             if ((device_list->DeviceExtensionProperties[i] = OsMemoryArenaAllocateArray<VkExtensionProperties>(arena, extension_count)) == NULL)
