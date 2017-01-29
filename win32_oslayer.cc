@@ -345,6 +345,8 @@
 /// @summary Forward-declare several public types.
 struct OS_CPU_INFO;
 struct OS_MEMORY_ARENA;
+struct OS_HOST_MEMORY_POOL;
+struct OS_HOST_MEMORY_ALLOCATION;
 
 struct OS_WORKER_THREAD;
 struct OS_THREAD_POOL;
@@ -391,7 +393,42 @@ struct OS_AUDIO_DEVICE_LIST;
 struct OS_AUDIO_OUTPUT_DEVICE;
 struct OS_AUDIO_CAPTURE_DEVICE;
 
-/// @summary Define the data associated with an operating system arena allocator. 
+/// @summary Represents a pool of pre-allocated OS_HOST_MEMORY_ALLOCATION instances.
+/// Typically each thread maintains its own OS_HOST_MEMORY_POOL from which it alone acquires and releases allocations.
+struct OS_HOST_MEMORY_POOL
+{
+    char const                *Name;                 /// A nul-terminated string specifying the name of the pool. This value is used for debugging purposes only.
+    OS_HOST_MEMORY_ALLOCATION *FreeList;             /// The first free OS_HOST_MEMORY_ALLOCATION instance.
+    OS_HOST_MEMORY_ALLOCATION *NodeList;             /// The pre-allocated storage for Capacity OS_HOST_MEMORY_ALLOCATION instances.
+    size_t                     Capacity;             /// The maximum number of allocations that can be made from the pool.
+    size_t                     MinAllocationSize;    /// The minimum number of bytes that can be associated with any individual allocation.
+    size_t                     MinCommitIncrease;    /// The minimum number of bytes that memory commitment can increase by for each allocation from the pool.
+    uint32_t                   PageSize;             /// The size of a VMM page, in bytes, on the host operating system.
+    uint32_t                   Granularity;          /// The VMM allocation granularity, in bytes.
+};
+
+/// @summary Define the data used to initialize a pool of OS_HOST_MEMORY_ALLOCATION instances.
+struct OS_HOST_MEMORY_POOL_INIT
+{
+    char const                *PoolName;             /// A nul-terminated string specifying the name of the pool. This value is used for debugging purposes only.
+    size_t                     PoolCapacity;         /// The maximum number of allocations that can be made from the pool.
+    size_t                     MinAllocationSize;    /// The minimum number of bytes that can be associated with any individual allocation.
+    size_t                     MinCommitIncrease;    /// The minimum number of bytes that memory commitment can increase by for each allocation from the pool.
+};
+
+/// @summary Define the data associated with a single host memory allocation. Each allocation corresponds to a VirtualAlloc call.
+/// By default, each chunk ends with a single guard page that will trigger an access violation on read or write.
+struct OS_HOST_MEMORY_ALLOCATION
+{
+    OS_HOST_MEMORY_POOL       *SourcePool;           /// The OS_HOST_MEMORY_POOL from which the chunk was allocated.
+    OS_HOST_MEMORY_ALLOCATION *NextAllocation;       /// Used by the OS_HOST_MEMORY_POOL to maintain the free list. May be used by the application.
+    uint8_t                   *BaseAddress;          /// The address of the first accessible byte.
+    size_t                     BytesReserved;        /// The number of bytes of process address space reserved by this allocation, not including the guard page (if any).
+    size_t                     BytesCommitted;       /// The number of bytes of process address space committed by this allocation. Always <= BytesReserved.
+    uint32_t                   AllocationFlags;      /// One or more of OS_HOST_MEMORY_ALLOCATION_FLAGS.
+};
+
+/// @summary Define the data associated with an arena-style allocator. 
 /// The memory arena is not safe for concurrent access by multiple threads.
 struct OS_MEMORY_ARENA
 {
@@ -1407,6 +1444,16 @@ enum OS_VULKAN_LOADER_RESULT         : int
     OS_VULKAN_LOADER_RESULT_VKERROR  =-4,            /// A Vulkan API call returned an error.
 };
 
+/// @summary Define flags that can be bitwise OR'd to specify the attributes of a host memory allocation.
+enum OS_HOST_MEMORY_ALLOCATION_FLAGS  : uint32_t
+{
+    OS_HOST_MEMORY_ALLOCATION_FLAGS_NONE         = (0 << 0), /// No flags are specified. The allocation allocation will allow reading, writing and end with a guard page.
+    OS_HOST_MEMORY_ALLOCATION_FLAG_READ          = (1 << 0), /// The memory is readable by the host.
+    OS_HOST_MEMORY_ALLOCATION_FLAG_WRITE         = (1 << 1), /// The memory is writable by the host.
+    OS_HOST_MEMORY_ALLOCATION_FLAG_EXECUTE       = (1 << 2), /// The memory is will contain dynamically-generated executable code.
+    OS_HOST_MEMORY_ALLOCATION_FLAG_NO_GUARD_PAGE = (1 << 3), /// The memory allocation will not end with a trailing guard page.
+};
+
 /// @summary Define the valid flags that can be specified to define the usage for an OS_TASK_POOL. Valid combinations are:
 /// OS_TASK_POOL_USAGE_FLAG_DEFINE | OS_TASK_USAGE_FLAG_PUBLISH: The thread defines tasks to be stolen and executed on worker threads.
 /// OS_TASK_POOL_USAGE_FLAG_DEFINE | OS_TASK_USAGE_FLAG_EXECUTE: The thread defines tasks and can also execute tasks manually.
@@ -1618,138 +1665,148 @@ global_variable GUID      const TaskProfilerGUID = { 0x349ce0e9, 0x6df5, 0x4c25,
 /*////////////////////////////
 //   Forward Declarations   //
 ////////////////////////////*/
-public_function void                 OsZeroMemory(void *dst, size_t len);
-public_function void                 OsSecureZeroMemory(void *dst, size_t len);
-public_function void                 OsCopyMemory(void * __restrict dst, void const * __restrict src, size_t len);
-public_function void                 OsMoveMemory(void *dst, void const *src, size_t len);
-public_function void                 OsFillMemory(void *dst, size_t len, uint8_t val);
-public_function size_t               OsAlignUp(size_t size, size_t pow2);
-public_function int                  OsCreateMemoryArena(OS_MEMORY_ARENA *arena, size_t arena_size, bool commit_all, bool guard_page);
-public_function void                 OsDeleteMemoryArena(OS_MEMORY_ARENA *arena);
-public_function size_t               OsMemoryArenaBytesReserved(OS_MEMORY_ARENA *arena);
-public_function size_t               OsMemoryArenaBytesUncommitted(OS_MEMORY_ARENA *arena);
-public_function size_t               OsMemoryArenaBytesCommitted(OS_MEMORY_ARENA *arena);
-public_function size_t               OsMemoryArenaBytesInActiveReservation(OS_MEMORY_ARENA *arena);
-public_function size_t               OsMemoryArenaPageSize(OS_MEMORY_ARENA *arena);
-public_function size_t               OsMemoryArenaSystemGranularity(OS_MEMORY_ARENA *arena);
-public_function bool                 OsMemoryArenaCanSatisfyAllocation(OS_MEMORY_ARENA *arena, size_t alloc_size, size_t alloc_alignment);
-public_function void*                OsMemoryArenaAllocate(OS_MEMORY_ARENA *arena, size_t alloc_size, size_t alloc_alignment);
-public_function void*                OsMemoryArenaReserve(OS_MEMORY_ARENA *arena, size_t reserve_size, size_t alloc_alignment);
-public_function int                  OsMemoryArenaCommit(OS_MEMORY_ARENA *arena, size_t commit_size);
-public_function void                 OsMemoryArenaCancel(OS_MEMORY_ARENA *arena);
-public_function os_arena_marker_t    OsMemoryArenaMark(OS_MEMORY_ARENA *arena);
-public_function void                 OsMemoryArenaResetToMarker(OS_MEMORY_ARENA *arena, os_arena_marker_t arena_marker);
-public_function void                 OsMemoryArenaReset(OS_MEMORY_ARENA *arena);
-public_function void                 OsMemoryArenaDecommitToMarker(OS_MEMORY_ARENA *arena, os_arena_marker_t arena_marker);
-public_function void                 OsMemoryArenaDecommit(OS_MEMORY_ARENA *arena);
+public_function void                       OsZeroMemory(void *dst, size_t len);
+public_function void                       OsSecureZeroMemory(void *dst, size_t len);
+public_function void                       OsCopyMemory(void * __restrict dst, void const * __restrict src, size_t len);
+public_function void                       OsMoveMemory(void *dst, void const *src, size_t len);
+public_function void                       OsFillMemory(void *dst, size_t len, uint8_t val);
+public_function size_t                     OsAlignUp(size_t size, size_t pow2);
+public_function int                        OsCreateHostMemoryPool(OS_HOST_MEMORY_POOL *pool, OS_HOST_MEMORY_POOL_INIT *init);
+public_function void                       OsDeleteHostMemoryPool(OS_HOST_MEMORY_POOL *pool);
+public_function OS_HOST_MEMORY_ALLOCATION* OsHostMemoryPoolAllocate(OS_HOST_MEMORY_POOL *pool, size_t reserve_size, size_t commit_size, uint32_t alloc_flags);
+public_function void                       OsHostMemoryPoolRelease(OS_HOST_MEMORY_POOL *pool, OS_HOST_MEMORY_ALLOCATION *alloc);
+public_function void                       OsHostMemoryPoolReset(OS_HOST_MEMORY_POOL *pool);
+public_function int                        OsHostMemoryReserveAndCommit(OS_HOST_MEMORY_ALLOCATION *alloc, size_t reserve_size, size_t commit_size, uint32_t alloc_flags);
+public_function int                        OsHostMemoryIncreaseCommitment(OS_HOST_MEMORY_ALLOCATION *alloc, size_t commit_size);
+public_function void                       OsHostMemoryFlush(OS_HOST_MEMORY_ALLOCATION *alloc);
+public_function void                       OsHostMemoryRelease(OS_HOST_MEMORY_ALLOCATION *alloc);
+/// TODO(rlk): MEMORY_ARENA is no longer an OS concept, but is still required by this file.
+public_function int                        OsCreateMemoryArena(OS_MEMORY_ARENA *arena, size_t arena_size, bool commit_all, bool guard_page);
+public_function void                       OsDeleteMemoryArena(OS_MEMORY_ARENA *arena);
+public_function size_t                     OsMemoryArenaBytesReserved(OS_MEMORY_ARENA *arena);
+public_function size_t                     OsMemoryArenaBytesUncommitted(OS_MEMORY_ARENA *arena);
+public_function size_t                     OsMemoryArenaBytesCommitted(OS_MEMORY_ARENA *arena);
+public_function size_t                     OsMemoryArenaBytesInActiveReservation(OS_MEMORY_ARENA *arena);
+public_function size_t                     OsMemoryArenaPageSize(OS_MEMORY_ARENA *arena);
+public_function size_t                     OsMemoryArenaSystemGranularity(OS_MEMORY_ARENA *arena);
+public_function bool                       OsMemoryArenaCanSatisfyAllocation(OS_MEMORY_ARENA *arena, size_t alloc_size, size_t alloc_alignment);
+public_function void*                      OsMemoryArenaAllocate(OS_MEMORY_ARENA *arena, size_t alloc_size, size_t alloc_alignment);
+public_function void*                      OsMemoryArenaReserve(OS_MEMORY_ARENA *arena, size_t reserve_size, size_t alloc_alignment);
+public_function int                        OsMemoryArenaCommit(OS_MEMORY_ARENA *arena, size_t commit_size);
+public_function void                       OsMemoryArenaCancel(OS_MEMORY_ARENA *arena);
+public_function os_arena_marker_t          OsMemoryArenaMark(OS_MEMORY_ARENA *arena);
+public_function void                       OsMemoryArenaResetToMarker(OS_MEMORY_ARENA *arena, os_arena_marker_t arena_marker);
+public_function void                       OsMemoryArenaReset(OS_MEMORY_ARENA *arena);
+public_function void                       OsMemoryArenaDecommitToMarker(OS_MEMORY_ARENA *arena, os_arena_marker_t arena_marker);
+public_function void                       OsMemoryArenaDecommit(OS_MEMORY_ARENA *arena);
 
-public_function uint64_t             OsTimestampInTicks(void);
-public_function uint64_t             OsTimestampInNanoseconds(void);
-public_function uint64_t             OsNanosecondSliceOfSecond(uint64_t fraction);
-public_function uint64_t             OsElapsedNanoseconds(uint64_t start_ticks, uint64_t end_ticks);
-public_function uint64_t             OsMillisecondsToNanoseconds(uint32_t milliseconds);
-public_function uint32_t             OsNanosecondsToWholeMillisecons(uint64_t nanoseconds);
-public_function bool                 OsQueryHostCpuLayout(OS_CPU_INFO *cpu_info, OS_MEMORY_ARENA *arena);
+public_function uint64_t                   OsTimestampInTicks(void);
+public_function uint64_t                   OsTimestampInNanoseconds(void);
+public_function uint64_t                   OsNanosecondSliceOfSecond(uint64_t fraction);
+public_function uint64_t                   OsElapsedNanoseconds(uint64_t start_ticks, uint64_t end_ticks);
+public_function uint64_t                   OsMillisecondsToNanoseconds(uint32_t milliseconds);
+public_function uint32_t                   OsNanosecondsToWholeMillisecons(uint64_t nanoseconds);
+public_function bool                       OsQueryHostCpuLayout(OS_CPU_INFO *cpu_info, OS_MEMORY_ARENA *arena);
 
-public_function uint32_t             OsThreadId(void);
-public_function os_task_id_t         OsMakeTaskId(uint32_t type, uint32_t pool, uint32_t index, uint32_t valid);
-public_function bool                 OsIsValidTask(os_task_id_t task_id);
-public_function bool                 OsIsExternalTask(os_task_id_t task_id);
-public_function bool                 OsIsInternalTask(os_task_id_t task_id);
-public_function unsigned int __cdecl OsTaskSchedulerThreadMain(void *argp);
-public_function int                  OsCreateTaskScheduler(OS_TASK_SCHEDULER *scheduler, OS_TASK_SCHEDULER_INIT *init, OS_MEMORY_ARENA *arena, char const *name);
-public_function void                 OsDestroyTaskScheduler(OS_TASK_SCHEDULER *scheduler);
-public_function int                  OsAllocateTaskPool(OS_TASK_ENVIRONMENT *taskenv, OS_TASK_SCHEDULER *scheduler, uint32_t pool_type, uint32_t thread_id);
-public_function void                 OsReturnTaskPool(OS_TASK_ENVIRONMENT *taskenv);
-public_function int                  OsGetTaskPoolError(OS_TASK_ENVIRONMENT *taskenv);
-public_function void                 OsSetTaskPoolError(OS_TASK_ENVIRONMENT *taskenv, int last_error);
-public_function void                 OsPublishTasks(OS_TASK_ENVIRONMENT *taskenv, size_t task_count);
-public_function size_t               OsCompleteTask(OS_TASK_ENVIRONMENT *taskenv, os_task_id_t task_id);
-public_function size_t               OsFinishTaskDefinition(OS_TASK_ENVIRONMENT *taskenv, os_task_id_t task_id);
-public_function os_task_id_t         OsDefineTask(OS_TASK_ENVIRONMENT *taskenv, uint32_t const task_type, OS_TASK_ENTRYPOINT task_main, void const *task_args, size_t const args_size, os_task_id_t const *dependency_list, size_t const dependency_count);
-public_function os_task_id_t         OsDefineChildTask(OS_TASK_ENVIRONMENT *taskenv, uint32_t const task_type, OS_TASK_ENTRYPOINT task_main, void const *task_args, size_t const args_size, os_task_id_t const parent_id, os_task_id_t const *dependency_list, size_t const dependency_count);
-public_function void                 OsWaitForTask(OS_TASK_ENVIRONMENT *taskenv, os_task_id_t wait_task);
-public_function int                  OsAllocateTaskFence(OS_TASK_FENCE *fence);
-public_function void                 OsDestroyTaskFence(OS_TASK_FENCE *fence);
-public_function void                 OsResetTaskFence(OS_TASK_FENCE *fence);
-public_function bool                 OsWaitTaskFence(OS_TASK_FENCE *fence, uint64_t timeout_ns);
-public_function os_task_id_t         OsCreateTaskFence(OS_TASK_ENVIRONMENT *taskenv, OS_TASK_FENCE *fence, os_task_id_t const *dependency_list, size_t const dependency_count);
+public_function uint32_t                   OsThreadId(void);
+public_function os_task_id_t               OsMakeTaskId(uint32_t type, uint32_t pool, uint32_t index, uint32_t valid);
+public_function bool                       OsIsValidTask(os_task_id_t task_id);
+public_function bool                       OsIsExternalTask(os_task_id_t task_id);
+public_function bool                       OsIsInternalTask(os_task_id_t task_id);
+public_function unsigned int __cdecl       OsTaskSchedulerThreadMain(void *argp);
+public_function int                        OsCreateTaskScheduler(OS_TASK_SCHEDULER *scheduler, OS_TASK_SCHEDULER_INIT *init, OS_MEMORY_ARENA *arena, char const *name);
+public_function void                       OsDestroyTaskScheduler(OS_TASK_SCHEDULER *scheduler);
+public_function int                        OsAllocateTaskPool(OS_TASK_ENVIRONMENT *taskenv, OS_TASK_SCHEDULER *scheduler, uint32_t pool_type, uint32_t thread_id);
+public_function void                       OsReturnTaskPool(OS_TASK_ENVIRONMENT *taskenv);
+public_function int                        OsGetTaskPoolError(OS_TASK_ENVIRONMENT *taskenv);
+public_function void                       OsSetTaskPoolError(OS_TASK_ENVIRONMENT *taskenv, int last_error);
+public_function void                       OsPublishTasks(OS_TASK_ENVIRONMENT *taskenv, size_t task_count);
+public_function size_t                     OsCompleteTask(OS_TASK_ENVIRONMENT *taskenv, os_task_id_t task_id);
+public_function size_t                     OsFinishTaskDefinition(OS_TASK_ENVIRONMENT *taskenv, os_task_id_t task_id);
+public_function os_task_id_t               OsDefineTask(OS_TASK_ENVIRONMENT *taskenv, uint32_t const task_type, OS_TASK_ENTRYPOINT task_main, void const *task_args, size_t const args_size, os_task_id_t const *dependency_list, size_t const dependency_count);
+public_function os_task_id_t               OsDefineChildTask(OS_TASK_ENVIRONMENT *taskenv, uint32_t const task_type, OS_TASK_ENTRYPOINT task_main, void const *task_args, size_t const args_size, os_task_id_t const parent_id, os_task_id_t const *dependency_list, size_t const dependency_count);
+public_function void                       OsWaitForTask(OS_TASK_ENVIRONMENT *taskenv, os_task_id_t wait_task);
+public_function int                        OsAllocateTaskFence(OS_TASK_FENCE *fence);
+public_function void                       OsDestroyTaskFence(OS_TASK_FENCE *fence);
+public_function void                       OsResetTaskFence(OS_TASK_FENCE *fence);
+public_function bool                       OsWaitTaskFence(OS_TASK_FENCE *fence, uint64_t timeout_ns);
+public_function os_task_id_t               OsCreateTaskFence(OS_TASK_ENVIRONMENT *taskenv, OS_TASK_FENCE *fence, os_task_id_t const *dependency_list, size_t const dependency_count);
 
-public_function unsigned int __cdecl OsWorkerThreadMain(void *argp);
-public_function size_t               OsAllocationSizeForThreadPool(size_t thread_count);
-public_function int                  OsCreateThreadPool(OS_THREAD_POOL *pool, OS_THREAD_POOL_INIT *init, OS_MEMORY_ARENA *arena, char const *name);
-public_function void                 OsLaunchThreadPool(OS_THREAD_POOL *pool);
-public_function void                 OsTerminateThreadPool(OS_THREAD_POOL *pool);
-public_function void                 OsDestroyThreadPool(OS_THREAD_POOL *pool);
-public_function bool                 OsSignalWorkerThreads(OS_WORKER_THREAD *sender, uintptr_t signal_arg, size_t thread_count);
-public_function bool                 OsSignalWorkerThreads(OS_THREAD_POOL *pool, uintptr_t signal_arg, size_t thread_count);
+public_function unsigned int __cdecl       OsWorkerThreadMain(void *argp);
+public_function size_t                     OsAllocationSizeForThreadPool(size_t thread_count);
+public_function int                        OsCreateThreadPool(OS_THREAD_POOL *pool, OS_THREAD_POOL_INIT *init, OS_MEMORY_ARENA *arena, char const *name);
+public_function void                       OsLaunchThreadPool(OS_THREAD_POOL *pool);
+public_function void                       OsTerminateThreadPool(OS_THREAD_POOL *pool);
+public_function void                       OsDestroyThreadPool(OS_THREAD_POOL *pool);
+public_function bool                       OsSignalWorkerThreads(OS_WORKER_THREAD *sender, uintptr_t signal_arg, size_t thread_count);
+public_function bool                       OsSignalWorkerThreads(OS_THREAD_POOL *pool, uintptr_t signal_arg, size_t thread_count);
 
-public_function void                 OsResetInputSystem(OS_INPUT_SYSTEM *system);
-public_function void                 OsPushRawInput(OS_INPUT_SYSTEM *system, RAWINPUT const *input);
-public_function void                 OsPushRawInputDeviceChange(OS_INPUT_SYSTEM *system, WPARAM wparam, LPARAM lparam);
-public_function void                 OsSimulateKeyPress(OS_INPUT_SYSTEM *system, HANDLE device, UINT virtual_key);
-public_function void                 OsSimulateKeyRelease(OS_INPUT_SYSTEM *system, HANDLE device, UINT virtual_key);
-public_function void                 OsConsumeInputEvents(OS_INPUT_EVENTS *events, OS_INPUT_SYSTEM *system, uint64_t tick_time);
+public_function void                       OsResetInputSystem(OS_INPUT_SYSTEM *system);
+public_function void                       OsPushRawInput(OS_INPUT_SYSTEM *system, RAWINPUT const *input);
+public_function void                       OsPushRawInputDeviceChange(OS_INPUT_SYSTEM *system, WPARAM wparam, LPARAM lparam);
+public_function void                       OsSimulateKeyPress(OS_INPUT_SYSTEM *system, HANDLE device, UINT virtual_key);
+public_function void                       OsSimulateKeyRelease(OS_INPUT_SYSTEM *system, HANDLE device, UINT virtual_key);
+public_function void                       OsConsumeInputEvents(OS_INPUT_EVENTS *events, OS_INPUT_SYSTEM *system, uint64_t tick_time);
 
-public_function int                  OsEnumerateVulkanDrivers(OS_VULKAN_ICD_INFO *icd_list, size_t max_icds, size_t *icd_count);
-public_function void                 OsFreeVulkanDriverList(OS_VULKAN_ICD_INFO *icd_list, size_t icd_count);
-public_function VkResult             OsLoadVulkanIcd(OS_VULKAN_RUNTIME_DISPATCH *runtime, OS_VULKAN_ICD_INFO *icd_info);
-public_function VkResult             OsLoadVulkanDriver(OS_VULKAN_RUNTIME_DISPATCH *runtime, HMODULE icd_module);
-public_function VkResult             OsLoadVulkanRuntime(OS_VULKAN_RUNTIME_DISPATCH *runtime);
-public_function VkResult             OsQueryVulkanRuntimeProperties(OS_VULKAN_RUNTIME_PROPERTIES *props, OS_VULKAN_RUNTIME_DISPATCH *runtime, OS_MEMORY_ARENA *arena);
-public_function VkResult             OsCreateVulkanInstance(OS_VULKAN_INSTANCE_DISPATCH *instance, OS_VULKAN_RUNTIME_DISPATCH *runtime, VkInstanceCreateInfo const *create_info, VkAllocationCallbacks const *allocation_callbacks);
-public_function bool                 OsIsPrimaryDisplay(OS_VULKAN_PHYSICAL_DEVICE_LIST const *device_list, size_t display_index);
-public_function int32_t              OsDisplayRefreshRate(OS_VULKAN_PHYSICAL_DEVICE_LIST const *device_list, size_t display_index);
-public_function char const*          OsSupportsVulkanInstanceLayer(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const *layer_name, size_t *layer_index);
-public_function bool                 OsSupportsAllVulkanInstanceLayers(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const **layer_name, size_t const layer_count);
-public_function char const*          OsSupportsVulkanInstanceExtension(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const *extension_name, size_t *extension_index);
-public_function bool                 OsSupportsAllVulkanInstanceExtensions(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const **extension_names, size_t const extension_count);
-public_function VkResult             OsEnumerateVulkanPhysicalDevices(OS_VULKAN_PHYSICAL_DEVICE_LIST *device_list, OS_VULKAN_INSTANCE_DISPATCH *instance, OS_MEMORY_ARENA *arena, HINSTANCE exe_instance);
-public_function VkResult             OsCreateVulkanLogicalDevice(OS_VULKAN_DEVICE_DISPATCH *device, OS_VULKAN_INSTANCE_DISPATCH *instance, VkPhysicalDevice physical_Device, VkDeviceCreateInfo const *create_info, VkAllocationCallbacks const *allocation_callbacks);
+public_function int                        OsEnumerateVulkanDrivers(OS_VULKAN_ICD_INFO *icd_list, size_t max_icds, size_t *icd_count);
+public_function void                       OsFreeVulkanDriverList(OS_VULKAN_ICD_INFO *icd_list, size_t icd_count);
+public_function VkResult                   OsLoadVulkanIcd(OS_VULKAN_RUNTIME_DISPATCH *runtime, OS_VULKAN_ICD_INFO *icd_info);
+public_function VkResult                   OsLoadVulkanDriver(OS_VULKAN_RUNTIME_DISPATCH *runtime, HMODULE icd_module);
+public_function VkResult                   OsLoadVulkanRuntime(OS_VULKAN_RUNTIME_DISPATCH *runtime);
+public_function VkResult                   OsQueryVulkanRuntimeProperties(OS_VULKAN_RUNTIME_PROPERTIES *props, OS_VULKAN_RUNTIME_DISPATCH *runtime, OS_MEMORY_ARENA *arena);
+public_function VkResult                   OsCreateVulkanInstance(OS_VULKAN_INSTANCE_DISPATCH *instance, OS_VULKAN_RUNTIME_DISPATCH *runtime, VkInstanceCreateInfo const *create_info, VkAllocationCallbacks const *allocation_callbacks);
+public_function bool                       OsIsPrimaryDisplay(OS_VULKAN_PHYSICAL_DEVICE_LIST const *device_list, size_t display_index);
+public_function int32_t                    OsDisplayRefreshRate(OS_VULKAN_PHYSICAL_DEVICE_LIST const *device_list, size_t display_index);
+public_function char const*                OsSupportsVulkanInstanceLayer(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const *layer_name, size_t *layer_index);
+public_function bool                       OsSupportsAllVulkanInstanceLayers(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const **layer_name, size_t const layer_count);
+public_function char const*                OsSupportsVulkanInstanceExtension(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const *extension_name, size_t *extension_index);
+public_function bool                       OsSupportsAllVulkanInstanceExtensions(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const **extension_names, size_t const extension_count);
+public_function VkResult                   OsEnumerateVulkanPhysicalDevices(OS_VULKAN_PHYSICAL_DEVICE_LIST *device_list, OS_VULKAN_INSTANCE_DISPATCH *instance, OS_MEMORY_ARENA *arena, HINSTANCE exe_instance);
+public_function VkResult                   OsCreateVulkanLogicalDevice(OS_VULKAN_DEVICE_DISPATCH *device, OS_VULKAN_INSTANCE_DISPATCH *instance, VkPhysicalDevice physical_Device, VkDeviceCreateInfo const *create_info, VkAllocationCallbacks const *allocation_callbacks);
 
-public_function int                  OsInitializeAudio(OS_AUDIO_SYSTEM *audio_system);
-public_function int                  OsEnumerateAudioDevices(OS_AUDIO_DEVICE_LIST *device_list, OS_AUDIO_SYSTEM *audio_system, OS_MEMORY_ARENA *arena);
-public_function void                 OsDisableAudioOutput(OS_AUDIO_SYSTEM *audio_system);
-public_function int                  OsEnableAudioOutput(OS_AUDIO_SYSTEM *audio_system, WCHAR *device_id, uint32_t samples_per_second, uint32_t buffer_size);
-public_function int                  OsRecoverLostAudioOutputDevice(OS_AUDIO_SYSTEM *audio_system);
-public_function uint32_t             OsAudioSamplesToWrite(OS_AUDIO_SYSTEM *audio_system);
-public_function int                  OsWriteAudioSamples(OS_AUDIO_SYSTEM *audio_system, void const *sample_data, uint32_t const sample_count);
+public_function int                        OsInitializeAudio(OS_AUDIO_SYSTEM *audio_system);
+public_function int                        OsEnumerateAudioDevices(OS_AUDIO_DEVICE_LIST *device_list, OS_AUDIO_SYSTEM *audio_system, OS_MEMORY_ARENA *arena);
+public_function void                       OsDisableAudioOutput(OS_AUDIO_SYSTEM *audio_system);
+public_function int                        OsEnableAudioOutput(OS_AUDIO_SYSTEM *audio_system, WCHAR *device_id, uint32_t samples_per_second, uint32_t buffer_size);
+public_function int                        OsRecoverLostAudioOutputDevice(OS_AUDIO_SYSTEM *audio_system);
+public_function uint32_t                   OsAudioSamplesToWrite(OS_AUDIO_SYSTEM *audio_system);
+public_function int                        OsWriteAudioSamples(OS_AUDIO_SYSTEM *audio_system, void const *sample_data, uint32_t const sample_count);
 
-public_function FILETIME             OsUnixTimeToFILETIME(uint64_t unix_time_t);
-public_function uint64_t             OsFILETIMEtoUnixTime(FILETIME filetime);
-public_function size_t               OsShellFolderPath(WCHAR *buf, size_t buf_bytes, WCHAR **buf_end, size_t &bytes_needed, REFKNOWNFOLDERID folder_id);
-public_function size_t               OsKnownPath(WCHAR *buf, size_t buf_bytes, WCHAR **buf_end, size_t &bytes_needed, int folder_id);
-public_function size_t               OsNativePathForHandle(WCHAR *buf, size_t buf_bytes, WCHAR **buf_end, size_t &bytes_needed, HANDLE handle);
-public_function size_t               OsNativePathAppend(WCHAR *buf, size_t buf_bytes, WCHAR **buf_end, size_t &bytes_needed, WCHAR const *append);
-public_function size_t               OsNativePathChangeExtension(WCHAR *buf, size_t buf_bytes, WCHAR **buf_end, size_t &bytes_needed, WCHAR const *new_ext);
-public_function size_t               OsNativePathAppendExtension(WCHAR *buf, size_t buf_bytes, WCHAR **buf_end, size_t &bytes_needed, WCHAR const *new_ext);
-public_function int                  OsNativePathParse(WCHAR *buf, WCHAR *buf_end, OS_PATH_PARTS *parts);
-public_function size_t               OsPhysicalSectorSize(HANDLE device);
-public_function void                 OsInitFileSystemInfoChunkAllocator(OS_FSIC_ALLOCATOR *alloc);
-public_function OS_FILE_INFO_CHUNK*  OsNewFileInfoChunk(OS_FSIC_ALLOCATOR *alloc);
-public_function void                 OsFreeFileInfoChunkList(OS_FSIC_ALLOCATOR *alloc, OS_FILE_INFO_CHUNK *chunk);
-public_function void                 OsLockFileInfoChunkRead(OS_FILE_INFO_CHUNK *chunk);
-public_function void                 OsUnlockFileInfoChunkRead(OS_FILE_INFO_CHUNK *chunk);
-public_function void                 OsLockFileInfoChunkWrite(OS_FILE_INFO_CHUNK *chunk);
-public_function void                 OsUnlockFileInfoChunkWrite(OS_FILE_INFO_CHUNK *chunk);
-public_function int                  OsOpenNativeDirectory(WCHAR const *fspath, HANDLE &dir);
-public_function OS_FILE_INFO_CHUNK*  OsNativeDirectoryFindFiles(HANDLE dir, WCHAR const *filter, bool recurse, size_t &total_count, OS_FSIC_ALLOCATOR *alloc);
-public_function void                 OsCloseNativeDirectory(HANDLE dir);
-public_function int                  OsCreateNativeDirectory(WCHAR const *abspath); 
-public_function int                  OsLoadFileData(OS_FILE_DATA *data, WCHAR const *path);
-public_function int                  OsOpenFileMapping(OS_FILE_MAPPING *filemap, WCHAR const *path);
-public_function void                 OsCloseFileMapping(OS_FILE_MAPPING *filemap);
-public_function int                  OsMapFileRegion(OS_FILE_DATA *data, int64_t offset, int64_t size, OS_FILE_MAPPING *filemap);
-public_function void                 OsFreeFileData(OS_FILE_DATA *data);
+public_function FILETIME                   OsUnixTimeToFILETIME(uint64_t unix_time_t);
+public_function uint64_t                   OsFILETIMEtoUnixTime(FILETIME filetime);
+public_function size_t                     OsShellFolderPath(WCHAR *buf, size_t buf_bytes, WCHAR **buf_end, size_t &bytes_needed, REFKNOWNFOLDERID folder_id);
+public_function size_t                     OsKnownPath(WCHAR *buf, size_t buf_bytes, WCHAR **buf_end, size_t &bytes_needed, int folder_id);
+public_function size_t                     OsNativePathForHandle(WCHAR *buf, size_t buf_bytes, WCHAR **buf_end, size_t &bytes_needed, HANDLE handle);
+public_function size_t                     OsNativePathAppend(WCHAR *buf, size_t buf_bytes, WCHAR **buf_end, size_t &bytes_needed, WCHAR const *append);
+public_function size_t                     OsNativePathChangeExtension(WCHAR *buf, size_t buf_bytes, WCHAR **buf_end, size_t &bytes_needed, WCHAR const *new_ext);
+public_function size_t                     OsNativePathAppendExtension(WCHAR *buf, size_t buf_bytes, WCHAR **buf_end, size_t &bytes_needed, WCHAR const *new_ext);
+public_function int                        OsNativePathParse(WCHAR *buf, WCHAR *buf_end, OS_PATH_PARTS *parts);
+public_function size_t                     OsPhysicalSectorSize(HANDLE device);
+public_function void                       OsInitFileSystemInfoChunkAllocator(OS_FSIC_ALLOCATOR *alloc);
+public_function OS_FILE_INFO_CHUNK*        OsNewFileInfoChunk(OS_FSIC_ALLOCATOR *alloc);
+public_function void                       OsFreeFileInfoChunkList(OS_FSIC_ALLOCATOR *alloc, OS_FILE_INFO_CHUNK *chunk);
+public_function void                       OsLockFileInfoChunkRead(OS_FILE_INFO_CHUNK *chunk);
+public_function void                       OsUnlockFileInfoChunkRead(OS_FILE_INFO_CHUNK *chunk);
+public_function void                       OsLockFileInfoChunkWrite(OS_FILE_INFO_CHUNK *chunk);
+public_function void                       OsUnlockFileInfoChunkWrite(OS_FILE_INFO_CHUNK *chunk);
+public_function int                        OsOpenNativeDirectory(WCHAR const *fspath, HANDLE &dir);
+public_function OS_FILE_INFO_CHUNK*        OsNativeDirectoryFindFiles(HANDLE dir, WCHAR const *filter, bool recurse, size_t &total_count, OS_FSIC_ALLOCATOR *alloc);
+public_function void                       OsCloseNativeDirectory(HANDLE dir);
+public_function int                        OsCreateNativeDirectory(WCHAR const *abspath); 
+public_function int                        OsLoadFileData(OS_FILE_DATA *data, WCHAR const *path);
+public_function int                        OsOpenFileMapping(OS_FILE_MAPPING *filemap, WCHAR const *path);
+public_function void                       OsCloseFileMapping(OS_FILE_MAPPING *filemap);
+public_function int                        OsMapFileRegion(OS_FILE_DATA *data, int64_t offset, int64_t size, OS_FILE_MAPPING *filemap);
+public_function void                       OsFreeFileData(OS_FILE_DATA *data);
 
-public_function size_t               OsAllocationSizeForIoThreadPool(size_t thread_count);
-public_function int                  OsCreateIoThreadPool(OS_IO_THREAD_POOL *pool, OS_IO_THREAD_POOL_INIT *init, OS_MEMORY_ARENA *arena, char const *name);
-public_function void                 OsTerminateIoThreadPool(OS_IO_THREAD_POOL *pool);
-public_function void                 OsDestroyIoThreadPool(OS_IO_THREAD_POOL *pool);
-public_function size_t               OsAllocationSizeForIoRequestPool(size_t pool_capacity);
-public_function int                  OsCreateIoRequestPool(OS_IO_REQUEST_POOL *pool, OS_MEMORY_ARENA *arena, size_t pool_capacity);
-public_function OS_IO_REQUEST*       OsAllocateIoRequest(OS_IO_REQUEST_POOL *pool);
-public_function bool                 OsSubmitIoRequest(OS_IO_THREAD_POOL *pool, OS_IO_REQUEST *request);
+public_function size_t                     OsAllocationSizeForIoThreadPool(size_t thread_count);
+public_function int                        OsCreateIoThreadPool(OS_IO_THREAD_POOL *pool, OS_IO_THREAD_POOL_INIT *init, OS_MEMORY_ARENA *arena, char const *name);
+public_function void                       OsTerminateIoThreadPool(OS_IO_THREAD_POOL *pool);
+public_function void                       OsDestroyIoThreadPool(OS_IO_THREAD_POOL *pool);
+public_function size_t                     OsAllocationSizeForIoRequestPool(size_t pool_capacity);
+public_function int                        OsCreateIoRequestPool(OS_IO_REQUEST_POOL *pool, OS_MEMORY_ARENA *arena, size_t pool_capacity);
+public_function OS_IO_REQUEST*             OsAllocateIoRequest(OS_IO_REQUEST_POOL *pool);
+public_function bool                       OsSubmitIoRequest(OS_IO_THREAD_POOL *pool, OS_IO_REQUEST *request);
 
 /*//////////////////////////
 //   Internal Functions   //
@@ -4673,6 +4730,19 @@ OsAlignUp
     return (size == 0) ? pow2 : ((size + (pow2-1)) & ~(pow2-1));
 }
 
+/// @summary Retrieve the alignment required for a given type.
+/// @typeparam T The type for which the required alignment is being queried.
+/// @return The required alignment for the specified type, in bytes. This value is always a power of two.
+template <typename T>
+public_function inline size_t
+OsAlignmentOfType
+(
+    void
+)
+{
+    return std::alignment_of<T>::value;
+}
+
 /// @summary For a given address, return the address aligned for the specified type. The type T must be aligned to a power-of-two.
 /// @param addr The unaligned address.
 /// @return The address aligned to access elements of type T, or NULL if addr is NULL.
@@ -4714,6 +4784,342 @@ OsAllocationSizeForArray
 )
 {
     return (sizeof(T) * n) + (std::alignment_of<T>::value - 1);
+}
+
+/// @summary Initialize a pool of memory allocations.
+/// @param pool The OS_HOST_MEMORY_POOL to initialize.
+/// @param init The attributes of the pool.
+/// @return Zero if the pool is successfully initialized, or -1 if an error occurred.
+public_function int
+OsCreateHostMemoryPool
+(
+    OS_HOST_MEMORY_POOL      *pool, 
+    OS_HOST_MEMORY_POOL_INIT *init
+)
+{
+    SYSTEM_INFO    sysinfo = {};
+    size_t      total_size = 0;
+    size_t actual_capacity = 0;
+    void            *array = NULL;
+
+    // retrieve the OS page size and allocation granularity.
+    GetNativeSystemInfo(&sysinfo);
+
+    // figure out how many bytes to allocate.
+    total_size = OsAlignUp(init->PoolCapacity * sizeof(OS_HOST_MEMORY_ALLOCATION), sysinfo.dwPageSize);
+    actual_capacity = total_size / sizeof(OS_HOST_MEMORY_ALLOCATION);
+
+    // VirtualAlloc storage for all of the OS_HOST_MEMORY_ALLOCATION objects.
+    if ((array = VirtualAlloc(NULL, total_size, MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE)) == NULL)
+    {
+        OsLayerError("ERROR: %S(%u): Failed to allocate %Iu bytes for pool %S of %Iu items (%08X).\n", __FUNCTION__, OsThreadId(), total_size, init->PoolName, actual_capacity, GetLastError());
+        return -1;
+    }
+
+    // initialize the fields of the OS_HOST_MEMORY_POOL object.
+    pool->Name              = init->PoolName;
+    pool->FreeList          = NULL;
+    pool->NodeList          =(OS_HOST_MEMORY_ALLOCATION*) array;
+    pool->Capacity          = actual_capacity;
+    pool->MinAllocationSize = init->MinAllocationSize;
+    pool->MinCommitIncrease = init->MinCommitIncrease;
+    pool->PageSize          = sysinfo.dwPageSize;
+    pool->Granularity       = sysinfo.dwAllocationGranularity;
+
+    // initialize the pool free list.
+    for (size_t i = 0; i < actual_capacity; ++i)
+    {
+        size_t ix = actual_capacity - i - 1;
+        pool->NodeList[ix].SourcePool     = pool;
+        pool->NodeList[ix].NextAllocation = pool->FreeList;
+        pool->FreeList = &pool->NodeList[ix];
+    }
+    return 0;
+}
+
+/// @summary Free all memory associated with an OS_HOST_MEMORY_POOL object. All allocations are invalidated.
+/// @param pool The OS_HOST_MEMORY_POOL to delete.
+public_function void
+OsDeleteHostMemoryPool
+(
+    OS_HOST_MEMORY_POOL *pool
+)
+{   // release all of the individual memory allocations.
+    for (size_t i = 0, n = pool->Capacity; i < n; ++i)
+    {
+        OsHostMemoryRelease(&pool->NodeList[i]);
+    }
+    // release the memory allocated for the pool itself.
+    if (pool->NodeList != NULL)
+    {
+        VirtualFree(pool->NodeList, 0, MEM_RELEASE);
+    }
+    pool->FreeList = NULL;
+    pool->NodeList = NULL;
+    pool->Capacity = 0;
+}
+
+/// @summary Reserve, and optionally commit, address space within a process.
+/// @param pool The OS_HOST_MEMORY_POOL from which the OS_HOST_MEMORY_ALLOCATION will be acquired.
+/// @param reserve_size The number of bytes of process address space to reserve. This value is rounded up to the nearest even multiple of the operating system page size.
+/// @param commit_size The number of bytes of process address space to commit. This value is rounded up to the nearest even multiple of the operating system page size.
+/// @param alloc_flags One or more of OS_HOST_MEMORY_ALLOCATION_FLAGS, or 0 if no special behavior is desired in which case the memory is readable, writable and has a guard page.
+/// @return Zero if the address space is successfully reserved, or -1 if an error occurred.
+public_function OS_HOST_MEMORY_ALLOCATION*
+OsHostMemoryPoolAllocate
+(
+    OS_HOST_MEMORY_POOL *pool, 
+    size_t       reserve_size, 
+    size_t        commit_size, 
+    uint32_t      alloc_flags
+)
+{
+    if (pool->FreeList != NULL)
+    {   // attempt to initialize the object at the head of the free list.
+        OS_HOST_MEMORY_ALLOCATION *alloc = pool->FreeList;
+        // attempt to initialize the object with the requested attributes.
+        if (OsHostMemoryReserveAndCommit(alloc, reserve_size, commit_size, alloc_flags) < 0)
+        {   // allocation failed. the error was already output.
+            return NULL;
+        }
+        // pop the object from the head of the free list.
+        pool->FreeList = alloc->NextAllocation;
+        alloc->NextAllocation = NULL;
+        return alloc;
+    }
+    else
+    {   // the pool capacity needs to be increased; there are no free OS_HOST_MEMORY_ALLOCATION objects.
+        OsLayerError("ERROR: %S(%u): No free OS_HOST_MEMORY_ALLOCATION objects in pool %S.\n", __FUNCTION__, OsThreadId(), pool->Name);
+        return NULL;
+    }
+}
+
+/// @summary Release all address space reserved and/or committed for an OS_HOST_MEMORY_ALLOCATION and return it to the free pool.
+/// @param pool The pool to which the OS_HOST_MEMORY_ALLOCATION will be returned. This must be the same pool the allocation was acquired from.
+/// @param alloc The OS_HOST_MEMORY_ALLOCATION to return.
+public_function void
+OsHostMemoryPoolRelease
+(
+    OS_HOST_MEMORY_POOL        *pool, 
+    OS_HOST_MEMORY_ALLOCATION *alloc
+)
+{
+    if (alloc->SourcePool != pool)
+    {
+        OsLayerError("ERROR: %S(%u): Returning allocation to incorrect pool %S.\n", __FUNCTION__, OsThreadId(), pool->Name);
+        assert(alloc->SourcePool == pool && "OS_HOST_MEMORY_ALLOCATION released to wrong pool");
+    }
+    if (alloc->BaseAddress != NULL)
+    {   // release all of the address space and return the chunk to the free pool.
+        OsHostMemoryRelease(alloc);
+        alloc->NextAllocation = pool->FreeList;
+        pool->FreeList = alloc;
+    }
+}
+
+/// @summary Reset a host memory pool to empty. All allocations and reservations are invalidated.
+/// @param pool The OS_HOST_MEMORY_POOL to reset.
+public_function void
+OsHostMemoryPoolReset
+(
+    OS_HOST_MEMORY_POOL *pool
+)
+{   // empty the pool free list.
+    pool->FreeList = NULL;
+    // release all memory allocations and return them to the free list.
+    for (size_t i = 0, n = pool->Capacity; i < n; ++i)
+    {
+        size_t ix = n - i - 1;
+        OsHostMemoryRelease(&pool->NodeList[ix]);
+        pool->NodeList[ix].SourcePool     = pool;
+        pool->NodeList[ix].NextAllocation = pool->FreeList;
+        pool->FreeList = &pool->NodeList[ix];
+    }
+}
+
+/// @summary Reserve, and optionally commit, address space within a process. Call OsHostMemoryRelease first if the allocation currently holds a memory reservation.
+/// @param alloc The OS_HOST_MEMORY_ALLOCATION to initialize. The OS_HOST_MEMORY_ALLOCTION::SourcePool and OS_HOST_MEMORY_ALLOCATION::NextAllocation fields are expected to be set by the caller.
+/// @param reserve_size The number of bytes of process address space to reserve. This value is rounded up to the nearest even multiple of the operating system page size.
+/// @param commit_size The number of bytes of process address space to commit. This value is rounded up to the nearest even multiple of the operating system page size.
+/// @param alloc_flags One or more of OS_HOST_MEMORY_ALLOCATION_FLAGS, or 0 if no special behavior is desired in which case the memory is readable, writable and has a guard page.
+/// @return Zero if the address space is successfully reserved, or -1 if an error occurred.
+public_function int
+OsHostMemoryReserveAndCommit
+(
+    OS_HOST_MEMORY_ALLOCATION *alloc, 
+    size_t              reserve_size, 
+    size_t               commit_size, 
+    uint32_t             alloc_flags
+)
+{   assert(alloc->SourcePool != NULL);
+    void   *base = NULL;
+    size_t  page = alloc->SourcePool->PageSize;
+    size_t extra = 0;
+    DWORD access = 0;
+    DWORD  flags = MEM_RESERVE;
+
+    if (commit_size > reserve_size)
+    {
+        OsLayerError("ERROR: %S(%u): Requested commit size %Iu exceeds reserve size %Iu.\n", __FUNCTION__, OsThreadId(), commit_size, reserve_size);
+        return -1;
+    }
+
+    // VMM allocations are rounded up to the next even multiple of the system 
+    // page size, and have a starting address that is an even multiple of the
+    // allocation granularity (typically 64KB.)
+    reserve_size = OsAlignUp(reserve_size, page);
+
+    // determine the VirtualAlloc protection flags for the reserved range of address space.
+    if (alloc_flags & OS_HOST_MEMORY_ALLOCATION_FLAG_READ)
+    {   // assume read-only access. access is upgraded if additional flags are set.
+        access = PAGE_READONLY;
+    }
+    if (alloc_flags & OS_HOST_MEMORY_ALLOCATION_FLAG_WRITE)
+    {   // write access implies read access to the memory.
+        access = PAGE_READWRITE;
+    }
+    if (alloc_flags & OS_HOST_MEMORY_ALLOCATION_FLAG_EXECUTE)
+    {   // execute implies read and write access to the memory.
+        // additionally, this forces the entire reservation to be committed.
+        access = PAGE_EXECUTE_READWRITE;
+        commit_size = reserve_size;
+    }
+    if (alloc_flags == OS_HOST_MEMORY_ALLOCATION_FLAGS_NONE)
+    {   // use the default access; the memory is readable and writable.
+        access = PAGE_READWRITE;
+    }
+
+    // determine whether a guard page will be allocated for this allocation.
+    if (alloc_flags & OS_HOST_MEMORY_ALLOCATION_FLAG_NO_GUARD_PAGE)
+    {   // don't include a guard page.
+        extra = 0;
+    }
+    else
+    {   // include an extra page at the end of the reserved address space range.
+        extra = page;
+    }
+
+    if (commit_size > 0)
+    {   // memory will be both reserved and committed.
+        commit_size = OsAlignUp(commit_size, page);
+        flags |= MEM_COMMIT;
+    }
+
+    // reserve (and possibly commit) contiguous virtual address space.
+    if ((base = VirtualAlloc(NULL, reserve_size+extra, flags, access)) == NULL)
+    {
+        OsLayerError("ERROR: %S(%u): VirtualAlloc for %Iu bytes failed (%08X).\n", __FUNCTION__, OsThreadId(), reserve_size+extra, GetLastError());
+        return -1;
+    }
+    if (extra > 0)
+    {   // change the protection flags for the guard page only.
+        if (VirtualAlloc((uint8_t*) base+reserve_size, page, MEM_COMMIT, access | PAGE_GUARD) == NULL)
+        {
+            OsLayerError("ERROR: %S(%u): Failed to create guard page (%08X).\n", __FUNCTION__, OsThreadId(), GetLastError());
+            VirtualFree(base, 0, MEM_RELEASE);
+            return -1;
+        }
+    }
+
+    // initialize the OS_HOST_MEMORY_ALLOCATION fields.
+    alloc->BaseAddress     =(uint8_t*) base;
+    alloc->BytesReserved   = reserve_size;
+    alloc->BytesCommitted  = commit_size;
+    alloc->AllocationFlags = alloc_flags;
+    return 0;
+}
+
+/// @summary Increase the amount of committed memory within an allocation. The commit size cannot exceed the reserve size.
+/// @param alloc The OS_HOST_MEMORY_ALLOCATION having its commit size increased.
+/// @param commit_size The total amount of memory within the allocation that should be committed.
+/// @return Zero if at least the specified amount of address space is successfully committed, or -1 if an error occurred.
+public_function int
+OsHostMemoryIncreaseCommitment
+(
+    OS_HOST_MEMORY_ALLOCATION *alloc, 
+    size_t               commit_size
+)
+{
+    if (alloc->BytesCommitted < commit_size)
+    {   // VMM calls are expensive, so enforce a minimum commit increase.
+        size_t const MIN_COMMIT_INCREASE = alloc->SourcePool->MinCommitIncrease;
+        size_t const max_commit_increase = alloc->BytesReserved - alloc->BytesCommitted;
+        size_t       req_commit_increase = commit_size          - alloc->BytesCommitted;
+        if (req_commit_increase < MIN_COMMIT_INCREASE)
+        {   // request the minimum commit increase.
+            req_commit_increase = MIN_COMMIT_INCREASE;
+        }
+        if (req_commit_increase > max_commit_increase)
+        {   // limit to the maximum possible commit increase.
+            req_commit_increase = max_commit_increase;
+        }
+        size_t new_bytes_commit = OsAlignUp(alloc->BytesCommitted + req_commit_increase, alloc->SourcePool->PageSize);
+        DWORD            access = 0;
+        if (alloc->AllocationFlags & OS_HOST_MEMORY_ALLOCATION_FLAG_READ)
+        {   // assume read-only access. access is upgraded if additional flags are set.
+            access = PAGE_READONLY;
+        }
+        if (alloc->AllocationFlags & OS_HOST_MEMORY_ALLOCATION_FLAG_WRITE)
+        {   // write access implies read access to the memory.
+            access = PAGE_READWRITE;
+        }
+        if (alloc->AllocationFlags & OS_HOST_MEMORY_ALLOCATION_FLAG_EXECUTE)
+        {   // execute implies read and write access to the memory.
+            access = PAGE_EXECUTE_READWRITE;
+        }
+        if (alloc->AllocationFlags == OS_HOST_MEMORY_ALLOCATION_FLAGS_NONE)
+        {   // use the default access; the memory is readable and writable.
+            access = PAGE_READWRITE;
+        }
+        // request that an additional portion of the pre-reserved address space be committed.
+        // executable allocations are entirely committed up-front, so no need to worry about that case here.
+        if (VirtualAlloc((uint8_t*) alloc->BaseAddress, new_bytes_commit, MEM_COMMIT, access) == NULL)
+        {
+            OsLayerError("ERROR: %S(%u): Failed to increase commit size to %Iu from %Iu.\n", __FUNCTION__, OsThreadId(), new_bytes_commit, alloc->BytesCommitted);
+            return -1;
+        }
+        // the commitment amount was increased successfully.
+        alloc->BytesCommitted = new_bytes_commit;
+        return 0;
+    }
+    else
+    {   // the requested commitment has already been met.
+        return 0;
+    }
+}
+
+/// @summary Flush the CPU instruction cache after dynamically generated code has been written to a memory allocation with the EXECUTE flag set.
+/// @param alloc The OS_HOST_MEMORY_ALLOCATION containing the dynamically-generated code.
+public_function void
+OsHostMemoryFlush
+(
+    OS_HOST_MEMORY_ALLOCATION *alloc
+)
+{
+    if (alloc->AllocationFlags & OS_HOST_MEMORY_ALLOCATION_FLAG_EXECUTE)
+    {
+        if (!FlushInstructionCache(GetCurrentProcess(), alloc->BaseAddress, alloc->BytesCommitted))
+        {
+            OsLayerError("ERROR: %S(%u): Failed to flush instruction cache (%08X).\n", __FUNCTION__, OsThreadId(), GetLastError());
+        }
+    }
+}
+
+/// @summary Release the process address space associated with a host memory allocation.
+/// @param alloc The OS_HOST_MEMORY_ALLOCATION to release.
+public_function void
+OsHostMemoryRelease
+(
+    OS_HOST_MEMORY_ALLOCATION *alloc
+)
+{
+    if (alloc->BaseAddress != NULL)
+    {   // free the entire reserved range of virtual address space.
+        VirtualFree(alloc->BaseAddress, 0, MEM_RELEASE);
+    }
+    alloc->BaseAddress    = NULL;
+    alloc->BytesReserved  = 0;
+    alloc->BytesCommitted = 0;
 }
 
 /// @summary Reserve process address space for a memory arena. By default, no address space is committed.
