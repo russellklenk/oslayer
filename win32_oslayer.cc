@@ -8,6 +8,27 @@
 /// - Low-latency audio (audio input and output device management)
 /// - Vulkan WSI (Vulkan Window system interface and swap chain management)
 ///////////////////////////////////////////////////////////////////////////80*/
+//
+// TODO:
+// Memory allocation works like so. We have OS_HOST_MEMORY_POOL from which the 
+// user can allocate actual memory, but none of the interfaces work with the 
+// memory pool or memory chunks. Instead, everything that needs memory accepts 
+// it as a void *memory and size_t memory_size. Everything that needs memory 
+// also provides a function like:
+// bool OsQueryMemoryRequirement(arg1, arg2, size_t &requirement) or 
+// bool OsQueryMemoryRequirement(OS_xxxx_INIT *init, size_t &requirement) to 
+// calculate the worst-case amount of memory required. The user can call the 
+// appropriate function to get the memory requirement, allocate the memory 
+// however they want, and then call the appropriate OsCreate function. The 
+// thing being created or initialized can then create for example an 
+// OS_HOST_MEMORY_ARENA around the void *memory and size_t memory_size from 
+// which it sub-allocates. This works in most cases but might require some 
+// API redesign for Vulkan initialization, etc. where there are a varying 
+// number of formats supported for a given device. In these cases, we might 
+// want to have an API where the user fills out an array of formats they need 
+// and queries the memory requirement for the result data. In some cases, it 
+// would make more sense to have a fixed limit on the number of eg. devices, 
+// and the user could set that limit in the INIT structure and pass it in.
 
 /*////////////////////
 //   Preprocessor   //
@@ -344,9 +365,17 @@
 //////////////////*/
 /// @summary Forward-declare several public types.
 struct OS_CPU_INFO;
-struct OS_MEMORY_ARENA;
+
 struct OS_HOST_MEMORY_POOL;
+struct OS_HOST_MEMORY_POOL_INIT;
 struct OS_HOST_MEMORY_ALLOCATION;
+
+struct OS_MEMORY_RANGE;
+struct OS_ARENA_ALLOCATOR;
+struct OS_BUDDY_BLOCK_INFO;
+struct OS_BUDDY_ALLOCATOR;
+struct OS_HOST_MEMORY_ARENA;
+struct OS_HOST_MEMORY_ALLOCATOR;
 
 struct OS_WORKER_THREAD;
 struct OS_THREAD_POOL;
@@ -428,22 +457,100 @@ struct OS_HOST_MEMORY_ALLOCATION
     uint32_t                   AllocationFlags;      /// One or more of OS_HOST_MEMORY_ALLOCATION_FLAGS.
 };
 
-/// @summary Define the data associated with an arena-style allocator. 
-/// The memory arena is not safe for concurrent access by multiple threads.
-struct OS_MEMORY_ARENA
+/// @summary Represents a range of host-visible memory. This type is not specific to the host operating system.
+struct OS_MEMORY_RANGE
 {
-    size_t              NextOffset;                  /// The offset, in bytes relative to BaseAddress, of the next available byte.
-    size_t              BytesCommitted;              /// The number of bytes committed for the arena.
-    size_t              BytesReserved;               /// The number of bytes reserved for the arena.
-    uint8_t            *BaseAddress;                 /// The base address of the reserved segment of process virtual address space.
-    size_t              ReserveAlignBytes;           /// The number of alignment-overhead bytes for the current user reservation.
-    size_t              ReserveTotalBytes;           /// The total size of the current user reservation, in bytes.
-    DWORD               PageSize;                    /// The operating system page size.
-    DWORD               Granularity;                 /// The operating system allocation granularity.
+    union
+    {
+        uint8_t        *HostAddress;                 /// The base address of the host-visible portion of the memory range.
+        size_t          ByteOffset;                  /// The byte offset from the start of the allocated memory region.
+    };
+    size_t              SizeInBytes;                 /// The number of bytes in the memory range.
+};
+
+/// @summary Defines the state associated with an arena allocator.
+struct OS_ARENA_ALLOCATOR
+{
+    size_t              NextOffset;                  /// The byte offset, relative to the start of the associated memory range, of the next free byte.
+    size_t              SizeInBytes;                 /// The maximum offset value. NextOffset is always <= SizeInBytes.
+};
+
+/// @summary Define the set of information returned from a buddy allocator block query.
+/// This type can be used regardless of whether the memory being managed is host or device memory.
+struct OS_BUDDY_BLOCK_INFO
+{
+    uint32_t            LevelIndex;                  /// The zero-based index of the level at which the block was allocated, with level 0 being the largest level.
+    uint32_t            BitIndex;                    /// The zero-based index of the bit that is set for blocks in this level.
+    uint32_t            BlockSize;                   /// The size of the blocks in this level, in bytes.
+    uint32_t            BlockCount;                  /// The maximum number of blocks in this level.
+    uint32_t            IndexOffset;                 /// The offset used to transform an absolute index into a relative index.
+    uint32_t            LeftAbsoluteIndex;           /// The absolute block index of the leftmost block of the buddy pair, either BlockAbsoluteIndex or BuddyAbsoluteIndex.
+    uint32_t            BlockAbsoluteIndex;          /// The absolute block index of the input block.
+    uint32_t            BuddyAbsoluteIndex;          /// The absolute block index of the buddy of the input block.
+};
+
+/// @summary Define the information used to look up the status of a block in the allocator merge index.
+/// The merge index contains one bit per buddy-pair. The bit is clear if both blocks are free or both are allocated, and set if only one block is allocated.
+/// This type can be used regardless of whether the memory being managed is host or device memory.
+struct OS_BUDDY_BLOCK_MERGE_INFO
+{
+    uint32_t            WordIndex;                   /// The zero-based index of the uint32_t value in the OS_BUDDY_ALLOCATOR::MergeIndex field.
+    uint32_t            Mask;                        /// The mask value used to test or manipulate the state of the bit.
+};
+
+/// @summary Define the information used to look up the status of a block in the allocator split index.
+/// The split index contains one bit per block for each level not including the leaf level. The bit is set if the corresponding block has been split.
+/// This type can be used regardless of whether the memory being managed is host or device memory.
+struct OS_BUDDY_BLOCK_SPLIT_INFO
+{
+    uint32_t            WordIndex;                   /// The zero-based index of the uint32_t value in the OS_BUDDY_ALLOCATOR::SplitIndex field.
+    uint32_t            Mask;                        /// The mask value used to test or manipulate the state of the bit.
+};
+
+/// @summary Define the data associated with a buddy allocator.
+/// The buddy allocator divides a memory range into power-of-two sized chunks between a minimum and maximum size.
+/// It supports a general-style allocation interface, including realloc functionality, and may be used for host or device memory.
+/// See http://bitsquid.blogspot.com/2015/08/allocation-adventures-3-buddy-allocator.html
+struct OS_BUDDY_ALLOCATOR
+{   static size_t const MAX_LEVELS = 16;             /// The maximum number of powers of two that can separate AllocationSizeMin and AllocationSizeMax.
+    size_t              AllocationSizeMin;           /// The size of the smallest memory block that can be returned by this allocator.
+    size_t              AllocationSizeMax;           /// The size of the largest memory block that can be returned by this allocator.
+    size_t              BytesReserved;               /// The number of bytes marked as reserved. These bytes can never be allocated to the application.
+    uint8_t            *MetadataBase;                /// The base address of the metadata storage allocation.
+    uint32_t           *FreeListData;                /// Storage for the free list arrays, allocated as a single contiguous block. There are 1 << LevelCount uint32_t values.
+    uint32_t           *MergeIndex;                  /// An array of 1 << (LevelCount-1) bits with each bit storing the state of a pair of buddies.
+    uint32_t           *SplitIndex;                  /// An array of 1 << (LevelCount-1) bits with each bit set if the block at bit index i has been set.
+    uint32_t            Reserved;                    /// Reserved for future use. Set to zero.
+    uint32_t            LevelCount;                  /// The total number of levels used by the allocator, with level 0 representing the largest level.
+    uint32_t            LevelBits[MAX_LEVELS];       /// The zero-based index of the set bit for each level. LevelCount entries are valid.
+    uint32_t            FreeCount[MAX_LEVELS];       /// The number of entries in the free list for each level. LevelCount entries are valid.
+    uint32_t           *FreeLists[MAX_LEVELS];       /// Each of LevelCount entries points to an array of 1 << LevelIndex values specifying free block offsets for that level.
+};
+
+/// @summary Define the data used to initialize a buddy allocator.
+struct OS_BUDDY_ALLOCATOR_INIT
+{
+    size_t              AllocationSizeMin;           /// The size of the smallest memory block that can be returned by this allocator.
+    size_t              AllocationSizeMax;           /// The size of the largest memory block that can be returned by this allocator.
+    size_t              BytesReserved;               /// The number of bytes marked as reserved. These bytes can never be allocated to the application.
+};
+
+/// @summary Define the data associated with an arena-style host memory allocator. 
+struct OS_HOST_MEMORY_ARENA
+{
+    OS_MEMORY_RANGE     HostMemory;                  /// The OS_MEMORY_RANGE specifying the start and size of the host-visible memory.
+    OS_ARENA_ALLOCATOR  Allocator;                   /// The OS_ARENA_ALLOCATOR maintaining the allocator state.
+};
+
+/// @summary Define the data associated with a buddy-style host memory allocator.
+struct OS_HOST_MEMORY_ALLOCATOR
+{
+    OS_MEMORY_RANGE     HostMemory;                  /// The OS_MEMORY_RANGE specifying the start and size of the host-visible memory.
+    OS_BUDDY_ALLOCATOR  Allocator;                   /// The OS_BUDDY_ALLOCATOR maintaining the allocator state.
 };
 
 /// @summary Alias type for a marker within a memory arena.
-typedef uintptr_t       os_arena_marker_t;           /// The marker stores the value of the OS_MEMORY_ARENA::NextOffset field at a given point in time.
+typedef uintptr_t       os_arena_marker_t;           /// The marker stores the value of the OS_ARENA_ALLOCATOR::NextOffset field at a given point in time.
 
 /// @summary Define the CPU topology information for the local system.
 struct OS_CPU_INFO
@@ -537,81 +644,85 @@ struct OS_CACHELINE_ALIGN OS_TASK_POOL
 /// @summary Define the data that might be needed by a thread when defining or executing tasks.
 struct OS_TASK_ENVIRONMENT
 {
-    OS_TASK_PROFILER   *TaskProfiler;                /// The task profiler associated with the task scheduler.
-    OS_TASK_SCHEDULER  *TaskScheduler;               /// The OS_TASK_SCHEDULER that owns the task pool.
-    OS_TASK_POOL       *TaskPool;                    /// The OS_TASK_POOL allocated to the thread.
-    OS_CPU_INFO        *HostCpuInfo;                 /// Information about the host CPU layout.
-    uint32_t            ThreadId;                    /// The operating system identifier of the thread associated with the execution environment.
-    uint32_t            PoolUsage;                   /// One or more of OS_TASK_POOL_USAGE indicating whether the pool can be used to run tasks.
-    uintptr_t           ContextData;                 /// The opaque value passed through to each task and specified in the OS_TASK_SCHEDULER_INIT::TaskContextData field.
-    OS_MEMORY_ARENA    *LocalMemory;                 /// The thread-local memory arena used for temporary working space.
-    OS_MEMORY_ARENA    *GlobalMemory;                /// The shared global memory arena used for persistent storage.
-    OS_IO_THREAD_POOL  *IoThreadPool;                /// The application thread pool used for submitting asynchronous I/O requests.
-    OS_IO_REQUEST_POOL *IoRequestPool;               /// The OS_IO_REQUEST_POOL allocated to the thread.
+    OS_TASK_PROFILER          *TaskProfiler;         /// The task profiler associated with the task scheduler.
+    OS_TASK_SCHEDULER         *TaskScheduler;        /// The OS_TASK_SCHEDULER that owns the task pool.
+    OS_TASK_POOL              *TaskPool;             /// The OS_TASK_POOL allocated to the thread.
+    OS_CPU_INFO               *HostCpuInfo;          /// Information about the host CPU layout.
+    uint32_t                   ThreadId;             /// The operating system identifier of the thread associated with the execution environment.
+    uint32_t                   PoolUsage;            /// One or more of OS_TASK_POOL_USAGE indicating whether the pool can be used to run tasks.
+    uintptr_t                  ContextData;          /// The opaque value passed through to each task and specified in the OS_TASK_SCHEDULER_INIT::TaskContextData field.
+    OS_HOST_MEMORY_ARENA      *LocalMemory;          /// The thread-local memory arena used for temporary working space.
+    OS_HOST_MEMORY_ARENA      *GlobalMemory;         /// The shared global memory arena used for persistent storage.
+    OS_IO_THREAD_POOL         *IoThreadPool;         /// The application thread pool used for submitting asynchronous I/O requests.
+    OS_IO_REQUEST_POOL        *IoRequestPool;        /// The OS_IO_REQUEST_POOL allocated to the thread.
 };
 
 /// @summary Define the data passed to a task scheduler worker thread during initialization.
 /// This structure needs to be copied into thread local memory before signaling ready or error.
 struct OS_TASK_SCHEDULER_THREAD_INIT
 {
-    OS_TASK_SCHEDULER  *TaskScheduler;               /// The OS_TASK_SCHEDULER that is creating the worker thread.
-    OS_CPU_INFO         HostCpuInfo;                 /// Information about the host CPU layout.
-    HANDLE              CompletionPort;              /// The I/O completion port used to notify the thread that work is available to steal.
-    HANDLE              ReadySignal;                 /// A manual-reset event to signal when the thread has successfully completed initialization.
-    HANDLE              ErrorSignal;                 /// A manual-reset event to signal when the thread has encountered a fatal error during initialization.
-    uintptr_t           TaskContextData;             /// The opaque value to be passed through to each task when it is executed.
-    OS_IO_THREAD_POOL  *IoThreadPool;                /// The thread pool to use for executing I/O requests.
-    uint32_t            WorkerIndex;                 /// The zero-based index of the worker thread.
-    uint32_t            PoolId;                      /// The value used to identify the type of task pool to allocate during initialization.
+    OS_TASK_SCHEDULER         *TaskScheduler;        /// The OS_TASK_SCHEDULER that is creating the worker thread.
+    OS_CPU_INFO                HostCpuInfo;          /// Information about the host CPU layout.
+    HANDLE                     CompletionPort;       /// The I/O completion port used to notify the thread that work is available to steal.
+    HANDLE                     ReadySignal;          /// A manual-reset event to signal when the thread has successfully completed initialization.
+    HANDLE                     ErrorSignal;          /// A manual-reset event to signal when the thread has encountered a fatal error during initialization.
+    uintptr_t                  TaskContextData;      /// The opaque value to be passed through to each task when it is executed.
+    OS_IO_THREAD_POOL         *IoThreadPool;         /// The thread pool to use for executing I/O requests.
+    uint32_t                   WorkerIndex;          /// The zero-based index of the worker thread.
+    uint32_t                   PoolId;               /// The value used to identify the type of task pool to allocate during initialization.
 };
 
-/// @summary Define the data associated with a task scheduler. The task scheduler maintains several pools used to define tasks, 
-/// along with a pool of worker threads dedicated to executing tasks.
+/// @summary Define the data associated with a task scheduler. The task scheduler maintains several pools used to define tasks, along with a pool of worker threads dedicated to executing tasks.
 struct OS_TASK_SCHEDULER
 {
-    size_t              PoolTypeCount;               /// The number of task pool types defined within the scheduler.
-    uint32_t           *PoolIdList;                  /// An array of PoolTypeCount items specifying the unique identifers for each task pool type.
-    OS_TASK_POOL      **PoolFreeLists;               /// An array of PoolTypeCount pointers to OS_TASK_POOL representing the free list for each pool type.
-    CRITICAL_SECTION   *PoolFreeListLocks;           /// An array of PoolTypeCount CRITICAL_SECTION objects protecting the free list for each pool type. 
-    size_t              TaskPoolCount;               /// The total number of OS_TASK_POOL objects created by the scheduler.
-    OS_TASK_POOL       *TaskPoolList;                /// An array of TaskPoolCount OS_TASK_POOL objects representing all task pools (regardless of type) created by the scheduler.
-    OS_MEMORY_ARENA    *TaskPoolArenas;              /// An array of TaskPoolCount OS_MEMORY_ARENA objects representing the thread-local memory arena allocated for each task pool.
-    OS_IO_REQUEST_POOL *TaskIoRequestPools;          /// An array of TaskPoolCount OS_IO_REQUEST_POOL objects representing the thread-local I/O request pool allocated for each task pool.
-    size_t              WorkerThreadCount;           /// The number of currently worker threads dedicated to executing tasks.
-    unsigned int       *WorkerThreadIds;             /// An array of WorkerThreadCount values specifying the operating system thread identifier for each active worker thread.
-    HANDLE             *WorkerThreadHandle;          /// An array of WorkerThreadCount values specifying the operating system thread handle for each active worker thread.
-    HANDLE             *WorkerThreadReady;           /// An array of WorkerThreadCount values specifying the manual-reset event signaled by each active worker to indicate that it is ready to run.
-    HANDLE             *WorkerThreadError;           /// An array of WorkerThreadCount values specifying the manual-reset event signaled by each active worker to indicate a fatal error has occurred.
-    HANDLE             *WorkerThreadPort;            /// An array of WorkerThreadCount values specifying the I/O completion port used to wait and wake worker threads in the pool.
+    size_t                     PoolTypeCount;        /// The number of task pool types defined within the scheduler.
+    uint32_t                  *PoolIdList;           /// An array of PoolTypeCount items specifying the unique identifers for each task pool type.
+    OS_TASK_POOL             **PoolFreeLists;        /// An array of PoolTypeCount pointers to OS_TASK_POOL representing the free list for each pool type.
+    CRITICAL_SECTION          *PoolFreeListLocks;    /// An array of PoolTypeCount CRITICAL_SECTION objects protecting the free list for each pool type. 
+    size_t                     TaskPoolCount;        /// The total number of OS_TASK_POOL objects created by the scheduler.
+    OS_TASK_POOL              *TaskPoolList;         /// An array of TaskPoolCount OS_TASK_POOL objects representing all task pools (regardless of type) created by the scheduler.
+    OS_HOST_MEMORY_ARENA      *TaskPoolArenas;       /// An array of TaskPoolCount OS_HOST_MEMORY_ARENA objects representing the thread-local memory arena allocated for each task pool.
+    OS_IO_REQUEST_POOL        *TaskIoRequestPools;   /// An array of TaskPoolCount OS_IO_REQUEST_POOL objects representing the thread-local I/O request pool allocated for each task pool.
+    size_t                     WorkerThreadCount;    /// The number of currently worker threads dedicated to executing tasks.
+    unsigned int              *WorkerThreadIds;      /// An array of WorkerThreadCount values specifying the operating system thread identifier for each active worker thread.
+    HANDLE                    *WorkerThreadHandle;   /// An array of WorkerThreadCount values specifying the operating system thread handle for each active worker thread.
+    HANDLE                    *WorkerThreadReady;    /// An array of WorkerThreadCount values specifying the manual-reset event signaled by each active worker to indicate that it is ready to run.
+    HANDLE                    *WorkerThreadError;    /// An array of WorkerThreadCount values specifying the manual-reset event signaled by each active worker to indicate a fatal error has occurred.
+    HANDLE                    *WorkerThreadPort;     /// An array of WorkerThreadCount values specifying the I/O completion port used to wait and wake worker threads in the pool.
 
-    OS_MEMORY_ARENA     GlobalMemoryArena;           /// The scheduler's global memory arena.
-    OS_IO_THREAD_POOL  *IoThreadPool;                /// The thread pool to use for executing I/O reqests.
-    OS_CPU_INFO         HostCpuInfo;                 /// Information about the host CPU.
-    uintptr_t           TaskContextData;             /// An opaque value to be passed through to each task when it executes.
+    OS_HOST_MEMORY_ARENA       GlobalMemoryArena;    /// The global memory arena.
+    OS_IO_THREAD_POOL         *IoThreadPool;         /// The thread pool to use for executing I/O reqests.
+    OS_CPU_INFO                HostCpuInfo;          /// Information about the host CPU.
+    uintptr_t                  TaskContextData;      /// An opaque value to be passed through to each task when it executes.
 
-    OS_TASK_PROFILER    TaskProfiler;                /// The task profiler associated with the thread pool.
+    OS_TASK_PROFILER           TaskProfiler;         /// The task profiler associated with the thread pool.
+
+    OS_HOST_MEMORY_ARENA       SchedulerArena;       /// The OS_HOST_MEMORY_ARENA used to sub-allocate from SchedulerMemory.
+    OS_HOST_MEMORY_ALLOCATION *SchedulerMemory;      /// The memory allocation representing all memory allocated to the scheduler.
+    OS_HOST_MEMORY_POOL       *SchedulerMemoryPool;  /// The pool from which the scheduler memory was allocated.
 };
 
 /// @summary Define the data used to configure a single type of task pool.
 struct OS_TASK_POOL_INIT
 {
-    uint32_t            PoolId;                      /// Any value, unique (within the scheduler) value used to identify the pool type to the application.
-    uint32_t            PoolUsage;                   /// One or more of OS_TASK_POOL_USAGE indicating whether the pool is used to define tasks, execute tasks, or both.
-    size_t              PoolCount;                   /// The number of task pools of this type that should be created within the scheduler.
-    size_t              MaxIoRequests;               /// The size of the thread-local I/O request pool to to allocate for the task pool.
-    size_t              MaxActiveTasks;              /// The maximum number of tasks that can be defined within the pool at any given time.
-    size_t              LocalMemorySize;             /// The size of the local memory arena allocated for the task pool, in bytes. This value may be zero.
+    uint32_t                   PoolId;               /// Any value, unique (within the scheduler) value used to identify the pool type to the application.
+    uint32_t                   PoolUsage;            /// One or more of OS_TASK_POOL_USAGE indicating whether the pool is used to define tasks, execute tasks, or both.
+    size_t                     PoolCount;            /// The number of task pools of this type that should be created within the scheduler.
+    size_t                     MaxIoRequests;        /// The size of the thread-local I/O request pool to to allocate for the task pool.
+    size_t                     MaxActiveTasks;       /// The maximum number of tasks that can be defined within the pool at any given time.
+    size_t                     LocalMemorySize;      /// The size of the local memory arena allocated for the task pool, in bytes. This value may be zero.
 };
 
 /// @summary Define the data used to configure a task scheduler.
 struct OS_TASK_SCHEDULER_INIT
 {
-    size_t              WorkerThreadCount;           /// The number of worker threads dedicated to executing tasks.
-    size_t              GlobalMemorySize;            /// The size of the global memory arena, in bytes. Global memory is shared between all task pools. This value may be zero.
-    size_t              PoolTypeCount;               /// The number of items in the TaskPoolTypes array.
-    OS_TASK_POOL_INIT  *TaskPoolTypes;               /// An array of one or more OS_TASK_POOL_INIT structures used to define the task pools.
-    OS_IO_THREAD_POOL  *IoThreadPool;                /// The thread pool to use for executing I/O requests.
-    uintptr_t           TaskContextData;             /// An opaque value to be passed through to each task when it executes.
+    OS_HOST_MEMORY_POOL       *SchedulerMemoryPool;  /// The pool from which host memory is allocated for scheduler global and local memory.
+    size_t                     WorkerThreadCount;    /// The number of worker threads dedicated to executing tasks.
+    size_t                     GlobalMemorySize;     /// The size of the global memory arena, in bytes. Global memory is shared between all task pools. This value may be zero.
+    size_t                     PoolTypeCount;        /// The number of items in the TaskPoolTypes array.
+    OS_TASK_POOL_INIT         *TaskPoolTypes;        /// An array of one or more OS_TASK_POOL_INIT structures used to define the task pools.
+    OS_IO_THREAD_POOL         *IoThreadPool;         /// The thread pool to use for executing I/O requests.
+    uintptr_t                  TaskContextData;      /// An opaque value to be passed through to each task when it executes.
 };
 
 /// @summary Define a scope-based object used for reporting the execution duration for a task.
@@ -658,31 +769,31 @@ struct OS_TASK_SCOPE
 /// @summary Define the data associated with a fence task, which can be used to put an OS thread into a wait state until one or more tasks have completed.
 struct OS_TASK_FENCE
 {
-    HANDLE              FenceSignal;                 /// The manual-reset event signaled when all of the fence task dependencies have completed.
+    HANDLE                FenceSignal;               /// The manual-reset event signaled when all of the fence task dependencies have completed.
 };
 
 /// @summary Define the data available to an application callback executing on a worker thread.
 struct OS_WORKER_THREAD
 {
-    OS_THREAD_POOL     *ThreadPool;                  /// The thread pool that manages the worker.
-    OS_MEMORY_ARENA    *ThreadArena;                 /// The thread-local memory arena.
-    HANDLE              CompletionPort;              /// The I/O completion port used to wait and wake the thread.
-    void               *PoolContext;                 /// The opaque, application-specific data passed through to the thread.
-    void               *ThreadContext;               /// The opaque, application-specific data created by the OS_WORKER_INIT callback for the thread.
-    size_t              ArenaSize;                   /// The size of the thread-local memory arena, in bytes.
-    unsigned int        ThreadId;                    /// The operating system identifier for the thread.
+    OS_THREAD_POOL       *ThreadPool;                /// The thread pool that manages the worker.
+    OS_HOST_MEMORY_ARENA *ThreadArena;               /// The thread-local memory arena.
+    HANDLE                CompletionPort;            /// The I/O completion port used to wait and wake the thread.
+    void                 *PoolContext;               /// The opaque, application-specific data passed through to the thread.
+    void                 *ThreadContext;             /// The opaque, application-specific data created by the OS_WORKER_INIT callback for the thread.
+    size_t                ArenaSize;                 /// The size of the thread-local memory arena, in bytes.
+    unsigned int          ThreadId;                  /// The operating system identifier for the thread.
 };
 
 /// @summary Define the signature for the callback invoked during worker thread initialization to allow the application to create any per-thread resources.
 /// @param thread_args An OS_WORKER_THREAD instance specifying worker thread data. The callback should set the ThreadContext field to its private data.
 /// @return Zero if initialization was successful, or -1 to terminate the worker thread.
-typedef int           (*OS_WORKER_INIT)(OS_WORKER_THREAD *thread_args);
+typedef int             (*OS_WORKER_INIT)(OS_WORKER_THREAD *thread_args);
 
 /// @summary Define the signature for the callback representing the application entry point on a worker thread.
 /// @param thread_args An OS_WORKER_THREAD instance, valid until the OS_WORKER_ENTRY returns, specifying per-thread data.
 /// @param signal_arg An application-defined value specified with the wake notification.
 /// @param wake_reason One of OS_WORKER_THREAD_WAKE_REASON indicating the reason the thread was woken.
-typedef void          (*OS_WORKER_ENTRY)(OS_WORKER_THREAD *thread_args, uintptr_t signal_arg, int wake_reason);
+typedef void            (*OS_WORKER_ENTRY)(OS_WORKER_THREAD *thread_args, uintptr_t signal_arg, int wake_reason);
 
 /// @summary Define the data package passed to OsWorkerThreadMain during thread pool creation.
 struct OS_WORKER_THREAD_INIT
@@ -751,9 +862,9 @@ struct OS_FILE_INFO_CHUNK
 /// @summary Define the data associated with an allocator for OS_FILE_INFO_CHUNK instances. Chunks are recycled using a free list.
 struct OS_FSIC_ALLOCATOR
 {
-    CRITICAL_SECTION    AllocatorLock;               /// Critical section held for the duration of an allocation or free operation.
-    OS_MEMORY_ARENA    *MemoryArena;                 /// The memory arena used for allocating new chunks if the free list is empty.
-    OS_FILE_INFO_CHUNK *FreeList;                    /// The first chunk in the free list, or NULL if the free list is empty.
+    CRITICAL_SECTION      AllocatorLock;             /// Critical section held for the duration of an allocation or free operation.
+    OS_HOST_MEMORY_ARENA *MemoryArena;               /// The memory arena used for allocating new chunks if the free list is empty.
+    OS_FILE_INFO_CHUNK   *FreeList;                  /// The first chunk in the free list, or NULL if the free list is empty.
 };
 
 /// @summary Define the data maintained with a memory-mapped file opened for read access.
@@ -1452,6 +1563,7 @@ enum OS_HOST_MEMORY_ALLOCATION_FLAGS  : uint32_t
     OS_HOST_MEMORY_ALLOCATION_FLAG_WRITE         = (1 << 1), /// The memory is writable by the host.
     OS_HOST_MEMORY_ALLOCATION_FLAG_EXECUTE       = (1 << 2), /// The memory is will contain dynamically-generated executable code.
     OS_HOST_MEMORY_ALLOCATION_FLAG_NO_GUARD_PAGE = (1 << 3), /// The memory allocation will not end with a trailing guard page.
+    OS_HOST_MEMORY_ALLOCATION_FLAGS_READWRITE    = OS_HOST_MEMORY_ALLOCATION_FLAG_READ | OS_HOST_MEMORY_ALLOCATION_FLAG_WRITE,
 };
 
 /// @summary Define the valid flags that can be specified to define the usage for an OS_TASK_POOL. Valid combinations are:
@@ -1671,6 +1783,8 @@ public_function void                       OsCopyMemory(void * __restrict dst, v
 public_function void                       OsMoveMemory(void *dst, void const *src, size_t len);
 public_function void                       OsFillMemory(void *dst, size_t len, uint8_t val);
 public_function size_t                     OsAlignUp(size_t size, size_t pow2);
+public_function OS_MEMORY_RANGE            OsInitHostMemoryRange(void *addr, size_t size);
+public_function OS_MEMORY_RANGE            OsInitHostMemoryRange(OS_HOST_MEMORY_ALLOCATION *memory);
 public_function int                        OsCreateHostMemoryPool(OS_HOST_MEMORY_POOL *pool, OS_HOST_MEMORY_POOL_INIT *init);
 public_function void                       OsDeleteHostMemoryPool(OS_HOST_MEMORY_POOL *pool);
 public_function OS_HOST_MEMORY_ALLOCATION* OsHostMemoryPoolAllocate(OS_HOST_MEMORY_POOL *pool, size_t reserve_size, size_t commit_size, uint32_t alloc_flags);
@@ -1680,33 +1794,44 @@ public_function int                        OsHostMemoryReserveAndCommit(OS_HOST_
 public_function int                        OsHostMemoryIncreaseCommitment(OS_HOST_MEMORY_ALLOCATION *alloc, size_t commit_size);
 public_function void                       OsHostMemoryFlush(OS_HOST_MEMORY_ALLOCATION *alloc);
 public_function void                       OsHostMemoryRelease(OS_HOST_MEMORY_ALLOCATION *alloc);
-/// TODO(rlk): MEMORY_ARENA is no longer an OS concept, but is still required by this file.
-public_function int                        OsCreateMemoryArena(OS_MEMORY_ARENA *arena, size_t arena_size, bool commit_all, bool guard_page);
-public_function void                       OsDeleteMemoryArena(OS_MEMORY_ARENA *arena);
-public_function size_t                     OsMemoryArenaBytesReserved(OS_MEMORY_ARENA *arena);
-public_function size_t                     OsMemoryArenaBytesUncommitted(OS_MEMORY_ARENA *arena);
-public_function size_t                     OsMemoryArenaBytesCommitted(OS_MEMORY_ARENA *arena);
-public_function size_t                     OsMemoryArenaBytesInActiveReservation(OS_MEMORY_ARENA *arena);
-public_function size_t                     OsMemoryArenaPageSize(OS_MEMORY_ARENA *arena);
-public_function size_t                     OsMemoryArenaSystemGranularity(OS_MEMORY_ARENA *arena);
-public_function bool                       OsMemoryArenaCanSatisfyAllocation(OS_MEMORY_ARENA *arena, size_t alloc_size, size_t alloc_alignment);
-public_function void*                      OsMemoryArenaAllocate(OS_MEMORY_ARENA *arena, size_t alloc_size, size_t alloc_alignment);
-public_function void*                      OsMemoryArenaReserve(OS_MEMORY_ARENA *arena, size_t reserve_size, size_t alloc_alignment);
-public_function int                        OsMemoryArenaCommit(OS_MEMORY_ARENA *arena, size_t commit_size);
-public_function void                       OsMemoryArenaCancel(OS_MEMORY_ARENA *arena);
-public_function os_arena_marker_t          OsMemoryArenaMark(OS_MEMORY_ARENA *arena);
-public_function void                       OsMemoryArenaResetToMarker(OS_MEMORY_ARENA *arena, os_arena_marker_t arena_marker);
-public_function void                       OsMemoryArenaReset(OS_MEMORY_ARENA *arena);
-public_function void                       OsMemoryArenaDecommitToMarker(OS_MEMORY_ARENA *arena, os_arena_marker_t arena_marker);
-public_function void                       OsMemoryArenaDecommit(OS_MEMORY_ARENA *arena);
+public_function int                        OsCreateArenaAllocator(OS_ARENA_ALLOCATOR *alloc, size_t size_in_bytes);
+public_function void                       OsDeleteArenaAllocator(OS_ARENA_ALLOCATOR *alloc);
+public_function bool                       OsArenaAllocatorCanSatisfyAllocation(OS_ARENA_ALLOCATOR *alloc, size_t size, size_t alignment);
+public_function bool                       OsArenaAllocate(OS_ARENA_ALLOCATOR *alloc, size_t size, size_t alignment, OS_MEMORY_RANGE &range);
+public_function os_arena_marker_t          OsArenaMark(OS_ARENA_ALLOCATOR *alloc);
+public_function void                       OsArenaResetToMarker(OS_ARENA_ALLOCATOR *alloc, os_arena_marker_t marker);
+public_function void                       OsArenaReset(OS_ARENA_ALLOCATOR *alloc);
+public_function int                        OsCreateBuddyAllocator(OS_BUDDY_ALLOCATOR *alloc, OS_BUDDY_ALLOCATOR_INIT *init);
+public_function void                       OsDeleteBuddyAllocator(OS_BUDDY_ALLOCATOR *alloc);
+public_function bool                       OsBuddyAllocate(OS_BUDDY_ALLOCATOR *alloc, size_t size, size_t alignment, OS_MEMORY_RANGE &range);
+public_function bool                       OsBuddyReallocate(OS_BUDDY_ALLOCATOR *alloc, OS_MEMORY_RANGE existing, size_t required_size, OS_MEMORY_RANGE &range);
+public_function size_t                     OsBuddyBlockSize(OS_BUDDY_ALLOCATOR *alloc, size_t block_offset);
+public_function void                       OsBuddyFree(OS_BUDDY_ALLOCATOR *alloc, OS_MEMORY_RANGE range);
+public_function void                       OsBuddyReset(OS_BUDDY_ALLOCATOR *alloc);
+public_function int                        OsCreateHostMemoryArena(OS_HOST_MEMORY_ARENA *arena, OS_MEMORY_RANGE host_memory);
+public_function void                       OsDeleteHostMemoryArena(OS_HOST_MEMORY_ARENA *arena);
+public_function bool                       OsHostMemoryArenaCanSatisfyAllocation(OS_HOST_MEMORY_ARENA *arena, size_t size, size_t alignment);
+public_function void*                      OsHostMemoryArenaAllocate(OS_HOST_MEMORY_ARENA *arena, size_t size, size_t alignment);
+public_function os_arena_marker_t          OsHostMemoryArenaMark(OS_HOST_MEMORY_ARENA *arena);
+public_function void                       OsHostMemoryArenaResetToMarker(OS_HOST_MEMORY_ARENA *arena, os_arena_marker_t arena_marker);
+public_function void                       OsHostMemoryArenaReset(OS_HOST_MEMORY_ARENA *arena);
+public_function int                        OsCreateHostMemoryAllocator(OS_HOST_MEMORY_ALLOCATOR *alloc, OS_MEMORY_RANGE host_memory);
+public_function void                       OsDeleteHostMemoryAllocator(OS_HOST_MEMORY_ALLOCATOR *alloc);
+public_function void                       OsHostMemoryAllocatorReset(OS_HOST_MEMORY_ALLOCATOR *alloc);
+public_function void*                      OsHostMemoryAllocate(OS_HOST_MEMORY_ALLOCATOR *alloc, size_t size, size_t alignment);
+public_function void*                      OsHostMemoryAllocate(OS_HOST_MEMORY_ALLOCATOR *alloc, size_t size, size_t alignment, OS_MEMORY_RANGE &info);
+public_function void*                      OsHostMemoryReallocate(OS_HOST_MEMORY_ALLOCATOR *alloc, void* existing, size_t new_size, size_t alignment);
+public_function void*                      OsHostMemoryReallocate(OS_HOST_MEMORY_ALLOCATOR *alloc, void* existing, size_t new_size, size_t alignment, OS_MEMORY_RANGE &info);
+public_function void                       OsHostMemoryFree(OS_HOST_MEMORY_ALLOCATOR *alloc, void *ptr);
+public_function void                       OsHostMemoryFree(OS_HOST_MEMORY_ALLOCATOR *alloc, OS_MEMORY_RANGE info);
 
 public_function uint64_t                   OsTimestampInTicks(void);
 public_function uint64_t                   OsTimestampInNanoseconds(void);
 public_function uint64_t                   OsNanosecondSliceOfSecond(uint64_t fraction);
 public_function uint64_t                   OsElapsedNanoseconds(uint64_t start_ticks, uint64_t end_ticks);
 public_function uint64_t                   OsMillisecondsToNanoseconds(uint32_t milliseconds);
-public_function uint32_t                   OsNanosecondsToWholeMillisecons(uint64_t nanoseconds);
-public_function bool                       OsQueryHostCpuLayout(OS_CPU_INFO *cpu_info, OS_MEMORY_ARENA *arena);
+public_function uint32_t                   OsNanosecondsToWholeMilliseconds(uint64_t nanoseconds);
+public_function bool                       OsQueryHostCpuLayout(OS_CPU_INFO *cpu_info, OS_MEMORY_RANGE scratch_mem);
 
 public_function uint32_t                   OsThreadId(void);
 public_function os_task_id_t               OsMakeTaskId(uint32_t type, uint32_t pool, uint32_t index, uint32_t valid);
@@ -1714,7 +1839,7 @@ public_function bool                       OsIsValidTask(os_task_id_t task_id);
 public_function bool                       OsIsExternalTask(os_task_id_t task_id);
 public_function bool                       OsIsInternalTask(os_task_id_t task_id);
 public_function unsigned int __cdecl       OsTaskSchedulerThreadMain(void *argp);
-public_function int                        OsCreateTaskScheduler(OS_TASK_SCHEDULER *scheduler, OS_TASK_SCHEDULER_INIT *init, OS_MEMORY_ARENA *arena, char const *name);
+public_function int                        OsCreateTaskScheduler(OS_TASK_SCHEDULER *scheduler, OS_TASK_SCHEDULER_INIT *init, char const *name);
 public_function void                       OsDestroyTaskScheduler(OS_TASK_SCHEDULER *scheduler);
 public_function int                        OsAllocateTaskPool(OS_TASK_ENVIRONMENT *taskenv, OS_TASK_SCHEDULER *scheduler, uint32_t pool_type, uint32_t thread_id);
 public_function void                       OsReturnTaskPool(OS_TASK_ENVIRONMENT *taskenv);
@@ -1734,7 +1859,7 @@ public_function os_task_id_t               OsCreateTaskFence(OS_TASK_ENVIRONMENT
 
 public_function unsigned int __cdecl       OsWorkerThreadMain(void *argp);
 public_function size_t                     OsAllocationSizeForThreadPool(size_t thread_count);
-public_function int                        OsCreateThreadPool(OS_THREAD_POOL *pool, OS_THREAD_POOL_INIT *init, OS_MEMORY_ARENA *arena, char const *name);
+public_function int                        OsCreateThreadPool(OS_THREAD_POOL *pool, OS_THREAD_POOL_INIT *init, OS_HOST_MEMORY_ARENA *arena, char const *name);
 public_function void                       OsLaunchThreadPool(OS_THREAD_POOL *pool);
 public_function void                       OsTerminateThreadPool(OS_THREAD_POOL *pool);
 public_function void                       OsDestroyThreadPool(OS_THREAD_POOL *pool);
@@ -1753,7 +1878,7 @@ public_function void                       OsFreeVulkanDriverList(OS_VULKAN_ICD_
 public_function VkResult                   OsLoadVulkanIcd(OS_VULKAN_RUNTIME_DISPATCH *runtime, OS_VULKAN_ICD_INFO *icd_info);
 public_function VkResult                   OsLoadVulkanDriver(OS_VULKAN_RUNTIME_DISPATCH *runtime, HMODULE icd_module);
 public_function VkResult                   OsLoadVulkanRuntime(OS_VULKAN_RUNTIME_DISPATCH *runtime);
-public_function VkResult                   OsQueryVulkanRuntimeProperties(OS_VULKAN_RUNTIME_PROPERTIES *props, OS_VULKAN_RUNTIME_DISPATCH *runtime, OS_MEMORY_ARENA *arena);
+public_function VkResult                   OsQueryVulkanRuntimeProperties(OS_VULKAN_RUNTIME_PROPERTIES *props, OS_VULKAN_RUNTIME_DISPATCH *runtime, OS_HOST_MEMORY_ARENA *arena);
 public_function VkResult                   OsCreateVulkanInstance(OS_VULKAN_INSTANCE_DISPATCH *instance, OS_VULKAN_RUNTIME_DISPATCH *runtime, VkInstanceCreateInfo const *create_info, VkAllocationCallbacks const *allocation_callbacks);
 public_function bool                       OsIsPrimaryDisplay(OS_VULKAN_PHYSICAL_DEVICE_LIST const *device_list, size_t display_index);
 public_function int32_t                    OsDisplayRefreshRate(OS_VULKAN_PHYSICAL_DEVICE_LIST const *device_list, size_t display_index);
@@ -1761,11 +1886,11 @@ public_function char const*                OsSupportsVulkanInstanceLayer(OS_VULK
 public_function bool                       OsSupportsAllVulkanInstanceLayers(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const **layer_name, size_t const layer_count);
 public_function char const*                OsSupportsVulkanInstanceExtension(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const *extension_name, size_t *extension_index);
 public_function bool                       OsSupportsAllVulkanInstanceExtensions(OS_VULKAN_RUNTIME_PROPERTIES const *props, char const **extension_names, size_t const extension_count);
-public_function VkResult                   OsEnumerateVulkanPhysicalDevices(OS_VULKAN_PHYSICAL_DEVICE_LIST *device_list, OS_VULKAN_INSTANCE_DISPATCH *instance, OS_MEMORY_ARENA *arena, HINSTANCE exe_instance);
+public_function VkResult                   OsEnumerateVulkanPhysicalDevices(OS_VULKAN_PHYSICAL_DEVICE_LIST *device_list, OS_VULKAN_INSTANCE_DISPATCH *instance, OS_HOST_MEMORY_ARENA *arena, HINSTANCE exe_instance);
 public_function VkResult                   OsCreateVulkanLogicalDevice(OS_VULKAN_DEVICE_DISPATCH *device, OS_VULKAN_INSTANCE_DISPATCH *instance, VkPhysicalDevice physical_Device, VkDeviceCreateInfo const *create_info, VkAllocationCallbacks const *allocation_callbacks);
 
 public_function int                        OsInitializeAudio(OS_AUDIO_SYSTEM *audio_system);
-public_function int                        OsEnumerateAudioDevices(OS_AUDIO_DEVICE_LIST *device_list, OS_AUDIO_SYSTEM *audio_system, OS_MEMORY_ARENA *arena);
+public_function int                        OsEnumerateAudioDevices(OS_AUDIO_DEVICE_LIST *device_list, OS_AUDIO_SYSTEM *audio_system, OS_HOST_MEMORY_ARENA *arena);
 public_function void                       OsDisableAudioOutput(OS_AUDIO_SYSTEM *audio_system);
 public_function int                        OsEnableAudioOutput(OS_AUDIO_SYSTEM *audio_system, WCHAR *device_id, uint32_t samples_per_second, uint32_t buffer_size);
 public_function int                        OsRecoverLostAudioOutputDevice(OS_AUDIO_SYSTEM *audio_system);
@@ -1800,11 +1925,11 @@ public_function int                        OsMapFileRegion(OS_FILE_DATA *data, i
 public_function void                       OsFreeFileData(OS_FILE_DATA *data);
 
 public_function size_t                     OsAllocationSizeForIoThreadPool(size_t thread_count);
-public_function int                        OsCreateIoThreadPool(OS_IO_THREAD_POOL *pool, OS_IO_THREAD_POOL_INIT *init, OS_MEMORY_ARENA *arena, char const *name);
+public_function int                        OsCreateIoThreadPool(OS_IO_THREAD_POOL *pool, OS_IO_THREAD_POOL_INIT *init, OS_HOST_MEMORY_ARENA *arena, char const *name);
 public_function void                       OsTerminateIoThreadPool(OS_IO_THREAD_POOL *pool);
 public_function void                       OsDestroyIoThreadPool(OS_IO_THREAD_POOL *pool);
 public_function size_t                     OsAllocationSizeForIoRequestPool(size_t pool_capacity);
-public_function int                        OsCreateIoRequestPool(OS_IO_REQUEST_POOL *pool, OS_MEMORY_ARENA *arena, size_t pool_capacity);
+public_function int                        OsCreateIoRequestPool(OS_IO_REQUEST_POOL *pool, OS_HOST_MEMORY_ARENA *arena, size_t pool_capacity);
 public_function OS_IO_REQUEST*             OsAllocateIoRequest(OS_IO_REQUEST_POOL *pool);
 public_function bool                       OsSubmitIoRequest(OS_IO_THREAD_POOL *pool, OS_IO_REQUEST *request);
 
@@ -1918,6 +2043,23 @@ OsMakeUInt64
 )
 {
     return (((uint64_t) high32) << 32) | ((uint64_t) low32);
+}
+
+/// @summary Retrieve the next power-of-two greater than or equal to a given value.
+/// @param n The input value.
+/// @return An integer k such that k >= n and is a power of two.
+internal_function size_t
+OsNextPowerOfTwoGreaterOrEqual
+(
+    size_t n
+)
+{
+    --n;
+    for (size_t i = 1, k = sizeof(size_t) * CHAR_BIT; i < k; i <<= 1)
+    {
+        n |= n >> i;
+    }
+    return n+1;
 }
 
 /// @summary Given two timestamp values, calculate the number of nanoseconds between them.
@@ -2997,16 +3139,16 @@ OsTaskQueueClear
 internal_function int
 OsCreateTaskQueue
 (
-    OS_TASK_QUEUE   *queue, 
-    size_t        capacity, 
-    OS_MEMORY_ARENA *arena
+    OS_TASK_QUEUE        *queue, 
+    size_t             capacity, 
+    OS_HOST_MEMORY_ARENA *arena
 )
 {   // the capacity must be a power of two.
     assert((capacity & (capacity - 1)) == 0);
     queue->Public.store(0, std::memory_order_relaxed);
     queue->Private.store(0, std::memory_order_relaxed);
     queue->Mask = int64_t(capacity) - 1;
-    queue->TaskIds = (os_task_id_t*) OsMemoryArenaAllocate(arena, capacity * sizeof(os_task_id_t), std::alignment_of<os_task_id_t>::value);
+    queue->TaskIds = (os_task_id_t*) OsHostMemoryArenaAllocate(arena, capacity * sizeof(os_task_id_t), std::alignment_of<os_task_id_t>::value);
     return queue->TaskIds != NULL ? 0 : -1;
 }
 
@@ -4786,6 +4928,38 @@ OsAllocationSizeForArray
     return (sizeof(T) * n) + (std::alignment_of<T>::value - 1);
 }
 
+/// @summary Initialize an OS_MEMORY_RANGE object for a committed block of memory.
+/// @param addr The base address of the host-visible allocation.
+/// @param size The size of the host-visible range, in bytes.
+/// @return An OS_MEMORY_RANGE initialized with the specified memory block.
+public_function inline OS_MEMORY_RANGE
+OsInitHostMemoryRange
+(
+    void  *addr, 
+    size_t size
+)
+{   assert(addr != NULL && size > 0);
+    OS_MEMORY_RANGE r;
+    r.HostAddress =(uint8_t*) addr;
+    r.SizeInBytes = size;
+    return r;
+}
+
+/// @summary Initialized an OS_MEMORY_RANGE to wrap an entire host memory allocation.
+/// @param memory The host memory allocation to wrap.
+/// @return An OS_MEMORY_RANGE initialized with the specified memory block.
+public_function inline OS_MEMORY_RANGE
+OsInitHostMemoryRange
+(
+    OS_HOST_MEMORY_ALLOCTION *memory
+)
+{   assert(memory->BaseAddress != NULL && memory->BytesCommitted > 0);
+    OS_MEMORY_RANGE r;
+    r.HostAddress = memory->BaseAddress;
+    r.SizeInBytes = memory->BytesCommitted;
+    return r;
+}
+
 /// @summary Initialize a pool of memory allocations.
 /// @param pool The OS_HOST_MEMORY_POOL to initialize.
 /// @param init The attributes of the pool.
@@ -5122,202 +5296,757 @@ OsHostMemoryRelease
     alloc->BytesCommitted = 0;
 }
 
-/// @summary Reserve process address space for a memory arena. By default, no address space is committed.
-/// @param arena The memory arena to initialize.
-/// @param arena_size The number of bytes of process address space to reserve.
-/// @param commit_all Specify true to commit the entire reserved range immediately.
-/// @param guard_page Specify true to allocate and commit a guard page to detect memory overwrites.
-/// @return Zero if the arena is initialized, or -1 if an error occurred.
+/// @summary Initialize an OS_ARENA_ALLOCATOR.
+/// @param alloc The OS_ARENA_ALLOCATOR to initialize.
+/// @param size_in_bytes The number of bytes from which the arena will sub-allocate.
+/// @return Zero if the allocator is successfully initialized, or -1 if an error occurred.
 public_function int
-OsCreateMemoryArena
+OsCreateArenaAllocator
 (
-    OS_MEMORY_ARENA     *arena, 
-    size_t          arena_size,
-    bool            commit_all=false, 
-    bool            guard_page=false
+    OS_ARENA_ALLOCATOR *alloc, 
+    size_t      size_in_bytes
 )
-{   // retrieve the system page size and allocation granularity.
-    SYSTEM_INFO sys_info = {};
-    size_t   commit_size = 0;
-    size_t         extra = 0;
-    DWORD          flags = MEM_RESERVE;
-    void           *base = NULL;
+{
+    alloc->NextOffset  = 0;
+    alloc->SizeInBytes = size_in_bytes;
+    return 0;
+}
 
-    if (commit_all)
-    {   // commit the entire range of address space.
-        commit_size = arena_size;
-        flags      |= MEM_COMMIT;
+/// @summary Free resources associated with an arena allocator.
+/// @param alloc The OS_ARENA_ALLOCATOR to delete.
+public_function void
+OsDeleteArenaAllocator
+(
+    OS_ARENA_ALLOCATOR *alloc
+)
+{
+    alloc->NextOffset  = 0;
+    alloc->SizeInBytes = 0;
+}
+
+/// @summary Determine whether an arena allocator can satisfy an allocation request.
+/// @param alloc The OS_ARENA_ALLOCATOR to query.
+/// @param size The minimum number of bytes to reserve.
+/// @param alignment The required alignment of the returned block offset.
+/// @return true if the arena can satisfy the allocation request.
+public_function bool
+OsArenaAllocatorCanSatisfyAllocation
+(
+    OS_ARENA_ALLOCATOR *alloc, 
+    size_t               size, 
+    size_t          alignment
+)
+{
+    size_t aligned_address = OsAlignUp(alloc->NextOffset, alignment);
+    size_t     alloc_bytes = size + (aligned_address - alloc->NextOffset);
+    size_t      new_offset = alloc_bytes + alloc->NextOffset;
+    return (new_offset <= alloc->SizeInBytes);
+}
+
+/// @summary Reserve space from an arena allocator.
+/// @param alloc The OS_ARENA_ALLOCATOR to update.
+/// @param size The minimum number of bytes to reserve.
+/// @param alignment The required alignment of the returned memory block offset.
+/// @param range On return, the ByteOffset and SizeInBytes fields are set to the offset and size of the allocated region.
+/// @return true if the arena satisfied the allocation request.
+public_function bool
+OsArenaAllocate
+(
+    OS_ARENA_ALLOCATOR *alloc, 
+    size_t               size, 
+    size_t          alignment, 
+    OS_MEMORY_RANGE    &range
+)
+{
+    size_t aligned_address = OsAlignUp(alloc->NextOffset, alignment);
+    size_t     alloc_bytes = size + (aligned_address - alloc->NextOffset);
+    size_t      new_offset = alloc_bytes + alloc->NextOffset;
+    if (new_offset <= alloc->SizeInBytes)
+    {   // the allocation was satisfied, return the new info.
+        range.ByteOffset   = aligned_address;
+        range.SizeInBytes  = size;
+        alloc->NextOffset  = new_offset;
+        return true;
     }
-
-    // query the system for the page size and allocation granularity.
-    GetNativeSystemInfo(&sys_info);
-
-    // virtual memory allocations are rounded up to the next even multiple of the system
-    // page size, and have a starting address that is an even multiple of the system 
-    // allocation granularity (SYSTEM_INFO::dwAllocationGranularity).
-    arena_size = OsAlignUp(arena_size, size_t(sys_info.dwPageSize));
-    if (guard_page)
-    {   // add an extra page for use as a guard page.
-        extra = sys_info.dwPageSize;
+    else
+    {   // not enough space to satisfy the allocation.
+        range.ByteOffset   = 0;
+        range.SizeInBytes  = 0;
+        return false;
     }
+}
 
-    // reserve (and optionally commit) contiguous virtual address space.
-    if ((base = VirtualAlloc(NULL, arena_size + extra, flags, PAGE_READWRITE)) == NULL)
-    {   // unable to reserve the requested amount of address space; fail.
-        OsLayerError("ERROR: VirtualAlloc for %Iu bytes failed with result 0x%08X.\n", arena_size+extra, GetLastError());
-        arena->NextOffset        = 0;
-        arena->BytesCommitted    = 0;
-        arena->BytesReserved     = 0;
-        arena->BaseAddress       = NULL;
-        arena->ReserveAlignBytes = 0;
-        arena->ReserveTotalBytes = 0;
-        arena->PageSize          = sys_info.dwPageSize;
-        arena->Granularity       = sys_info.dwAllocationGranularity;
+/// @summary Retrieve a marker representing the state of the arena allocator at the current point in time.
+/// @param alloc The OS_ARENA_ALLOCATOR to query.
+/// @return A marker that can be passed to OsArenaResetToMarker to reset the allocator back to its current state.
+public_function os_arena_marker_t 
+OsArenaMark
+(
+    OS_ARENA_ALLOCATOR *alloc
+)
+{
+    return alloc->NextOffset;
+}
+
+/// @summary Reset an arena allocator back to a past point in time, invalidating all allocations made from that point forward.
+/// @param alloc The OS_ARENA_ALLOCATOR to reset.
+/// @param marker A marker returned by a previous call to OsArenaMark.
+public_function void
+OsArenaResetToMarker
+(
+    OS_ARENA_ALLOCATOR *alloc, 
+    os_arena_marker_t  marker
+)
+{   assert(marker <= alloc->NextOffset);
+    alloc->NextOffset = marker;
+}
+
+/// @summary Reset an arena allocator to empty.
+/// @param alloc The OS_ARENA_ALLOCATOR to reset.
+public_function void
+OsArenaReset
+(
+    OS_ARENA_ALLOCATOR *alloc
+)
+{
+    alloc->NextOffset = 0;
+}
+
+/// @summary Push a block offset onto the free list for a given level.
+/// @param alloc The OS_BUDDY_ALLOCATOR instance to which the free block is being returned.
+/// @param offset The byte offset of the start of the allocated block.
+/// @param level The zero-based index of the level to which the block belongs.
+internal_function inline void
+OsBuddyAllocatorPushFreeOffset
+(
+    OS_BUDDY_ALLOCATOR *alloc, 
+    uint32_t           offset, 
+    uint32_t            level
+)
+{
+    uint32_t *freelist = alloc->FreeLists[level];
+    uint32_t    &count = alloc->FreeCount[level];
+    freelist[count++]  = offset;
+}
+
+/// @summary Pop a block offset from the free list for a given level. The caller must ensure that the free list for the specified level is not empty.
+/// @param alloc The OS_BUDDY_ALLOCATOR instance from which the free block is being taken.
+/// @param level The zero-based index of the level to which the block belongs.
+/// @return The byte offset of a free block.
+internal_function inline uint32_t
+OsBuddyAllocatorPopFreeOffset
+(
+    OS_BUDDY_ALLOCATOR *alloc, 
+    uint32_t            level
+)
+{
+    uint32_t *freelist = alloc->FreeLists[level];
+    uint32_t    &count = alloc->FreeCount[level];
+    return freelist[--count];
+}
+
+/// @summary Retrieve information about a memory block where the corresponding level index is known.
+/// @param info The OS_BUDDY_BLOCK_INFO to populate.
+/// @param alloc The OS_BUDDY_ALLOCATOR from which the block was allocated.
+/// @param block_offset The offset of the allocation from the start of the memory range, as returned by a prior call to OsBuddyAllocate.
+/// @param level The zero-based index of the level from which the block was allocated.
+internal_function void
+OsBuddyAllocatorBlockInfo
+(
+    OS_BUDDY_BLOCK_INFO *info, 
+    OS_BUDDY_ALLOCATOR *alloc, 
+    uint32_t     block_offset,
+    uint32_t            level
+)
+{
+    uint32_t     level_shift = alloc->LevelBits[level];
+    uint32_t     block_count = 1 << level;
+    uint32_t     local_index = block_offset >> level_shift;
+    uint32_t       odd_index = local_index &  1;
+    int32_t     buddy_offset = odd_index   ? -1 : +1;
+    info->LevelIndex         = level;
+    info->BitIndex           = level_shift;
+    info->BlockSize          = 1 << level_shift;
+    info->BlockCount         = block_count;
+    info->IndexOffset        = block_count - 1;
+    info->LeftAbsoluteIndex  = block_count + (local_index - odd_index) - 1;
+    info->BlockAbsoluteIndex = block_count +  local_index - 1;
+    info->BuddyAbsoluteIndex = block_count + (local_index + buddy_offset) - 1;
+}
+
+/// @summary Retrieve the information necessary to look up the status bit in the buddy allocator merge index for a given block.
+/// @param info The OS_BUDDY_BLOCK_MERGE_INFO to populate.
+/// @param block Information about the memory block, retrieved by a prior call to OsBuddyAllocatorBlockInfo.
+internal_function inline void
+OsBuddyAllocatorMergeIndexInfo
+(
+    OS_BUDDY_BLOCK_MERGE_INFO  *info, 
+    OS_BUDDY_BLOCK_INFO const &block
+)
+{
+    info->WordIndex =  block.LeftAbsoluteIndex >> 5;
+    info->Mask = 1 << (block.LeftAbsoluteIndex & 31);
+}
+
+/// @summary Retrieve the information necessary to look up the status bit in the buddy allocator split index for a given block.
+/// @param info The OS_BUDDY_BLOCK_SPLIT_INFO to populate.
+/// @param block Information about the memory block, retrieved by a prior call to OsBuddyAllocatorBlockInfo.
+internal_function inline void
+OsBuddyAllocatorSplitIndexInfo
+(
+    OS_BUDDY_BLOCK_SPLIT_INFO  *info, 
+    OS_BUDDY_BLOCK_INFO const &block
+)
+{
+    info->WordIndex =  block.BlockAbsoluteIndex >> 5;
+    info->Mask = 1 << (block.BlockAbsoluteIndex & 31);
+}
+
+/// @summary Initialize a buddy allocator instance.
+/// @param alloc The OS_BUDDY_ALLOCATOR to initialize.
+/// @param init Data specifying the allocator configuration.
+/// @return Zero if the allocator is initialized successfully, or -1 if an error occurred.
+public_function int
+OsCreateBuddyAllocator
+(
+    OS_BUDDY_ALLOCATOR     *alloc, 
+    OS_BUDDY_ALLOCATOR_INIT *init
+)
+{
+    if ((init->AllocationSizeMin & (init->AllocationSizeMin-1)) != 0)
+    {
+        OsLayerError("ERROR: %S(%u): Buddy allocator requires Pow2 AllocationSizeMin.\n", __FUNCTION__, OsThreadId());
+        assert((init->AllocationSizeMin & (init->AllocationSizeMin-1)) == 0);
+        return -1;
+    }
+    if ((init->AllocationSizeMax & (init->AllocationSizeMax-1)) != 0)
+    {
+        OsLayerError("ERROR: %S(%u): Buddy allocator requires Pow2 AllocationSizeMax.\n", __FUNCTION__, OsThreadId());
+        assert((init->AllocationSizeMax & (init->AllocationSizeMax-1)) == 0);
+        return -1;
+    }
+    if (init->AllocationSizeMin < 16)
+    {
+        OsLayerError("ERROR: %S(%u): Buddy allocator requires AllocationSizeMin >= 16 bytes.\n", __FUNCTION__, OsThreadId());
+        assert(init->AllocationSizeMin >= 16);
+        return -1;
+    }
+    if (init->AllocationSizeMax <= init->AllocationSizeMin)
+    {
+        OsLayerError("ERROR: %S(%u): Maximum allocation size %Iu must be larger than minimum size %Iu.\n", __FUNCTION__, OsThreadId(), init->AllocationSizeMax, init->AllocationSizeMin);
+        assert(init->AllocationSizeMax > init->AllocationSizeMin);
+        return -1;
+    }
+    if (init->BytesReserved >= init->AllocationSizeMax)
+    {
+        OsLayerError("ERROR: %S(%u): Bytes reserved %Iu exceeds maximum allocation size %Iu.\n", __FUNCTION__, OsThreadId(), init->BytesReserved, init->AllocationSizeMax);
+        assert(init->BytesReserved < init->AllocationSizeMax);
         return -1;
     }
 
-    if (guard_page)
-    {   // commit the guard page, if necessary, and change the protection flags.
-        if (VirtualAlloc(((uint8_t*)base + arena_size), sys_info.dwPageSize, MEM_COMMIT, PAGE_NOACCESS) == NULL)
-        {   // unable to commit the guard page. consider this a fatal error.
-            OsLayerError("ERROR: VirtualAlloc to commit guard page failed with result 0x%08X.\n", GetLastError());
-            VirtualFree(base, 0, MEM_RELEASE);
-            arena->NextOffset        = 0;
-            arena->BytesCommitted    = 0;
-            arena->BytesReserved     = 0;
-            arena->BaseAddress       = NULL;
-            arena->ReserveAlignBytes = 0;
-            arena->ReserveTotalBytes = 0;
-            arena->PageSize          = sys_info.dwPageSize;
-            arena->Granularity       = sys_info.dwAllocationGranularity;
-            return -1;
-        }
+    // figure out the number of levels and ensure the count doesn't exceed the limit (16).
+    unsigned long max_bit = 0;
+    unsigned long min_bit = 0;
+#ifdef _M_X64
+    _BitScanReverse64(&min_bit, init->AllocationSizeMin);
+    _BitScanReverse64(&max_bit, init->AllocationSizeMax);
+#else
+    _BitScanReverse  (&min_bit, init->AllocationSizeMin);
+    _BitScanReverse  (&max_bit, init->AllocationSizeMax);
+#endif
+    if ((max_bit - min_bit) > OS_BUDDY_ALLOCATOR::MAX_LEVELS)
+    {   // need to adjust AllocationSizeMax/AllocationSizeMin.
+        OsLayerError("ERROR: %S(%u): Level count %u exceeds maximum %Iu.\n", __FUNCTION__, OsThreadId(), (max_bit-min_bit), OS_BUDDY_ALLOCATOR::MAX_LEVELS);
+        assert((max_bit-min_bit) <= OS_BUDDY_ALLOCATOR::MAX_LEVELS);
+        return -1;
     }
 
-    arena->NextOffset        = 0;
-    arena->BytesCommitted    = commit_size;
-    arena->BytesReserved     = arena_size;
-    arena->BaseAddress       = (uint8_t*) base;
-    arena->ReserveAlignBytes = 0;
-    arena->ReserveTotalBytes = 0;
-    arena->PageSize          = sys_info.dwPageSize;
-    arena->Granularity       = sys_info.dwAllocationGranularity;
+    // determine the required size of the allocator metadata, and allocate it as one contiguous chunk.
+    size_t level_bit   = max_bit;
+    size_t level_count = max_bit - min_bit;
+    size_t free_list_n =(1 <<  level_count) * 4;     // 4 = sizeof(uint32_t)
+    size_t  ms_index_n =(1 << (level_count-1)) / 8;  // 8 = number of bits per-byte
+    size_t  metadata_n = free_list_n + (2 * ms_index_n);
+    void     *metadata = VirtualAlloc(NULL, metadata_n, MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE);
+    if (metadata == NULL)
+    {
+        OsLayerError("ERROR: %S(%u): Failed to allocate %Iu bytes for buddy allocator metadata.\n", __FUNCTION__, OsThreadId(), metadata_n);
+        return -1;
+    }
+
+    // initialize the simple allocator properties.
+    alloc->AllocationSizeMin = init->AllocationSizeMin;
+    alloc->AllocationSizeMax = init->AllocationSizeMax;
+    alloc->BytesReserved     = init->BytesReserved;
+    alloc->MetadataBase      =(uint8_t *) metadata;
+    alloc->MergeIndex        =(uint32_t*)((uint8_t*) metadata + (ms_index_n * 0));
+    alloc->SplitIndex        =(uint32_t*)((uint8_t*) metadata + (ms_index_n * 1));
+    alloc->FreeListData      =(uint32_t*)((uint8_t*) metadata + (ms_index_n * 2));
+    alloc->LevelCount        =(uint32_t) level_count;
+    alloc->Reserved          = 0;
+
+    // initialize the per-level allocator state data.
+    for (size_t level_index  = 0; level_index < level_count; ++level_index)
+    {
+        alloc->FreeCount[level_index] = 0;
+        alloc->LevelBits[level_index] =(uint32_t) level_bit--;
+        alloc->FreeLists[level_index] = alloc->FreeListData + ((1 << level_index) - 1);
+    }
+    
+    // push offset 0 onto the free list for level 0 (the largest level.)
+    OsBuddyAllocatorPushFreeOffset(alloc, 0, 0);
+
+    // sometimes the requirement of AllocationSizeMax being a power-of-two leads 
+    // to signficant memory waste, so allow the caller to specify a BytesReserved
+    // value to mark a portion of the memory as unusable.
+    if (init->BytesReserved > 0)
+    {   // allocate small blocks until BytesReserved is met.
+        // allocating the smallest block size ensures the least amount of waste.
+        // contiguous blocks will be allocated, starting from offset 0.
+        OS_MEMORY_RANGE   r;
+        uint32_t level_size  = 1 << (level_count - 1);
+        uint32_t block_count =(uint32_t)((init->BytesReserved + level_size) / level_size);
+        for (uint32_t block_index = 0; block_index < block_count;++block_index)
+        {
+            (void) OsBuddyAllocate(alloc, level_size, level_size, r);
+        }
+    }
     return 0;
+}
+
+/// @summary Free all resources associated with an OS_BUDDY_ALLOCATOR instance.
+/// @param alloc The OS_BUDDY_ALLOCATOR to delete.
+public_function void
+OsDeleteBuddyAllocator
+(
+    OS_BUDDY_ALLOCATOR *alloc
+)
+{
+    if (alloc->MetadataBase != NULL)
+    {
+        VirtualFree(alloc->MetadataBase, 0, MEM_RELEASE);
+    }
+    OsZeroMemory(alloc, sizeof(OS_BUDDY_ALLOCATOR));
+}
+
+/// @summary Retrieve information about a memory block where the corresponding level is not known.
+/// @param info The OS_BUDDY_BLOCK_INFO to populate.
+/// @param alloc The OS_BUDDY_ALLOCATOR from which the block was allocated.
+/// @param block_offset The offset of the allocation from the start of the memory range, as returned by a prior call to OsBuddyAllocate.
+/// @return true if the offset block_offset was valid and info was populated with data.
+public_function bool
+OsBuddyAllocatorBlockInfo
+(
+    OS_BUDDY_BLOCK_INFO *info, 
+    OS_BUDDY_ALLOCATOR *alloc, 
+    size_t       block_offset
+)
+{   assert(block_offset < alloc->AllocationSizeMax);
+    OS_BUDDY_BLOCK_INFO       block;
+    OS_BUDDY_BLOCK_SPLIT_INFO split;
+    uint32_t  offset_u32 =(uint32_t)block_offset;
+    uint32_t level_index = alloc->LevelCount - 1;
+    while   (level_index > 0)
+    {   // check the parent level to see if it has been split.
+        OsBuddyAllocatorBlockInfo(&block, alloc, offset_u32, level_index - 1);
+        OsBuddyAllocatorSplitIndexInfo(&split, block);
+        if ((alloc->SplitIndex[split.WordIndex] & split.Mask) != 0)
+        {   // reached a split parent; the block level is level_index.
+            OsBuddyAllocatorBlockInfo(info, alloc, offset_u32, level_index);
+            return true;
+        }
+        // the parent has not been split, so check the next-largest level.
+        level_index--;
+    }
+    // this must be a level-0 allocation.
+    OsBuddyAllocatorBlockInfo(&block, alloc, offset_u32, 0);
+    return true;
+}
+
+/// @summary Allocate memory from a buddy allocator.
+/// @param alloc The OS_BUDDY_ALLOCATOR managing the memory.
+/// @param size The number of bytes being requested.
+/// @param alignment The required alignment of the returned block offset.
+/// @param range On return, the ByteOffset and SizeInBytes fields are set to the offset and size of the allocated region.
+/// @return true if the allocator satisfied the request.
+public_function bool
+OsBuddyAllocate
+(
+    OS_BUDDY_ALLOCATOR *alloc, 
+    size_t               size, 
+    size_t          alignment, 
+    OS_MEMORY_RANGE    &range
+)
+{
+    if (size < alignment)
+    {   // round upwards to the requested alignment.
+        size = alignment;
+    }
+    if (size < alloc->AllocationSizeMin)
+    {   // round up to the minimum possible block size.
+        size = alloc->AllocationSizeMin;
+    }
+    if (size > alloc->AllocationSizeMax)
+    {
+        OsLayerError("ERROR: %S(%u): Allocation request for %Iu bytes exceeds maximum of %Iu bytes.\n", __FUNCTION__, OsThreadId(), size, alloc->AllocationSizeMax);
+        assert(size <= alloc->AllocationSizeMax);
+        goto no_free_block;
+    }
+
+    uint32_t pow2_size = (uint32_t) OsNextPowerOfTwoGreaterOrEqual(size);
+    uint32_t bit_index;  _BitScanReverse((DWORD*) &bit_index, pow2_size);
+    uint32_t level_idx = alloc->LevelBits[0] - bit_index;
+    uint32_t check_idx = level_idx;
+    for ( ; ; )
+    {   // if the free list is not empty, the allocation can be satisfied.
+        if (alloc->FreeCount[check_idx] > 0)
+        {   // perform splits from check_idx (<= level_idx) to level_idx.
+            // this process splits larger blocks into smaller blocks.
+            while (check_idx < level_idx)
+            {   // pop an offset from the free list at the parent block level.
+                OS_BUDDY_BLOCK_INFO      parent_info;
+                OS_BUDDY_BLOCK_SPLIT_INFO split_info;
+                uint32_t  parent_offset = OsBuddyAllocatorPopFreeOffset(alloc, check_idx);
+                OsBuddyAllocatorBlockInfo(&parent_info, alloc, parent_offset, check_idx);
+                OsBuddyAllocatorSplitIndexInfo(&split_info, parent_info);
+
+                // mark the larger parent block as having been split.
+                alloc->SplitIndex[split_info.WordIndex] |= split_info.Mask;
+
+                // insert two blocks into the free list of the next-smaller level.
+                OsBuddyAllocatorPushFreeOffset(alloc, parent_offset                               , check_idx+1);
+                OsBuddyAllocatorPushFreeOffset(alloc, parent_offset + (parent_info.BlockSize >> 1), check_idx+1);
+                check_idx++;
+            }
+
+            // return a block from level_idx, which is now known to have at least one free block.
+            OS_BUDDY_BLOCK_INFO       block_info;
+            OS_BUDDY_BLOCK_MERGE_INFO merge_info;
+            uint32_t  return_offset = OsBuddyAllocatorPopFreeOffset(alloc, level_idx);
+            OsBuddyAllocatorBlockInfo(&block_info, alloc, return_offset, level_idx);
+            OsBuddyAllocatorMergeIndexInfo(&merge_info, block_info);
+
+            // toggle the buddy pair bit representing the pair allocation state.
+            // if both blocks are allocated, the corresponding bit will be set to 0.
+            // if only return_offset is allocated, the corresponding bit will be set to 1.
+            alloc->MergeIndex[merge_info.WordIndex] ^= merge_info.Mask;
+            range.ByteOffset  = return_offset;
+            range.SizeInBytes = pow2_size;
+            return true;
+        }
+        if (check_idx != 0)
+        {   // check the next larger level to see if there are any free blocks.
+            check_idx--;
+        }
+        else break;
+    }
+
+no_free_block:
+    // there is no free block that can satisfy the allocation.
+    range.ByteOffset  = 0;
+    range.SizeInBytes = 0;
+    return false;
+}
+
+/// @summary Grow or shrink a memory block to meet a desired size.
+/// @param alloc The OS_BUDDY_ALLOCATOR managing the allocated range.
+/// @param existing An OS_MEMORY_RANGE describing the existing allocation.
+/// @param new_size The new required minimum allocation size, in bytes.
+/// @param alignment The required alignment of the returned block offset.
+/// @param range On return, the ByteOffset and SizeInBytes fields are set to the offset and size of the allocated region, which may or may not be the same as the existing region.
+/// @return true if the allocator satisfied the request.
+public_function bool
+OsBuddyReallocate
+(
+    OS_BUDDY_ALLOCATOR *alloc, 
+    OS_MEMORY_RANGE  existing, 
+    size_t           new_size, 
+    size_t          alignment,
+    OS_MEMORY_RANGE    &range
+)
+{
+    if (existing.SizeInBytes == 0)
+    {   // there is no existing allocation, so this is equivalent to calling OsBuddyAllocate.
+        return OsBuddyAllocate(alloc, new_size, alignment, range);
+    }
+    if (new_size < alignment)
+    {   // round upwards to the requested alignment.
+        new_size = alignment;
+    }
+    if (new_size < alloc->AllocationSizeMin)
+    {   // round up to the minimum possible block size.
+        new_size = alloc->AllocationSizeMin;
+    }
+    if (new_size > alloc->AllocationSizeMax)
+    {
+        OsLayerError("ERROR: %S(%u): Reallocation request for %Iu bytes exceeds maximum of %Iu bytes.\n", __FUNCTION__, OsThreadId(), new_size, alloc->AllocationSizeMax);
+        assert(new_size <= alloc->AllocationSizeMax);
+        goto no_free_block;
+    }
+
+    // there are four scenarios this routine has to account for:
+    // 1. The new_size still fits in the same block. No re-allocation is performed.
+    // 2. The new_size is larger than the old size, but fits in a block one level larger, and the buddy block is free. The buddy block is allocated, and the buddy pair is merged. No copying is required.
+    // 3. The new_size is smaller than the old size by one or more levels. The existing block is demoted to a smaller block. No copying is required.
+    // 4. The new_size is larger than the old size by more than one level, or the buddy was not free. A new, larger block is allocated and the existing block is freed. The caller must copy the data from the old to the new block.
+    uint32_t pow2_size_old = (uint32_t) OsNextPowerOfTwoGreaterOrEqual(existing.SizeInBytes);
+    uint32_t pow2_size_new = (uint32_t) OsNextPowerOfTwoGreaterOrEqual(new_size);
+    uint32_t bit_index_old;  _BitScanReverse((DWORD*) &bit_index_old, pow2_size_old);
+    uint32_t bit_index_new;  _BitScanReverse((DWORD*) &bit_index_new, pow2_size_new);
+    uint32_t level_idx_old = alloc->LevelBits[0] - bit_index_old;
+    uint32_t level_idx_new = alloc->LevelBits[0] - bit_index_new;
+    
+    if (level_idx_new == level_idx_old)
+    {   // case 1: the new_size fits in the same block. don't do anything.
+        range.ByteOffset  = existing.ByteOffset;
+        range.SizeInBytes = pow2_size_new;
+        return true;
+    }
+    if (level_idx_new ==(level_idx_old-1))
+    {   // case 2: see if the buddy is free, and if so, promote the existing block.
+        OS_BUDDY_BLOCK_INFO        block_info;
+        OS_BUDDY_BLOCK_MERGE_INFO  merge_info;
+        OS_BUDDY_BLOCK_SPLIT_INFO  split_info;
+        OsBuddyAllocatorBlockInfo(&block_info, alloc, (uint32_t) existing.ByteOffset, level_idx_old);
+        OsBuddyAllocatorMergeIndexInfo(&merge_info, block_info);
+        if((alloc->MergeIndex[merge_info.WordIndex] & merge_info.Mask) != 0)
+        {   // the buddy block is free - merge it with the existing block.
+            // toggle the status bit to 0 - both blocks are allocated.
+            alloc->MergeIndex[merge_info.WordIndex] ^= merge_info.Mask;
+
+            // scan the free list to locate the buddy block offset, and remove it.
+            uint32_t merge_offset = (block_info.LeftAbsoluteIndex  - block_info.IndexOffset) * block_info.BlockSize;
+            uint32_t buddy_offset = (block_info.BuddyAbsoluteIndex - block_info.IndexOffset) * block_info.BlockSize;
+            uint32_t *free_offset =  alloc->FreeLists[level_idx_old];
+            for (size_t i = 0,  n =  alloc->FreeCount[level_idx_old]; i < n; ++i)
+            {
+                if (free_offset[i] == buddy_offset)
+                {   // found the matching offset. swap the last item into its place.
+                    free_offset[i] = free_offset[n-1];
+                    alloc->FreeCount[level_idx_old]--;
+                    break;
+                }
+            }
+
+            // retrieve the attributes of the parent block.
+            OsBuddyAllocatorBlockInfo(&block_info, alloc, merge_offset, level_idx_new);
+            OsBuddyAllocatorMergeIndexInfo(&merge_info, block_info);
+            OsBuddyAllocatorSplitIndexInfo(&split_info, block_info);
+
+            // mark the parent block as being allocated, and and clear its split status.
+            alloc->MergeIndex[merge_info.WordIndex] ^= merge_info.Mask;
+            alloc->SplitIndex[split_info.WordIndex] &=~split_info.Mask;
+
+            // return the merged block.
+            range.ByteOffset  = merge_offset;
+            range.SizeInBytes = block_info.BlockSize;
+            return true;
+        }
+    }
+    if (level_idx_new > level_idx_old)
+    {   // case 3: demote the existing block to a smaller size.
+        OS_BUDDY_BLOCK_INFO        block_info;
+        OS_BUDDY_BLOCK_MERGE_INFO  merge_info;
+        OS_BUDDY_BLOCK_SPLIT_INFO  split_info;
+        uint32_t                 existing_u32 = (uint32_t) existing.ByteOffset;
+        OsBuddyAllocatorBlockInfo(&block_info, alloc, existing_u32, level_idx_old);
+        OsBuddyAllocatorMergeIndexInfo(&merge_info, block_info);
+
+        // mark the current block as being free.
+        alloc->MergeIndex[merge_info.WordIndex] ^= merge_info.Mask;
+
+        // perform splits down to the necessary block size.
+        while (level_idx_old < level_idx_new)
+        {   // update the split index to mark the parent block as having been split.
+            OsBuddyAllocatorSplitIndexInfo(&split_info, block_info);
+            alloc->SplitIndex[split_info.WordIndex] |= split_info.Mask;
+            OsBuddyAllocatorBlockInfo(&block_info, alloc, existing_u32, block_info.LevelIndex + 1);
+            OsBuddyAllocatorPushFreeOffset(alloc, existing_u32 + block_info.BlockSize, block_info.LevelIndex);
+            level_idx_old++;
+        }
+
+        // mark the new smaller block as allocated in the merge index.
+        OsBuddyAllocatorMergeIndexInfo(&merge_info, block_info);
+        alloc->MergeIndex[merge_info.WordIndex] ^= merge_info.Mask;
+        range.ByteOffset  = existing.ByteOffset;
+        range.SizeInBytes = block_info.BlockSize;
+        return true;
+    }
+
+    // case 4: no choice but to allocate a new block and free the old block.
+    if (OsBuddyAllocate(alloc, new_size, alignment, range))
+    {   // the new block was successfully allocated, so mark the old block as free.
+        OsBuddyFree(alloc, existing);
+        return true;
+    }
+    // else, fall through to no_free block.
+no_free_block:
+    range.ByteOffset  = 0;
+    range.SizeInBytes = 0;
+    return false;
+}
+
+/// @summary Retrieve the size for a given byte offset returned by the allocator.
+/// @param alloc The OS_BUDDY_ALLOCATOR from which the memory was allocated.
+/// @param block_offset A memory block offset returned by a prior call to OsBuddyAllocate or OsBuddyReallocate.
+/// @return The size of the specified block, in bytes, or 0 if the specified block offset is invalid.
+public_function size_t
+OsBuddyBlockSize
+(
+    OS_BUDDY_ALLOCATOR *alloc, 
+    size_t       block_offset
+)
+{
+    OS_BUDDY_BLOCK_INFO info;
+    if (OsBuddyAllocatorBlockInfo(&info, alloc, block_offset))
+        return info.BlockSize;
+    else
+        return 0;
+}
+
+/// @summary Free a previously allocated memory range.
+/// @param alloc The OS_BUDDY_ALLOCATOR that returned the memory range.
+/// @param range The block offset and size returned by a prior call to OsBuddyAllocate or OsBuddyReallocate.
+public_function void
+OsBuddyFree
+(
+    OS_BUDDY_ALLOCATOR *alloc, 
+    OS_MEMORY_RANGE     range
+)
+{
+    if (range.SizeInBytes > 0)
+    {   // ensure that the specified size is at least the minimum allocation size.
+        if (range.SizeInBytes < alloc->AllocationSizeMin)
+            range.SizeInBytes = alloc->AllocationSizeMin;
+
+        OS_BUDDY_BLOCK_INFO       block_info;
+        OS_BUDDY_BLOCK_MERGE_INFO merge_info;
+        OS_BUDDY_BLOCK_SPLIT_INFO split_info;
+
+        // convert the supplied size to a level index.
+        uint32_t offset_u32= (uint32_t) range.ByteOffset;
+        uint32_t pow2_size = (uint32_t) OsNextPowerOfTwoGreaterOrEqual(range.SizeInBytes);
+        uint32_t bit_index;  _BitScanReverse((DWORD*) &bit_index, pow2_size);
+        uint32_t level_idx = alloc->LevelBits[0] - bit_index;
+
+        // mark the block as free in the merge index.
+        OsBuddyAllocatorBlockInfo(&block_info, alloc, offset_u32, level_idx);
+        OsBuddyAllocatorMergeIndexInfo(&merge_info, block_info);
+        alloc->MergeIndex[merge_info.WordIndex] ^= merge_info.Mask;
+        do
+        {   // if the new state is 0, the block and its buddy can be merged.
+            // if the new state is 1, only the block is free, and we're done.
+            if ((block_info.LevelIndex == 0) || ((alloc->MergeIndex[merge_info.WordIndex] & merge_info.Mask) != 0))
+            {   // no additional merging can be performed.
+                break;
+            }
+
+            // a merge operation between a buddy pair can be performed.
+            // remove the buddy block from the free list.
+            // the merged block is the lowest offset of the pair.
+            uint32_t merge_offset = (block_info.LeftAbsoluteIndex  - block_info.IndexOffset) * block_info.BlockSize;
+            uint32_t buddy_offset = (block_info.BuddyAbsoluteIndex - block_info.IndexOffset) * block_info.BlockSize;
+            uint32_t *free_offset =  alloc->FreeLists[block_info.LevelIndex];
+            for (size_t i = 0,  n =  alloc->FreeCount[block_info.LevelIndex]; i < n; ++i)
+            {
+                if (free_offset[i] == buddy_offset)
+                {   // found the matching offset. swap the last item into its place.
+                    free_offset[i] = free_offset[n-1];
+                    alloc->FreeCount[block_info.LevelIndex]--;
+                    break;
+                }
+            }
+
+            // clear the split status for the parent block.
+            OsBuddyAllocatorBlockInfo(&block_info, alloc, merge_offset, block_info.LevelIndex - 1);
+            OsBuddyAllocatorMergeIndexInfo(&merge_info, block_info);
+            OsBuddyAllocatorSplitIndexInfo(&split_info, block_info);
+            alloc->SplitIndex[split_info.WordIndex] &= ~split_info.Mask;
+
+            // continue trying to merge into larger blocks.
+            offset_u32 = merge_offset;
+        } while (block_info.LevelIndex != 0);
+        // return the possibly merged block to the free list for the level it was allocated from.
+        OsBuddyAllocatorPushFreeOffset(alloc, offset_u32, block_info.LevelIndex);
+    }
+}
+
+/// @summary Reset a buddy allocator back to its initial state, invalidating all existing allocations.
+/// @param alloc The OS_BUDDY_ALLOCATOR to reset.
+public_function void
+OsBuddyReset
+(
+    OS_BUDDY_ALLOCATOR *alloc
+)
+{   // return the merge and split indexes to their initial state.
+    OsZeroMemory(alloc->MergeIndex, (1 << (alloc->LevelCount-1)) / 8);
+    OsZeroMemory(alloc->SplitIndex, (1 << (alloc->LevelCount-1)) / 8);
+
+    // remove all items from the per-level free lists.
+    OsZeroMemory(alloc->FreeCount, OS_BUDDY_ALLOCATOR::MAX_LEVELS * sizeof(uint32_t));
+    
+    // push offset 0 onto the free list for level 0 (the largest level.)
+    OsBuddyAllocatorPushFreeOffset(alloc, 0, 0);
+
+    // sometimes the requirement of AllocationSizeMax being a power-of-two leads 
+    // to signficant memory waste, so allow the caller to specify a BytesReserved
+    // value to mark a portion of the memory as unusable.
+    if (alloc->BytesReserved > 0)
+    {   // allocate small blocks until BytesReserved is met.
+        // allocating the smallest block size ensures the least amount of waste.
+        // contiguous blocks will be allocated, starting from offset 0.
+        OS_MEMORY_RANGE   r;
+        uint32_t level_size  = 1 << (alloc->LevelCount - 1);
+        uint32_t block_count =(uint32_t)((alloc->BytesReserved + level_size) / level_size);
+        for (uint32_t block_index = 0; block_index < block_count; ++block_index)
+        {
+            (void) OsBuddyAllocate(alloc, level_size, level_size, r);
+        }
+    }
+}
+
+/// @summary Reserve process address space for a memory arena. By default, no address space is committed.
+/// @param arena The OS_HOST_MEMORY_ARENA to initialize.
+/// @param host_memory The address and size of the host-visible memory block to sub-allocate from.
+/// @return Zero if the arena is initialized, or -1 if an error occurred.
+public_function inline int
+OsCreateHostMemoryArena
+(
+    OS_HOST_MEMORY_ARENA *arena, 
+    OS_MEMORY_RANGE host_memory
+)
+{   assert(host_memory.HostAddress != NULL);
+    assert(host_memory.SizeInBytes >  0);
+    arena->HostMemory = host_memory;
+    return OsCreateArenaAllocator(&arena->Allocator, host_memory.SizeInBytes);
 }
 
 /// @summary Release process address space reserved for a memory arena. All allocations are invalidated.
 /// @param arena The memory arena to delete.
-public_function void
-OsDeleteMemoryArena
+public_function inline void
+OsDeleteHostMemoryArena
 (
-    OS_MEMORY_ARENA *arena
+    OS_HOST_MEMORY_ARENA *arena
 )
 {
-    if (arena->BaseAddress != NULL)
-    {   // free the entire range of reserved virtual address space.
-        VirtualFree(arena->BaseAddress, 0, MEM_RELEASE);
-    }
-    arena->NextOffset        = 0;
-    arena->BytesCommitted    = 0;
-    arena->BytesReserved     = 0;
-    arena->BaseAddress       = 0;
-    arena->ReserveAlignBytes = 0;
-    arena->ReserveTotalBytes = 0;
-}
-
-/// @summary Query a memory arena for the total number of bytes of process address space reserved for the arena.
-/// @param arena The memory arena to query.
-/// @return The number of bytes of process address space reserved for use by the arena.
-public_function size_t
-OsMemoryArenaBytesReserved
-(
-    OS_MEMORY_ARENA *arena
-)
-{
-    return arena->BytesReserved;
-}
-
-/// @summary Query a memory arena for the total number of bytes currently reserved, but not committed.
-/// @param arena The memory arena to query.
-/// @return The number of bytes of process address space reserved for use by the arena, but not currently committed for use.
-public_function size_t
-OsMemoryArenaBytesUncommitted
-(
-    OS_MEMORY_ARENA *arena
-)
-{
-    return (arena->BytesReserved - arena->BytesCommitted);
-}
-
-/// @summary Query a memory arena for the total number of bytes currently committed.
-/// @param arena The memory arena to query.
-/// @return The number of bytes of process address space reserved for use by the arena and currently committed.
-public_function size_t
-OsMemoryArenaBytesCommitted
-(
-    OS_MEMORY_ARENA *arena
-)
-{
-    return arena->BytesCommitted;
-}
-
-/// @summary Query a memory arena for the number of bytes in the active application reservation.
-/// @param arena The memory arena to query.
-/// @return The number of bytes in the active application reservation.
-public_function size_t
-OsMemoryArenaBytesInActiveReservation
-(
-    OS_MEMORY_ARENA *arena
-)
-{
-    return (arena->ReserveTotalBytes - arena->ReserveAlignBytes);
-}
-
-/// @summary Retrieves the virtual memory manager page size for a given arena.
-/// @param arena The memory arena to query.
-/// @return The operating system page size, in bytes.
-public_function size_t
-OsMemoryArenaPageSize
-(
-    OS_MEMORY_ARENA *arena
-)
-{
-    return size_t(arena->PageSize);
-}
-
-/// @summary Retrieves the virtual memory manager allocation granularity for a given arena.
-/// @param arena The memory arena to query.
-/// @return The operating system allocation granularity, in bytes.
-public_function size_t
-OsMemoryArenaSystemGranularity
-(
-    OS_MEMORY_ARENA *arena
-)
-{
-    return size_t(arena->Granularity);
+    OsDeleteArenaAllocator(&arena->Allocator);
+    OsZeroMemory(arena, sizeof(OS_HOST_MEMORY_ARENA));
 }
 
 /// @summary Determine whether a memory allocation request can be satisfied.
 /// @param arena The memory arena to query.
-/// @param alloc_size The size of the allocation request, in bytes.
-/// @param alloc_alignment The desired alignment of the returned address. This must be a power of two greater than zero.
+/// @param size The size of the allocation request, in bytes.
+/// @param alignment The desired alignment of the returned address. This must be a power of two greater than zero.
 /// @return true if the specified allocation will succeed.
-public_function bool
-OsMemoryArenaCanSatisfyAllocation
+public_function inline bool
+OsHostMemoryArenaCanSatisfyAllocation
 (
-    OS_MEMORY_ARENA *arena, 
-    size_t      alloc_size,
-    size_t alloc_alignment
+    OS_HOST_MEMORY_ARENA *arena, 
+    size_t                 size,
+    size_t            alignment
 )
 {
-    size_t    base_address = size_t(arena->BaseAddress) + arena->NextOffset;
-    size_t aligned_address = OsAlignUp(base_address, alloc_alignment);
-    size_t     alloc_bytes = alloc_size + (aligned_address - base_address);
-    if ((arena->NextOffset + alloc_bytes) > arena->BytesReserved)
-    {   // there's not enough space to satisfy the allocation request.
-        return false;
-    }
-    return true;
+    return OsArenaAllocatorCanSatisfyAllocation(&arena->Allocator, size, alignment);
 }
 
 /// @summary Determine whether a memory allocation request can be satisfied.
@@ -5325,13 +6054,13 @@ OsMemoryArenaCanSatisfyAllocation
 /// @param arena The memory arena to query.
 /// @return true if the specified allocation will succeed.
 template <typename T>
-public_function bool
-OsMemoryArenaCanAllocate
+public_function inline bool
+OsHostMemoryArenaCanAllocate
 (
-    OS_MEMORY_ARENA *arena
+    OS_HOST_MEMORY_ARENA *arena
 )
 {
-    return OsMemoryArenaCanSatisfyAllocation(arena, sizeof(T), std::alignment_of<T>::value);
+    return OsArenaAllocatorCanSatisfyAllocation(&arena->Allocator, sizeof(T), std::alignment_of<T>::value);
 }
 
 /// @summary Determine whether a memory allocation request for an array can be satisfied.
@@ -5341,47 +6070,34 @@ OsMemoryArenaCanAllocate
 /// @return true if the specified allocation will succeed.
 template <typename T>
 public_function inline bool
-OsMemoryArenaCanAllocateArray
+OsHostMemoryArenaCanAllocateArray
 (
-    OS_MEMORY_ARENA *arena,
-    size_t           count
+    OS_HOST_MEMORY_ARENA *arena,
+    size_t                count
 )
 {
-    return OsMemoryArenaCanSatisfyAllocation(arena, sizeof(T) * count, std::alignment_of<T>::value);
+    return OsArenaAllocatorCanSatisfyAllocation(&arena->Allocator, sizeof(T) * count, std::alignment_of<T>::value);
 }
 
 /// @summary Allocate memory from an arena. Additional address space is committed up to the initial reservation size.
 /// @param arena The memory arena to allocate from.
-/// @param alloc_size The minimum number of bytes to allocate.
-/// @param alloc_alignment A power-of-two, greater than or equal to 1, specifying the alignment of the returned address.
+/// @param size The minimum number of bytes to allocate.
+/// @param alignment A power-of-two, greater than or equal to 1, specifying the alignment of the returned address.
 /// @return A pointer to the start of the allocated block, or NULL if the request could not be satisfied.
-public_function void*
-OsMemoryArenaAllocate
+public_function inline void*
+OsHostMemoryArenaAllocate
 (
-    OS_MEMORY_ARENA *arena, 
-    size_t      alloc_size, 
-    size_t alloc_alignment
+    OS_HOST_MEMORY_ARENA *arena, 
+    size_t                 size, 
+    size_t            alignment
 )
 {
-    size_t    base_address = size_t(arena->BaseAddress) + arena->NextOffset;
-    size_t aligned_address = OsAlignUp(base_address, alloc_alignment);
-    size_t     bytes_total = alloc_size + (aligned_address - base_address);
-    if ((arena->NextOffset + bytes_total) > arena->BytesReserved)
-    {   // there's not enough reserved address space to satisfy the request.
-        OsLayerError("ERROR: %S: Insufficient reserved address space to satisfy request.\n", __FUNCTION__);
-        return NULL;
+    OS_MEMORY_RANGE r;
+    if (OsArenaAllocate(&arena->Allocator, size, alignment, r))
+    {   // the allocation was successful. convert offset to address.
+        return (uint8_t*) arena->HostMemory.HostAddress + r.ByteOffset;
     }
-    if ((arena->NextOffset + bytes_total) > arena->BytesCommitted)
-    {   // additional address space needs to be committed.
-        if (VirtualAlloc(arena->BaseAddress + arena->NextOffset, bytes_total, MEM_COMMIT, PAGE_READWRITE) == NULL)
-        {   // there's not enough committed address space to satisfy the request.
-            OsLayerError("ERROR: %S: VirtualAlloc failed to commit address space with result 0x%08X.\n", __FUNCTION__, GetLastError());
-            return NULL;
-        }
-        arena->BytesCommitted = OsAlignUp(arena->NextOffset + bytes_total, arena->PageSize);
-    }
-    arena->NextOffset += bytes_total;
-    return (void*) aligned_address;
+    return NULL;
 }
 
 /// @summary Allocate memory for a structure.
@@ -5389,13 +6105,13 @@ OsMemoryArenaAllocate
 /// @param arena The memory arena to allocate from.
 /// @return A pointer to the new structure, or nullptr if the arena could not satisfy the allocation request.
 template <typename T>
-public_function T*
-OsMemoryArenaAllocate
+public_function inline T*
+OsHostMemoryArenaAllocate
 (
-    OS_MEMORY_ARENA *arena
+    OS_HOST_MEMORY_ARENA *arena
 )
 {
-    return (T*) OsMemoryArenaAllocate(arena, sizeof(T), std::alignment_of<T>::value);
+    return (T*) OsHostMemoryArenaAllocate(arena, sizeof(T), std::alignment_of<T>::value);
 }
 
 /// @summary Allocate memory for an array of structures.
@@ -5404,222 +6120,50 @@ OsMemoryArenaAllocate
 /// @param count The number of items to allocate.
 /// @return A pointer to the start of the array, or nullptr if the arena could not satisfy the allocation request.
 template <typename T>
-public_function T*
-OsMemoryArenaAllocateArray
+public_function inline T*
+OsHostMemoryArenaAllocateArray
 (
-    OS_MEMORY_ARENA *arena, 
-    size_t           count
+    OS_HOST_MEMORY_ARENA *arena, 
+    size_t                count
 )
 {
-    return (T*) OsMemoryArenaAllocate(arena, sizeof(T) * count, std::alignment_of<T>::value);
-}
-
-/// @summary Reserve memory within an arena. Additional address space is committed up to the initial OS reservation size. Use MemoryArenaCommit to commit the number of bytes actually used.
-/// @param arena The memory arena to allocate from.
-/// @param reserve_size The number of bytes to reserve for the active allocation.
-/// @param alloc_alignment A power-of-two, greater than or equal to 1, specifying the alignment of the returned address.
-/// @return A pointer to the start of the allocated block, or NULL if the request could not be satisfied.
-public_function void*
-OsMemoryArenaReserve
-(
-    OS_MEMORY_ARENA *arena, 
-    size_t    reserve_size, 
-    size_t alloc_alignment
-)
-{
-    if (arena->ReserveAlignBytes != 0 || arena->ReserveTotalBytes != 0)
-    {   // there's an existing reservation, which must be committed or canceled first.
-        OsLayerError("ERROR: %S: Cannot reserve with existing active reservation.\n", __FUNCTION__);
-        return NULL;
-    }
-    size_t base_address    = size_t(arena->BaseAddress) + arena->NextOffset;
-    size_t aligned_address = OsAlignUp(base_address, alloc_alignment);
-    size_t bytes_total     = reserve_size + (aligned_address - base_address);
-    if ((arena->NextOffset + bytes_total) > arena->BytesReserved)
-    {   // there's not enough reserved address space to satisfy the request.
-        OsLayerError("ERROR: %S: Insufficient reserved address space to satisfy request.\n", __FUNCTION__);
-        return NULL;
-    }
-    if ((arena->NextOffset + bytes_total) > arena->BytesCommitted)
-    {   // additional address space needs to be committed.
-        if (VirtualAlloc(arena->BaseAddress + arena->NextOffset, bytes_total, MEM_COMMIT, PAGE_READWRITE) == NULL)
-        {   // there's not enough committed address space to satisfy the request.
-            OsLayerError("ERROR: %S: VirtualAlloc failed to commit address space with result 0x%08X.\n", __FUNCTION__, GetLastError());
-            return NULL;
-        }
-        arena->BytesCommitted = OsAlignUp(arena->NextOffset + bytes_total, arena->PageSize);
-    }
-    arena->ReserveAlignBytes = aligned_address - base_address;
-    arena->ReserveTotalBytes = bytes_total;
-    return (void*) aligned_address;
-}
-
-/// @summary Reserve storage for an array of items within an arena. The reservation may later be committed or canceled.
-/// @typeparam T The type of array element. This type is used to determine the required alignment.
-/// @param arena The memory arena to allocate from.
-/// @param count The number of elements in the array.
-/// @return A pointer to the start of the reservation, or nullptr if the arena could not satisfy the reservation request.
-template <typename T>
-public_function T*
-OsMemoryArenaReserveArray
-(
-    OS_MEMORY_ARENA *arena, 
-    size_t           count
-)
-{
-    return (T*) OsMemoryArenaReserve(arena, sizeof(T) * count, std::alignment_of<T>::value);
-}
-
-/// @summary Commits the active reservation within the memory arena.
-/// @param arena The memory arena maintaining the reservation.
-/// @param commit_size The number of bytes to commit, which must be less than or equal to the reservation size.
-/// @return Zero if the commit is successful, or -1 if the commit size is invalid.
-public_function int
-OsMemoryArenaCommit
-(
-    OS_MEMORY_ARENA *arena, 
-    size_t     commit_size
-)
-{
-    if (commit_size == 0)
-    {   // cancel the reservation; don't commit any space.
-        arena->ReserveAlignBytes = 0;
-        arena->ReserveTotalBytes = 0;
-        return 0;
-    }
-    if (commit_size <= (arena->ReserveTotalBytes - arena->ReserveAlignBytes))
-    {   // the commit size is valid, so commit the space.
-        arena->NextOffset       += arena->ReserveAlignBytes + commit_size;
-        arena->ReserveAlignBytes = 0;
-        arena->ReserveTotalBytes = 0;
-        return 0;
-    }
-    else
-    {   // the commit size is not valid, so cancel the outstanding reservation.
-        OsLayerError("ERROR: %S: Invalid commit size %Iu (expected <= %Iu); cancelling reservation.\n", __FUNCTION__, commit_size, arena->ReserveTotalBytes-arena->ReserveAlignBytes);
-        arena->ReserveAlignBytes = 0;
-        arena->ReserveTotalBytes = 0;
-        return -1;
-    }
-}
-
-/// @summary Commit the active memory reservation, marking some or all of the reserved space as allocated.
-/// @typeparam T The type of array element. This type is used to determine the required alignment.
-/// @param arena The memory arena maintaining the reservation.
-/// @param count The number of array elements to commit. Specify 0 to cancel the outstanding reservation (the memory is marked unallocated.)
-/// @return Zero if the commit is successful, or -1 if the commit size is invalid.
-template <typename T>
-public_function int
-OsMemoryArenaCommitArray
-(
-    OS_MEMORY_ARENA *arena, 
-    size_t           count
-)
-{
-    return OsMemoryArenaCommit(arena, sizeof(T) * count, std::alignment_of<T>::value);
-}
-
-/// @summary Cancel the active memory arena reservation, indicating that the returned memory block will not be used.
-/// @param arena The memory arena maintaining the reservation to be cancelled.
-public_function void
-OsMemoryArenaCancel
-(
-    OS_MEMORY_ARENA *arena
-)
-{
-    arena->ReserveAlignBytes = 0;
-    arena->ReserveTotalBytes = 0;
+    return (T*) OsHostMemoryArenaAllocate(arena, sizeof(T) * count, std::alignment_of<T>::value);
 }
 
 /// @summary Retrieve an exact marker that can be used to reset or decommit the arena, preserving all current allocations.
 /// @param arena The memory arena to query.
 /// @return The marker representing the byte offset of the next allocation.
-public_function os_arena_marker_t
-OsMemoryArenaMark
+public_function inline os_arena_marker_t
+OsHostMemoryArenaMark
 (
-    OS_MEMORY_ARENA *arena
+    OS_HOST_MEMORY_ARENA *arena
 )
 {
-    return os_arena_marker_t(arena->NextOffset);
+    return OsArenaMark(&arena->Allocator);
 }
 
 /// @summary Resets the state of the arena back to a marker, without decommitting any memory.
 /// @param arena The memory arena to reset.
-/// @param arena_marker The marker value returned by OsMemoryArenaMark().
-public_function void
-OsMemoryArenaResetToMarker
+/// @param arena_marker The marker value returned by OsHostMemoryArenaMark().
+public_function inline void
+OsHostMemoryArenaResetToMarker
 (
-    OS_MEMORY_ARENA         *arena,
+    OS_HOST_MEMORY_ARENA    *arena,
     os_arena_marker_t arena_marker
 )
 {
-    if (size_t(arena_marker) <= arena->NextOffset)
-    {
-        arena->NextOffset = (size_t) arena_marker;
-        arena->ReserveAlignBytes = 0;
-        arena->ReserveTotalBytes = 0;
-    }
+    OsArenaResetToMarker(&arena->Allocator, arena_marker);
 }
 
 /// @summary Resets the state of the arena to empty, without decomitting any memory.
 /// @param arena The memory arena to reset.
-public_function void
-OsMemoryArenaReset
+public_function inline void
+OsHostMemoryArenaReset
 (
-    OS_MEMORY_ARENA *arena
+    OS_HOST_MEMORY_ARENA *arena
 )
 {
-    arena->NextOffset = 0;
-    arena->ReserveAlignBytes = 0;
-    arena->ReserveTotalBytes = 0;
-}
-
-/// @summary Decommit memory within an arena back to a previously retrieved marker.
-/// @param arena The memory arena to decommit.
-/// @param arena_marker The marker value returned by OsMemoryArenaMark().
-public_function void
-OsMemoryArenaDecommitToMarker
-(
-    OS_MEMORY_ARENA         *arena, 
-    os_arena_marker_t arena_marker
-)
-{
-    if (size_t(arena_marker) < arena->NextOffset)
-    {   // VirtualFree will decommit any page with at least one byte in the 
-        // address range [arena->BaseAddress+arena_marker, arena->BaseAddress+arena->BytesCommitted].
-        // since the marker might appear within a page, round the address up to the next page boundary.
-        // this avoids decommitting a page that is still partially allocated.
-        size_t last_page  = size_t(arena->BaseAddress) + arena->BytesCommitted;
-        size_t mark_page  = size_t(arena->BaseAddress) + size_t(arena_marker);
-        size_t next_page  = OsAlignUp(mark_page, arena->PageSize);
-        size_t free_size  = last_page - next_page;
-        arena->NextOffset = size_t(arena_marker);
-        arena->ReserveAlignBytes = 0;
-        arena->ReserveTotalBytes = 0;
-        if (free_size > 0)
-        {   // the call will decommit at least one page.
-            VirtualFree((void*) next_page, free_size, MEM_DECOMMIT);
-            arena->BytesCommitted -= free_size;
-        }
-    }
-}
-
-/// @summary Decommit all of the pages within a memory arena, without releasing the address space reservation.
-/// @param arena The memory arena to decommit.
-public_function void
-OsMemoryArenaDecommit
-(
-    OS_MEMORY_ARENA *arena
-)
-{
-    if (arena->BytesCommitted > 0)
-    {   // decommit the entire committed region of address space.
-        VirtualFree(arena->BaseAddress, 0, MEM_DECOMMIT);
-        arena->NextOffset = 0;
-        arena->BytesCommitted = 0;
-        arena->ReserveAlignBytes = 0;
-        arena->ReserveTotalBytes = 0;
-    }
+    OsArenaReset(&arena->Allocator);
 }
 
 /// @summary Retrieve a high-resolution timestamp value.
@@ -5708,24 +6252,24 @@ OsNanosecondsToWholeMilliseconds
 
 /// @summary Enumerate all CPU resources of the host system.
 /// @param cpu_info The structure to populate with information about host CPU resources.
-/// @param arena The memory arena used to allocate temporary memory. The temporary memory is freed before the function returns.
+/// @param scratch_mem Temporary scratch memory to use while enumerating CPU resources.
 /// @return true if the host CPU information was successfully retrieved.
 public_function bool
 OsQueryHostCpuLayout
 (
-    OS_CPU_INFO  *cpu_info, 
-    OS_MEMORY_ARENA *arena
+    OS_CPU_INFO       *cpu_info, 
+    OS_MEMORY_RANGE scratch_mem
 )
 {
     SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *lpibuf = NULL;
     SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *info   = NULL;
-    os_arena_marker_t mm = OsMemoryArenaMark(arena);
-    size_t     alignment = std::alignment_of<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>::value;
-    size_t     smt_count = 0;
-    uint8_t     *bufferp = NULL;
-    uint8_t     *buffere = NULL;
-    DWORD    buffer_size = 0;
-    int          regs[4] ={0, 0, 0, 0};
+    OS_HOST_MEMORY_ARENA arena = {};
+    size_t           alignment = OsAlignmentOfType<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>();
+    size_t           smt_count = 0;
+    uint8_t           *bufferp = NULL;
+    uint8_t           *buffere = NULL;
+    DWORD          buffer_size = 0;
+    int                regs[4] ={0, 0, 0, 0};
 
     // zero out the CPU information returned to the caller.
     ZeroMemory(cpu_info, sizeof(OS_CPU_INFO));
@@ -5744,7 +6288,7 @@ OsQueryHostCpuLayout
 
     // figure out the amount of space required, and allocate a temporary buffer:
     GetLogicalProcessorInformationEx(RelationAll, NULL, &buffer_size);
-    if (!OsMemoryArenaCanSatisfyAllocation(arena, buffer_size, alignment))
+    if (scratch_mem.SizeInBytes < (buffer_size + (alignment - 1)))
     {
         OsLayerError("ERROR: %S: Insufficient memory to query host CPU layout.\n", __FUNCTION__);
         cpu_info->NumaNodes       = 1;
@@ -5754,7 +6298,8 @@ OsQueryHostCpuLayout
         cpu_info->ThreadsPerCore  = 1;
         return false;
     }
-    lpibuf = (SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*) OsMemoryArenaAllocate(arena, buffer_size, alignment);
+    OsCreateHostMemoryArena(&arena, scratch_mem);
+    lpibuf = (SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*) OsHostMemoryArenaAllocate(arena, buffer_size, alignment);
     GetLogicalProcessorInformationEx(RelationAll, lpibuf, &buffer_size);
 
     // initialize the output counts:
@@ -5792,8 +6337,6 @@ OsQueryHostCpuLayout
         }
         bufferp += size_t(info->Size);
     }
-    // free the temporary buffer:
-    OsMemoryArenaResetToMarker(arena, mm);
 
     // determine the total number of logical processors in the system.
     // use this value to figure out the number of threads per-core.
@@ -5875,9 +6418,9 @@ OsAllocationSizeForTaskScheduler
         num_bytes  += OsAllocationSizeForTaskPoolType(&pool_types[i]) * pool_types[i].PoolCount;
         pool_count += pool_types[i].PoolCount;
     }
-    num_bytes += OsAllocationSizeForArray<OS_TASK_POOL      >(pool_count);
-    num_bytes += OsAllocationSizeForArray<OS_MEMORY_ARENA   >(pool_count);
-    num_bytes += OsAllocationSizeForArray<OS_IO_REQUEST_POOL>(pool_count);
+    num_bytes += OsAllocationSizeForArray<OS_TASK_POOL        >(pool_count);
+    num_bytes += OsAllocationSizeForArray<OS_HOST_MEMORY_ARENA>(pool_count);
+    num_bytes += OsAllocationSizeForArray<OS_IO_REQUEST_POOL  >(pool_count);
     num_bytes += OsAllocationSizeForArray<unsigned int>(init->WorkerThreadCount);
     num_bytes += OsAllocationSizeForArray<HANDLE      >(init->WorkerThreadCount);
     num_bytes += OsAllocationSizeForArray<HANDLE      >(init->WorkerThreadCount);
@@ -6050,7 +6593,7 @@ OsTaskSchedulerThreadMain
                         OS_TASK_DATA  *task = &taskenv.TaskPool->TaskPoolList[tsrc].TaskPoolData[tidx];
 
                         // set up the work environment and execute the task.
-                        OsMemoryArenaReset(taskenv.LocalMemory);
+                        OsHostMemoryArenaReset(taskenv.LocalMemory);
                         task->TaskMain(work_item, task->TaskData, &taskenv);
                         OsCompleteTask(&taskenv, work_item);
 
@@ -6073,46 +6616,45 @@ OsTaskSchedulerThreadMain
 /// @summary Create a new task scheduler instance. The calling thread is blocked until all worker threads are initialized.
 /// @param scheduler The OS_TASK_SCHEDULER to initialize.
 /// @param init An OS_TASK_SCHEDULER_INIT structure describing the task scheduler configuration.
-/// @param arena An OS_MEMORY_ARENA used to allocate basic task scheduler data.
 /// @return Zero if the task scheduler is successfully initialized, or -1 if an error occurred.
 public_function int
 OsCreateTaskScheduler
 (
     OS_TASK_SCHEDULER *scheduler, 
     OS_TASK_SCHEDULER_INIT *init, 
-    OS_MEMORY_ARENA       *arena, 
     char const             *name
 )
 {
-    os_arena_marker_t  mem_marker = OsMemoryArenaMark(arena);
-    size_t         bytes_required = OsAllocationSizeForTaskScheduler(init);
-    size_t         align_required = std::alignment_of<OS_TASK_SCHEDULER_INIT>::value;
-    uint32_t             *id_list = NULL;
-    OS_TASK_POOL     **free_lists = NULL;
-    CRITICAL_SECTION  *list_locks = NULL;
-    OS_TASK_POOL       *pool_list = NULL;
-    OS_MEMORY_ARENA   *arena_list = NULL;
-    OS_IO_REQUEST_POOL *iorp_list = NULL;
-    unsigned int      *thread_ids = NULL;
-    HANDLE        *thread_handles = NULL;
-    HANDLE          *thread_ready = NULL;
-    HANDLE          *thread_error = NULL;
-    HANDLE           *thread_iocp = NULL;
-    CV_PROVIDER      *cv_provider = NULL;
-    CV_MARKERSERIES    *cv_series = NULL;
-    HRESULT             cv_result = S_OK;
-    char              cv_name[64] = {};
-    OS_MEMORY_ARENA    global_mem = {};
-    OS_CPU_INFO          cpu_info = {};
-    size_t           thread_count = 0;
-    size_t             pool_count = 0;
-    size_t             pool_index = 0;
-    size_t      worker_pool_index = 0;
-    uint32_t       worker_pool_id = 0;
-    bool        found_worker_pool = false;
+    OS_HOST_MEMORY_ALLOCATION  *memory = NULL;
+    uint32_t                  *id_list = NULL;
+    OS_TASK_POOL          **free_lists = NULL;
+    CRITICAL_SECTION       *list_locks = NULL;
+    OS_TASK_POOL            *pool_list = NULL;
+    OS_HOST_MEMORY_ARENA   *arena_list = NULL;
+    OS_IO_REQUEST_POOL      *iorp_list = NULL;
+    unsigned int           *thread_ids = NULL;
+    HANDLE             *thread_handles = NULL;
+    HANDLE               *thread_ready = NULL;
+    HANDLE               *thread_error = NULL;
+    HANDLE                *thread_iocp = NULL;
+    CV_PROVIDER           *cv_provider = NULL;
+    CV_MARKERSERIES         *cv_series = NULL;
+    HRESULT                  cv_result = S_OK;
+    char                   cv_name[64] = {};
+    OS_HOST_MEMORY_ARENA    global_mem = {};
+    OS_HOST_MEMORY_ARENA scheduler_mem = {};
+    OS_MEMORY_RANGE            all_mem = {};
+    OS_CPU_INFO               cpu_info = {};
+    size_t              bytes_required = 0;
+    size_t                thread_count = 0;
+    size_t                  pool_count = 0;
+    size_t                  pool_index = 0;
+    size_t           worker_pool_index = 0;
+    uint32_t            worker_pool_id = 0;
+    bool             found_worker_pool = false;
 
     // initialize the fields of the OS_TASK_SCHEDULER object.
-    ZeroMemory(scheduler, sizeof(OS_TASK_SCHEDULER));
+    OsZeroMemory(scheduler, sizeof(OS_TASK_SCHEDULER));
 
     // count the total nuber of task pools that will be created, and locate the pool to use for the worker threads.
     // only one pool type should be marked as being used for worker threads.
@@ -6167,22 +6709,69 @@ OsCreateTaskScheduler
         OsLayerError("ERROR: %S(%u): Cannot create scheduler with zero task pools.\n", __FUNCTION__, GetCurrentThreadId());
         return -1;
     }
-
-    // make sure we have enough memory and initialize the Concurrency Visualizer objects.
-    if (!OsMemoryArenaCanSatisfyAllocation(arena, bytes_required, align_required))
+    if (init->SchedulerMemoryPool == NULL)
     {
-        OsLayerError("ERROR: %S(%u): Insufficient memory to create task scheduler (%Iu bytes required.)\n", __FUNCTION__, GetCurrentThreadId(), bytes_required);
+        OsLayerError("ERROR: %S(%u): No host memory pool provided to scheduler.\n", __FUNCTION__, GetCurrentThreadId());
         return -1;
     }
-    if (!OsQueryHostCpuLayout(&cpu_info, arena))
+
+    // determine the total amount of memory required for all scheduler data, 
+    // and acquire a single host memory allocation of at least that size.
+    // bytes_required is a worst-case value; it may not be 100% used.
+    size_t vmalign  = init->SchedulerMemoryPool->Granularity;
+    bytes_required  = 0;
+    bytes_required += OsAllocationSizeForArray<uint32_t            >(init->PoolTypeCount);     // OS_TASK_SCHEDULER::PoolIdList.
+    bytes_required += OsAllocationSizeForArray<OS_TASK_POOL       *>(init->PoolTypeCount);     // OS_TASK_SCHEDULER::PoolFreeLists.
+    bytes_required += OsAllocationSizeForArray<CRITICAL_SECTION    >(init->PoolTypeCount);     // OS_TASK_SCHEDULER::PoolFreeListLocks.
+    bytes_required += OsAllocationSizeForArray<OS_TASK_POOL        >(pool_count);              // OS_TASK_SCHEDULER::TaskPoolList.
+    bytes_required += OsAllocationSizeForArray<OS_HOST_MEMORY_ARENA>(pool_count);              // OS_TASK_SCHEDULER::TaskPoolArenas.
+    bytes_required += OsAllocationSizeForArray<OS_IO_REQUEST_POOL  >(pool_count);              // OS_TASK_SCHEDULER::TaskIoRequestPools.
+    bytes_required += OsAllocationSizeForArray<unsigned int        >(init->WorkerThreadCount); // OS_TASK_SCHEDULER::WorkerThreadIds.
+    bytes_required += OsAllocationSizeForArray<HANDLE              >(init->WorkerThreadCount); // OS_TASK_SCHEDULER::WorkerThreadHandle.
+    bytes_required += OsAllocationSizeForArray<HANDLE              >(init->WorkerThreadCount); // OS_TASK_SCHEDULER::WorkerThreadReady.
+    bytes_required += OsAllocationSizeForArray<HANDLE              >(init->WorkerThreadCount); // OS_TASK_SCHEDULER::WorkerThreadError.
+    bytes_required += OsAllocationSizeForArray<HANDLE              >(init->WorkerThreadCount); // OS_TASK_SCHEDULER::WorkerThreadPort.
+    if (init->GlobalMemorySize > 0)
+    {   // include the global memory in the total.
+        // the global memory must have the same alignment as a VMM allocation (typically 64KB).
+        bytes_required += init->GlobalMemorySize + (vmalign - 1);
+    }
+    for (size_t  i  = 0, n = init->PoolTypeCount; i < n; ++i)
+    {
+        size_t type_nbytes = 0;
+        type_nbytes       += OsAllocationSizeForArray<OS_TASK_POOL::atomic_u8_t>(init->TaskPoolTypes[i].MaxActiveTasks); // OS_TASK_POOL::SlotStatus.
+        type_nbytes       += OsAllocationSizeForArray<OS_TASK_DATA             >(init->TaskPoolTypes[i].MaxActiveTasks); // OS_TASK_POOL::TaskPoolData.
+        type_nbytes       += OsAllocationSizeForArray<os_task_id_t             >(init->TaskPoolTypes[i].MaxActiveTasks); // OS_TASK_POOL::WorkQueue::TaskIds.
+        if (init->TaskPoolTypes[i].MaxIoRequests > 0)
+        {   // include storage for an I/O request pool in the total.
+            type_nbytes   += OsAllocationSizeForArray<OS_IO_REQUEST            >(init->TaskPoolTypes[i].MaxIoRequests ); // OS_IO_REQUEST_POOL::NodePool.
+        }
+        if (init->TaskPoolTypes[i].LocalMemorySize > 0)
+        {   // include the pool-local memory in the total.
+            // the local memory must have the same alignment as a VMM allocation (typically 64KB).
+            type_nbytes   += init->TaskPoolTypes[i].LocalMemorySize + (vmalign - 1);
+        }
+        bytes_required    += type_nbytes * init->TaskPoolTypes[i].PoolCount;
+    }
+
+    // acquire a single contiguous memory allocation from the pool.
+    if ((memory = OsHostMemoryPoolAllocate(init->SchedulerMemoryPool, bytes_required, bytes_required, OS_HOST_MEMORY_ALLOCATION_FLAGS_READWRITE)) == NULL)
+    {
+        OsLayerError("ERROR: %S(%u): Failed to allocate %Iu bytes of host memory for task scheduler.\n", __FUNCTION__, GetCurrentThreadId(), bytes_required);
+        goto cleanup_and_fail;
+    }
+    // initialize an arena allocator so we can sub-allocate from the main host memory allocation.
+    if (OsCreateHostMemoryArena(&scheduler_mem, OsInitHostMemoryRange(memory)) < 0)
+    {
+        OsLayerError("ERROR: %S(%u): Failed to initialize host memory arena for task scheduler.\n", __FUNCTION__, GetCurrentThreadId());
+        goto cleanup_and_fail;
+    }
+
+    // query the host CPU layout and initialize the Concurrency Visualizer objects.
+    if (!OsQueryHostCpuLayout(&cpu_info, OsInitHostMemoryRange(memory)))
     {
         OsLayerError("ERROR: %S(%u): Unable to query the layout of the host CPU.\n", __FUNCTION__, GetCurrentThreadId());
-        return -1;
-    }
-    if (init->GlobalMemorySize > 0 && OsCreateMemoryArena(&global_mem, init->GlobalMemorySize, true, true) < 0)
-    {
-        OsLayerError("ERROR: %S(%u): Unable to allocate scheduler global memory arena.\n", __FUNCTION__, GetCurrentThreadId());
-        return -1;
+        goto cleanup_and_fail;
     }
     if (name == NULL)
     {   // Concurrency Visualizer SDK requires a non-NULL string.
@@ -6191,22 +6780,38 @@ OsCreateTaskScheduler
     if (!SUCCEEDED((cv_result = CvInitProvider(&TaskProfilerGUID, &cv_provider))))
     {
         OsLayerError("ERROR: %S(%u): Unable to initialize task profiler provider (HRESULT 0x%08X).\n", __FUNCTION__, GetCurrentThreadId(), cv_result);
-        return -1;
+        goto cleanup_and_fail;
     }
     if (!SUCCEEDED((cv_result = CvCreateMarkerSeriesA(cv_provider, name, &cv_series))))
     {
         OsLayerError("ERROR: %S(%u): Unable to create task profiler marker series (HRESULT 0x%08X).\n", __FUNCTION__, GetCurrentThreadId(), cv_result);
-        CvReleaseProvider(cv_provider);
-        return -1;
+        goto cleanup_and_fail;
+    }
+
+    // allocate the scheduler global memory, shared between all workers, and 
+    // the initialize a memory arena to sub-allocate from it.
+    if (init->GlobalMemorySize > 0)
+    {
+        void *gmem = OsHostMemoryArenaAllocate(&scheduler_mem, init->GlobalMemorySize, vmalign);
+        if   (gmem == NULL)
+        {
+            OsLayerError("ERROR: %S(%u): Failed to allocate global memory of %Iu bytes with alignment %Iu.\n", __FUNCTION__, GetCurrentThreadId(), init->GlobalMemorySize, vmalign);
+            goto cleanup_and_fail;
+        }
+        if (OsCreateHostMemoryArena(&global_mem, OsInitHostMemoryRange(gmem, init->GlobalMemorySize)) < 0)
+        {
+            OsLayerError("ERROR: %S(%u): Failed to initialize global memory arena.\n", __FUNCTION__, GetCurrentThreadId());
+            goto cleanup_and_fail;
+        }
     }
 
     // allocate memory for the various scheduler lists.
-    id_list      = OsMemoryArenaAllocateArray<uint32_t          >(arena, init->PoolTypeCount);
-    free_lists   = OsMemoryArenaAllocateArray<OS_TASK_POOL*     >(arena, init->PoolTypeCount);
-    list_locks   = OsMemoryArenaAllocateArray<CRITICAL_SECTION  >(arena, init->PoolTypeCount);
-    pool_list    = OsMemoryArenaAllocateArray<OS_TASK_POOL      >(arena, pool_count);
-    arena_list   = OsMemoryArenaAllocateArray<OS_MEMORY_ARENA   >(arena, pool_count);
-    iorp_list    = OsMemoryArenaAllocateArray<OS_IO_REQUEST_POOL>(arena, pool_count);
+    id_list      = OsHostMemoryArenaAllocateArray<uint32_t          >(&scheduler_mem, init->PoolTypeCount);
+    free_lists   = OsHostMemoryArenaAllocateArray<OS_TASK_POOL*     >(&scheduler_mem, init->PoolTypeCount);
+    list_locks   = OsHostMemoryArenaAllocateArray<CRITICAL_SECTION  >(&scheduler_mem, init->PoolTypeCount);
+    pool_list    = OsHostMemoryArenaAllocateArray<OS_TASK_POOL      >(&scheduler_mem, pool_count);
+    arena_list   = OsHostMemoryArenaAllocateArray<OS_MEMORY_ARENA   >(&scheduler_mem, pool_count);
+    iorp_list    = OsHostMemoryArenaAllocateArray<OS_IO_REQUEST_POOL>(&scheduler_mem, pool_count);
     if (id_list == NULL || free_lists == NULL || list_locks == NULL || pool_list == NULL || arena_list == NULL || iorp_list == NULL)
     {
         OsLayerError("ERROR: %S(%u): Failed to allocate memory for task scheduler.\n", __FUNCTION__, GetCurrentThreadId());
@@ -6222,11 +6827,11 @@ OsCreateTaskScheduler
     // allocate memory for the worker thread pool.
     if (init->WorkerThreadCount > 0)
     {
-        thread_ids      = OsMemoryArenaAllocateArray<unsigned int>(arena, init->WorkerThreadCount);
-        thread_handles  = OsMemoryArenaAllocateArray<HANDLE>(arena, init->WorkerThreadCount);
-        thread_ready    = OsMemoryArenaAllocateArray<HANDLE>(arena, init->WorkerThreadCount);
-        thread_error    = OsMemoryArenaAllocateArray<HANDLE>(arena, init->WorkerThreadCount);
-        thread_iocp     = OsMemoryArenaAllocateArray<HANDLE>(arena, init->WorkerThreadCount);
+        thread_ids      = OsHostMemoryArenaAllocateArray<unsigned int>(&scheduler_mem, init->WorkerThreadCount);
+        thread_handles  = OsHostMemoryArenaAllocateArray<HANDLE>(&scheduler_mem, init->WorkerThreadCount);
+        thread_ready    = OsHostMemoryArenaAllocateArray<HANDLE>(&scheduler_mem, init->WorkerThreadCount);
+        thread_error    = OsHostMemoryArenaAllocateArray<HANDLE>(&scheduler_mem, init->WorkerThreadCount);
+        thread_iocp     = OsHostMemoryArenaAllocateArray<HANDLE>(&scheduler_mem, init->WorkerThreadCount);
         if (thread_ids == NULL || thread_handles == NULL || thread_ready == NULL || thread_error == NULL || thread_iocp == NULL)
         {
             OsLayerError("ERROR: %S(%u): Failed to allocate memory for task scheduler thread pool.\n", __FUNCTION__, GetCurrentThreadId());
@@ -6248,7 +6853,7 @@ OsCreateTaskScheduler
         for (size_t pool_idx = 0, npools = pool_def.PoolCount; pool_idx < npools; ++pool_idx)
         {
             OS_TASK_POOL *pool    = &pool_list[pool_index];
-            pool->SlotStatus      = OsMemoryArenaAllocateArray<OS_TASK_POOL::atomic_u8_t>(arena, pool_def.MaxActiveTasks);
+            pool->SlotStatus      = OsHostMemoryArenaAllocateArray<OS_TASK_POOL::atomic_u8_t>(&scheduler_mem, pool_def.MaxActiveTasks);
             pool->IndexMask       =(uint32_t) (pool_def.MaxActiveTasks - 1);
             pool->NextIndex       = 0;
             pool->PoolIndex       =(uint32_t)  pool_index;
@@ -6259,7 +6864,7 @@ OsCreateTaskScheduler
             pool->NextWorker      = 0;
             pool->WorkerCount     =(uint16_t)  init->WorkerThreadCount;
             pool->TaskPoolList    = pool_list;
-            pool->TaskPoolData    = OsMemoryArenaAllocateArray<OS_TASK_DATA>(arena, pool_def.MaxActiveTasks);
+            pool->TaskPoolData    = OsHostMemoryArenaAllocateArray<OS_TASK_DATA>(&scheduler_mem, pool_def.MaxActiveTasks);
             pool->NextFreePool    = free_lists[type_idx];
             free_lists[type_idx]  = pool;
             if (pool->SlotStatus == NULL || pool->TaskPoolData == NULL)
@@ -6267,20 +6872,29 @@ OsCreateTaskScheduler
                 OsLayerError("ERROR: %S(%u): Failed to allocate task pool memory.\n", __FUNCTION__, GetCurrentThreadId());
                 goto cleanup_and_fail;
             }
-            if (pool_def.MaxIoRequests > 0 && OsCreateIoRequestPool(&iorp_list[pool_index], arena, pool_def.MaxIoRequests) < 0)
+            if (pool_def.MaxIoRequests > 0 && OsCreateIoRequestPool(&iorp_list[pool_index], &scheduler_mem, pool_def.MaxIoRequests) < 0)
             {
                 OsLayerError("ERROR: %S(%u): Failed to allocate I/O request pool for task pool.\n", __FUNCTION__, GetCurrentThreadId());
                 goto cleanup_and_fail;
             }
-            if (OsCreateTaskQueue(&pool->WorkQueue, pool_def.MaxActiveTasks, arena) < 0)
+            if (OsCreateTaskQueue(&pool->WorkQueue, pool_def.MaxActiveTasks, &scheduler_mem) < 0)
             {
                 OsLayerError("ERROR: %S(%u): Failed to allocate task pool work queue.\n", __FUNCTION__, GetCurrentThreadId());
                 goto cleanup_and_fail;
             }
-            if (pool_def.LocalMemorySize > 0 && OsCreateMemoryArena(&arena_list[pool_index], pool_def.LocalMemorySize, true, true) < 0)
-            {
-                OsLayerError("ERROR: %S(%u): Failed to allocate thread-local memory arena for task pool.\n", __FUNCTION__, GetCurrentThreadId());
-                goto cleanup_and_fail;
+            if (pool_def.LocalMemorySize > 0)
+            {   // allocate pool-local memory and initialize a memory arena.
+                void *lmem  = OsHostMemoryAllocate(&scheduler_mem, pool_def.LocalMemorySize, vmalign);
+                if   (lmem == NULL)
+                {
+                    OsLayerError("ERROR: %S(%u): Failed to allocate %Iu bytes of thread-local memory with alignment %Iu for task pool.\n", __FUNCTION__, GetCurrentThreadId(), pool_def.LocalMemorySize, vmalign);
+                    goto cleanup_and_fail;
+                }
+                if (OsCreateHostMemoryArena(&arena_list[pool_index], OsInitHostMemoryRange(lmem, pool_def.LocalMemorySize)) < 0)
+                {
+                    OsLayerError("ERROR: %S(%u): Failed to initialize local memory arena task pool.\n", __FUNCTION__, GetCurrentThreadId(), pool_def.LocalMemorySize, vmalign);
+                    goto cleanup_and_fail;
+                }
             }
             ZeroMemory(pool->SlotStatus  , pool_def.MaxActiveTasks * sizeof(OS_TASK_POOL::atomic_u8_t));
             ZeroMemory(pool->TaskPoolData, pool_def.MaxActiveTasks * sizeof(OS_TASK_DATA));
@@ -6309,6 +6923,9 @@ OsCreateTaskScheduler
     scheduler->TaskContextData           = init->TaskContextData;
     scheduler->TaskProfiler.Provider     = cv_provider;
     scheduler->TaskProfiler.MarkerSeries = cv_series;
+    scheduler->SchedulerArena            = scheduler_mem;
+    scheduler->SchedulerMemory           = memory;
+    scheduler->SchedulerMemoryPool       = init->SchedulerMemoryPool;
 
     // set up the worker init structure and spawn all worker threads in the pool.
     for (size_t thread_idx = 0, nthreads = init->WorkerThreadCount; thread_idx < nthreads; ++thread_idx)
@@ -6403,23 +7020,14 @@ cleanup_and_fail:
             DeleteCriticalSection(&list_locks[i]);
         }
     }
-    if (pool_index > 0)
-    {   // free all of the thread-local memory arenas.
-        for (size_t i = 0, n = pool_index; i < n; ++i)
-        {
-            OsDeleteMemoryArena(&arena_list[i]);
-        }
-    }
     // clean up the task profiler objects.
     if (cv_series) CvReleaseMarkerSeries(cv_series);
     if (cv_provider) CvReleaseProvider(cv_provider);
-    // free the global memory arena.
-    if (init->GlobalMemorySize > 0)
-    {
-        OsDeleteMemoryArena(&global_mem);
-    }
     // reset the state of the memory arena.
-    OsMemoryArenaResetToMarker(arena, mem_marker);
+    if (memory != NULL)
+    {   // return all allocated memory back to the source pool.
+        OsHostMemoryPoolRelease(init->SchedulerMemoryPool, memory);
+    }
     // reset all fields of the OS_TASK_SCHEDULER instance.
     ZeroMemory(scheduler, sizeof(OS_TASK_SCHEDULER));
     return -1;
@@ -6457,13 +7065,6 @@ OsDestroyTaskScheduler
             CloseHandle(scheduler->WorkerThreadReady[i]);
         }
     }
-    if (scheduler->TaskPoolCount > 0)
-    {   // destroy all of the thread-local memory arenas.
-        for (size_t i = 0, n = scheduler->TaskPoolCount; i < n; ++i)
-        {
-            OsDeleteMemoryArena(&scheduler->TaskPoolArenas[i]);
-        }
-    }
     if (scheduler->PoolTypeCount > 0)
     {   // delete all of the task pool free list critical sections.
         for (size_t i = 0, n = scheduler->PoolTypeCount; i < n; ++i)
@@ -6476,7 +7077,10 @@ OsDestroyTaskScheduler
         CvReleaseMarkerSeries(scheduler->TaskProfiler.MarkerSeries);
         CvReleaseProvider(scheduler->TaskProfiler.Provider);
     }
-    OsDeleteMemoryArena(&scheduler->GlobalMemoryArena);
+    if (scheduler->SchedulerMemory != NULL)
+    {   // release the memory back to the pool.
+        OsHostMemoryPoolRelease(scheduler->SchedulerMemoryPool, scheduler->SchedulerMemory);
+    }
     ZeroMemory(scheduler, sizeof(OS_TASK_SCHEDULER));
 }
 
